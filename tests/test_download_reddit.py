@@ -108,3 +108,146 @@ def test_stats_per_year(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "2020" in out and "2021" in out
     assert "           2" in out
+
+
+# --------------------------------------------------------------------------- #
+# pipeline (download -> filter -> delete raw), with aria2 faked
+# --------------------------------------------------------------------------- #
+
+
+def _write_zst(path, records):
+    zstandard = pytest.importorskip("zstandard")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = "".join(json.dumps(r) + "\n" for r in records).encode()
+    path.write_bytes(zstandard.ZstdCompressor().compress(data))
+
+
+def _read_zst(path):
+    return [json.loads(line) for line in dr.iter_zst_lines(path)]
+
+
+@pytest.fixture
+def pipeline_env(tmp_path, monkeypatch):
+    t2020 = 1600000000  # 2020-09-13
+    posts = [
+        {"id": "a", "created_utc": t2020, "title": "Deep dive on $NET", "selftext": "long",
+         "subreddit": "stocks", "junk_field": 1},
+        {"id": "b", "created_utc": t2020, "title": "Daily Discussion Thread", "selftext": "",
+         "stickied": True},
+        {"id": "c", "created_utc": t2020, "title": "lol", "selftext": "moon"},
+        {"id": "d", "created_utc": 1300000000, "title": "$AAPL in 2011", "selftext": ""},
+    ]
+    comments = [
+        {"id": "c1", "link_id": "t3_a", "created_utc": t2020 + 60, "body": "NET margins are great"},
+        {"id": "c2", "link_id": "t3_b", "created_utc": t2020 + 60, "body": "$TSLA calls"},
+        {"id": "c3", "link_id": "t3_b", "created_utc": t2020 + 90, "body": "$TSLA puts"},
+        {"id": "c4", "link_id": "t3_c", "created_utc": t2020 + 60, "body": "nice"},
+    ]
+    src = tmp_path / "src"
+    _write_zst(src / "stocks_submissions.zst", posts)
+    _write_zst(src / "stocks_comments.zst", comments)
+    sizes = {n: (src / n).stat().st_size for n in ("stocks_submissions.zst", "stocks_comments.zst")}
+    torrent = tmp_path / "t.torrent"
+    torrent.write_bytes(benc({"info": {"name": "reddit", "piece length": 1, "pieces": b"", "files": [
+        {"length": sizes["stocks_submissions.zst"], "path": ["subreddits24", "stocks_submissions.zst"]},
+        {"length": sizes["stocks_comments.zst"], "path": ["subreddits24", "stocks_comments.zst"]},
+    ]}}))
+    tickers = tmp_path / "tickers.txt"
+    tickers.write_text("NET\nAAPL\nTSLA\n")
+
+    fetched = []
+
+    def fake_aria2(torrent_path, indices, out):
+        files = dr.torrent_files(torrent_path.read_bytes())
+        for i, rel, _ in files:
+            if i in indices:
+                dest = out / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes((src / Path(rel).name).read_bytes())
+                fetched.append(Path(rel).name)
+        return 0
+
+    monkeypatch.setattr(dr, "_aria2_fetch", fake_aria2)
+    args = ["pipeline", "--subs", "stocks", "--torrent", str(torrent), "--tickers", str(tickers),
+            "--raw-dir", str(tmp_path / "raw"), "--out", str(tmp_path / "corpus"),
+            "--from-year", "2015"]
+    return tmp_path, args, fetched
+
+
+def test_pipeline_filters_and_deletes_raw(pipeline_env):
+    tmp, args, fetched = pipeline_env
+    assert dr.main(args) == 0
+    out = tmp / "corpus" / "stocks"
+    posts = _read_zst(out / "posts.zst")
+    assert [p["id"] for p in posts] == ["a"]  # megathread, noise, pre-2015 dropped
+    assert "junk_field" not in posts[0] and posts[0]["matched_tickers"] == ["NET"]
+    assert [c["id"] for c in _read_zst(out / "comments.zst")] == ["c1"]
+    # mentions include dropped content (the megathread's comments)
+    mentions = (out / "mentions_comments.csv").read_text()
+    assert "2020-09-13,stocks,TSLA,comment,2" in mentions
+    assert "NET,comment,1" in mentions
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["posts"]["kept:ticker"] == 1 and manifest["posts"]["out_of_years"] == 1
+    assert not list((tmp / "raw").rglob("*.zst"))
+    assert fetched == ["stocks_submissions.zst", "stocks_comments.zst"]
+
+
+def test_pipeline_keep_raw_and_resume_skips(pipeline_env):
+    tmp, args, fetched = pipeline_env
+    assert dr.main(args + ["--keep-raw"]) == 0
+    assert len(list((tmp / "raw").rglob("*.zst"))) == 2
+    fetched.clear()
+    assert dr.main(args) == 0  # manifest matches -> nothing re-fetched
+    assert fetched == []
+
+
+def test_pipeline_resumes_after_posts_stage(pipeline_env, monkeypatch):
+    tmp, args, fetched = pipeline_env
+    real = dr.filter_comments
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dr, "filter_comments", boom)
+    with pytest.raises(KeyboardInterrupt):
+        dr.main(args)
+    assert not (tmp / "corpus" / "stocks" / "comments.zst").exists()  # .part cleaned up
+    monkeypatch.setattr(dr, "filter_comments", real)
+    fetched.clear()
+    assert dr.main(args) == 0
+    # posts are not re-filtered and the interrupted comments raw file is reused
+    assert fetched == []
+    assert not list((tmp / "raw").rglob("*.zst"))
+    assert [c["id"] for c in _read_zst(tmp / "corpus" / "stocks" / "comments.zst")] == ["c1"]
+
+
+def test_arctic_fetches_comments_only_for_kept_threads(tmp_path, monkeypatch):
+    pytest.importorskip("zstandard")
+    base = 1735689600  # 2025-01-01
+    posts = [
+        {"id": "k1", "created_utc": base + 100, "title": "$NET thesis", "selftext": "x"},
+        {"id": "d1", "created_utc": base + 200, "title": "lol", "selftext": "moon"},
+    ]
+    comments = [{"id": "x1", "link_id": "t3_k1", "created_utc": base + 300, "body": "agree NET"}]
+    calls = []
+
+    def fake_get(endpoint, params, delay):
+        calls.append((endpoint, dict(params)))
+        if endpoint == "posts/search":
+            src = posts
+        else:
+            src = [c for c in comments if c["link_id"] == "t3_" + params["link_id"]]
+        return [r for r in src if params["after"] < r["created_utc"] < params["before"]][
+            : params["limit"]]
+
+    monkeypatch.setattr(dr, "_arctic_get", fake_get)
+    tickers = tmp_path / "t.txt"
+    tickers.write_text("NET\n")
+    dr.main(["arctic", "--subs", "stocks", "--after", "2025-01-01", "--before", "2025-02-01",
+             "--out", str(tmp_path), "--delay", "0", "--tickers", str(tickers)])
+    comment_calls = [p for e, p in calls if e == "comments/search"]
+    assert {p["link_id"] for p in comment_calls} == {"k1"}
+    out = tmp_path / "stocks"
+    assert [p["id"] for p in _read_zst(out / "posts_2025-01.zst")] == ["k1"]
+    assert [c["id"] for c in _read_zst(out / "comments_2025-01.zst")] == ["x1"]
+    assert (out / "mentions_2025-01.csv").exists()

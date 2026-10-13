@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 """Download historical Reddit data for selected finance subreddits.
 
-Two sources:
+Sources:
 
-* ``torrent`` - Watchful1's per-subreddit Pushshift dumps on Academic Torrents
+* Watchful1's per-subreddit Pushshift dumps on Academic Torrents
   (2005-06 .. 2024-12). Each subreddit is one ``<sub>_submissions.zst`` and one
-  ``<sub>_comments.zst`` file covering its full history. Downloads only the
-  files you select, via aria2c.
-* ``arctic`` - Arctic Shift's search API, for date ranges the torrent does not
-  cover (2025+). Writes monthly ``.zst`` NDJSON files in the same format.
+  ``<sub>_comments.zst`` file covering its full history.
+* Arctic Shift's search API, for 2025+ (which the torrent does not cover).
 
-Plus two helpers:
+Commands:
 
-* ``list``  - read the .torrent metadata and print exact file sizes for the
-  chosen subreddits *without downloading any data*.
-* ``stats`` - scan downloaded .zst files and break records/bytes down by year,
-  so you can see how much of each file a given year range accounts for.
+* ``list``     - exact file sizes from the torrent metadata; downloads no data.
+* ``pipeline`` - the main path. Per subreddit: download the submissions file,
+  stream-filter it to stock-relevant posts, delete the raw file, then do the
+  same for comments, keeping only comments in kept threads. Peak disk is the
+  largest single raw file, never the whole corpus.
+* ``preview``  - run the filter over a sample and show what it keeps/drops.
+* ``arctic``   - the same filter over the Arctic Shift API, month by month;
+  comments are fetched only for kept threads.
+* ``torrent``  - plain download of whole files (no filtering).
+* ``stats``    - per-year record/byte breakdown of .zst files.
 
 Data-use note: neither source is licensed by Reddit. Keep the data private, do
 not redistribute it, and use it for inference/research only (no model
-training). See docs/DATA_POLICY.md once it exists.
+training).
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import random
 import shutil
 import subprocess
 import sys
@@ -34,9 +39,29 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import defaultdict
-from datetime import datetime, timezone
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from reddit_filter import (  # noqa: E402
+    COMMENT_FIELDS,
+    FILTER_VERSION,
+    POST_FIELDS,
+    MentionCounter,
+    TickerMatcher,
+    is_relevant_post,
+    load_tickers,
+    slim,
+)
+
+try:  # ~3-5x faster JSON parsing on big comment files, if installed
+    import orjson
+
+    _loads = orjson.loads
+except ImportError:  # pragma: no cover
+    _loads = json.loads
 
 TORRENT_URL = (
     "https://academictorrents.com/download/1614740ac8c94505e4ecb9d88be8bed7b6afddd4.torrent"
@@ -164,26 +189,51 @@ def cmd_list(args) -> int:
     return 0
 
 
-def cmd_torrent(args) -> int:
+def _require_aria2() -> str | None:
     aria2 = shutil.which("aria2c")
     if not aria2:
         print(
             "aria2c not found. Install it (macOS: `brew install aria2`, "
-            "Debian/Ubuntu: `sudo apt install aria2`) or use any torrent client "
-            "that lets you pick individual files.",
+            "Debian/Ubuntu: `sudo apt install aria2`).",
             file=sys.stderr,
         )
-        return 1
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    torrent_path = out / "subreddits_2024-12.torrent"
-    if args.torrent.startswith(("http://", "https://")):
-        if not torrent_path.exists():
-            print(f"fetching {args.torrent}")
-            torrent_path.write_bytes(load_torrent(args.torrent))
-    else:
-        torrent_path = Path(args.torrent)
+    return aria2
 
+
+def _ensure_torrent(src: str, out: Path) -> Path:
+    if not src.startswith(("http://", "https://")):
+        return Path(src)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "subreddits_2024-12.torrent"
+    if not path.exists():
+        print(f"fetching {src}")
+        path.write_bytes(load_torrent(src))
+    return path
+
+
+def _aria2_fetch(torrent_path: Path, indices: list[int], out: Path) -> int:
+    """Download only the given (1-based) file indices of a torrent into ``out``."""
+    aria2 = _require_aria2()
+    if not aria2:
+        return 1
+    cmd = [
+        aria2,
+        f"--select-file={','.join(map(str, indices))}",
+        "--seed-time=0",  # flip to e.g. 60 (minutes) if you want to give back
+        "--file-allocation=none",
+        "--continue=true",
+        "--bt-remove-unselected-file=true",
+        "--summary-interval=60",
+        f"--dir={out}",
+        str(torrent_path),
+    ]
+    print(" ".join(cmd))
+    return subprocess.call(cmd)
+
+
+def cmd_torrent(args) -> int:
+    out = Path(args.out)
+    torrent_path = _ensure_torrent(args.torrent, out)
     files = torrent_files(torrent_path.read_bytes())
     chosen, missing = select_files(files, args.subs, args.kinds)
     if missing:
@@ -196,20 +246,239 @@ def cmd_torrent(args) -> int:
         print(f"  {Path(path).name:45} {human(size):>12}")
     if args.dry_run:
         return 0
+    return _aria2_fetch(torrent_path, [i for i, _, _ in chosen], out)
 
-    indices = ",".join(str(i) for i, _, _ in chosen)
-    cmd = [
-        aria2,
-        f"--select-file={indices}",
-        "--seed-time=0",  # flip to e.g. 60 (minutes) if you want to give back
-        "--file-allocation=none",
-        "--continue=true",
-        "--bt-remove-unselected-file=true",
-        f"--dir={out}",
-        str(torrent_path),
-    ]
-    print(" ".join(cmd))
-    return subprocess.call(cmd)
+
+# --------------------------------------------------------------------------- #
+# Filtering pipeline
+# --------------------------------------------------------------------------- #
+
+
+class ZstLineWriter:
+    """Write NDJSON records to ``path`` via ``path.part``; renamed only on success."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.tmp = self.path.with_name(self.path.name + ".part")
+        self.n = 0
+
+    def __enter__(self):
+        import zstandard
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.tmp, "wb")
+        self._zw = zstandard.ZstdCompressor(level=10, threads=-1).stream_writer(self._fh)
+        return self
+
+    def write(self, obj: dict) -> None:
+        line = json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n"
+        self._zw.write(line.encode("utf-8"))
+        self.n += 1
+
+    def __exit__(self, exc_type, exc, tb):
+        self._zw.close()  # also closes the file
+        if exc_type is None:
+            self.tmp.replace(self.path)
+        else:
+            self.tmp.unlink(missing_ok=True)
+        return False
+
+
+def iter_records(path: Path):
+    for line in iter_zst_lines(path):
+        try:
+            yield _loads(line)
+        except ValueError:
+            continue
+
+
+def _year(created_utc) -> int:
+    return datetime.fromtimestamp(int(float(created_utc)), tz=timezone.utc).year
+
+
+def filter_posts(records, sub, matcher, counter, years, writer, stats) -> set[str]:
+    """Write relevant posts; return their ids. Mentions are counted for all posts."""
+    kept: set[str] = set()
+    for rec in records:
+        ts = rec.get("created_utc")
+        if ts is None or "id" not in rec:
+            stats["malformed"] += 1
+            continue
+        if not years[0] <= _year(ts) <= years[1]:
+            stats["out_of_years"] += 1
+            continue
+        counter.add(
+            ts, sub, matcher.match(rec.get("title")) | matcher.match(rec.get("selftext")), "post"
+        )
+        keep, reason, tickers = is_relevant_post(rec, matcher)
+        stats[("kept:" if keep else "dropped:") + reason] += 1
+        if keep:
+            writer.write(slim(rec, POST_FIELDS, tickers))
+            kept.add(rec["id"])
+    return kept
+
+
+def filter_comments(records, sub, kept_posts, matcher, counter, years, writer, stats) -> None:
+    """Keep comments whose thread was kept. Mentions are counted for all comments."""
+    for rec in records:
+        ts = rec.get("created_utc")
+        if ts is None:
+            stats["malformed"] += 1
+            continue
+        if years[0] <= _year(ts) <= years[1]:
+            counter.add(ts, sub, matcher.match(rec.get("body")), "comment")
+        link = (rec.get("link_id") or "").removeprefix("t3_")
+        if link in kept_posts:
+            writer.write(slim(rec, COMMENT_FIELDS))
+            stats["kept"] += 1
+        else:
+            stats["dropped"] += 1
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(path: Path, obj) -> None:
+    tmp = path.with_name(path.name + ".part")
+    tmp.write_text(json.dumps(obj, indent=2, sort_keys=True))
+    tmp.replace(path)
+
+
+def _fetch_raw(sub, kind, files, torrent_path, raw_dir) -> Path | None:
+    chosen, _ = select_files(files, [sub], [kind])
+    if not chosen:
+        print(f"  {sub}_{kind}.zst is not in the torrent; skipping")
+        return None
+    idx, rel, size = chosen[0]
+    raw = raw_dir / rel
+    if raw.exists() and raw.stat().st_size == size:
+        print(f"  using existing {raw}")
+        return raw
+    print(f"  downloading {Path(rel).name} ({human(size)})")
+    rc = _aria2_fetch(torrent_path, [idx], raw_dir)
+    if rc != 0 or not raw.exists() or raw.stat().st_size != size:
+        raise RuntimeError(f"download of {rel} failed (aria2c exit code {rc})")
+    return raw
+
+
+def _discard(raw: Path, keep_raw: bool) -> None:
+    if keep_raw:
+        return
+    raw.unlink(missing_ok=True)
+    Path(str(raw) + ".aria2").unlink(missing_ok=True)
+
+
+def _print_stats(label: str, stats: Counter) -> None:
+    total = sum(stats.values())
+    kept = sum(v for k, v in stats.items() if k.startswith("kept"))
+    print(f"  {label}: kept {kept:,} of {total:,} ({kept / total:.1%})" if total else f"  {label}: empty")
+    for k, v in sorted(stats.items(), key=lambda kv: -kv[1]):
+        print(f"      {k:24} {v:>12,}")
+
+
+def run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, years,
+                     keep_raw=False, comments=True) -> dict:
+    sub_dir = corpus_dir / sub
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    stamp = {"filter_version": FILTER_VERSION, "years": list(years)}
+    manifest_path = sub_dir / "manifest.json"
+    manifest = _read_json(manifest_path)
+    if manifest and all(manifest.get(k) == v for k, v in stamp.items()):
+        print(f"[{sub}] already done ({manifest_path}); skipping")
+        return manifest
+
+    print(f"[{sub}] posts")
+    posts_out = sub_dir / "posts.zst"
+    posts_stage = sub_dir / "posts.stage.json"
+    stage = _read_json(posts_stage)
+    if stage and all(stage.get(k) == v for k, v in stamp.items()) and posts_out.exists():
+        kept = {r["id"] for r in iter_records(posts_out)}
+        post_stats = Counter(stage["stats"])
+        print(f"  resuming: {len(kept):,} kept posts already filtered")
+    else:
+        raw = _fetch_raw(sub, "submissions", files, torrent_path, raw_dir)
+        if raw is None:
+            return {}
+        post_stats, counter = Counter(), MentionCounter()
+        with ZstLineWriter(posts_out) as w:
+            kept = filter_posts(iter_records(raw), sub, matcher, counter, years, w, post_stats)
+        counter.write_csv(sub_dir / "mentions_posts.csv")
+        _write_json(posts_stage, {**stamp, "stats": post_stats, "raw_bytes": raw.stat().st_size})
+        _discard(raw, keep_raw)
+    _print_stats("posts", post_stats)
+
+    comment_stats: Counter = Counter()
+    if comments:
+        print(f"[{sub}] comments")
+        raw = _fetch_raw(sub, "comments", files, torrent_path, raw_dir)
+        if raw is not None:
+            counter = MentionCounter()
+            with ZstLineWriter(sub_dir / "comments.zst") as w:
+                filter_comments(iter_records(raw), sub, kept, matcher, counter, years, w,
+                                comment_stats)
+            counter.write_csv(sub_dir / "mentions_comments.csv")
+            _discard(raw, keep_raw)
+        _print_stats("comments", comment_stats)
+
+    manifest = {
+        **stamp,
+        "subreddit": sub,
+        "source": "academictorrents subreddits 2005-06..2024-12",
+        "torrent": str(torrent_path),
+        "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "posts": dict(post_stats),
+        "comments": dict(comment_stats),
+        "comments_processed": comments,
+        "output_bytes": {
+            p.name: p.stat().st_size for p in sub_dir.iterdir() if p.suffix in (".zst", ".csv")
+        },
+    }
+    _write_json(manifest_path, manifest)
+    posts_stage.unlink(missing_ok=True)
+    return manifest
+
+
+def cmd_pipeline(args) -> int:
+    raw_dir, corpus_dir = Path(args.raw_dir), Path(args.out)
+    torrent_path = _ensure_torrent(args.torrent, raw_dir)
+    files = torrent_files(torrent_path.read_bytes())
+    matcher = TickerMatcher(load_tickers(args.tickers, Path(args.ref_dir)))
+    years = (args.from_year, args.to_year)
+    for sub in args.subs:
+        run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, years,
+                         keep_raw=args.keep_raw, comments=not args.posts_only)
+    return 0
+
+
+def cmd_preview(args) -> int:
+    matcher = TickerMatcher(load_tickers(args.tickers, Path(args.ref_dir)))
+    if args.file:
+        records = iter_records(Path(args.file))
+    else:
+        lo = datetime.fromisoformat(args.month + "-01").replace(tzinfo=timezone.utc)
+        hi = next(w for _, w in _month_windows(lo, lo + timedelta(days=32)))
+        records = fetch_window(lambda e, p: _arctic_get(e, p, args.delay), "posts/search",
+                               args.sub, int(lo.timestamp()), int(hi.timestamp()), 100)
+    stats: Counter = Counter()
+    kept, dropped = [], []
+    for i, rec in enumerate(records):
+        if i >= args.n:
+            break
+        keep, reason, tickers = is_relevant_post(rec, matcher)
+        stats[("kept:" if keep else "dropped:") + reason] += 1
+        line = f"[{reason}{' ' + ','.join(sorted(tickers)) if tickers else ''}] {rec.get('title', '')[:110]}"
+        (kept if keep else dropped).append(line)
+    _print_stats("posts", stats)
+    rng = random.Random(0)
+    for label, rows in (("KEPT", kept), ("DROPPED", dropped)):
+        print(f"\n--- sample {label} ---")
+        for line in rng.sample(rows, min(args.samples, len(rows))):
+            print("  " + line)
+    return 0
 
 
 def _month_windows(after: datetime, before: datetime):
@@ -249,7 +518,8 @@ def _arctic_get(endpoint: str, params: dict, polite_delay: float) -> list[dict]:
     raise RuntimeError(f"giving up on {url}")
 
 
-def fetch_window(fetch, endpoint: str, sub: str, start: int, end: int, limit: int):
+def fetch_window(fetch, endpoint: str, sub: str | None, start: int, end: int, limit: int,
+                 extra: dict | None = None):
     """Yield every item in [start, end) from a created_utc-ascending search API.
 
     Pages by the last-seen timestamp: re-queries from one second before it and
@@ -260,13 +530,10 @@ def fetch_window(fetch, endpoint: str, sub: str, start: int, end: int, limit: in
     cursor = start
     seen_at_cursor: set[str] = set()
     while cursor < end:
-        params = {
-            "subreddit": sub,
-            "after": cursor - 1,
-            "before": end,
-            "sort": "asc",
-            "limit": limit,
-        }
+        params = {"after": cursor - 1, "before": end, "sort": "asc", "limit": limit}
+        if sub:
+            params["subreddit"] = sub
+        params.update(extra or {})
         page = fetch(endpoint, params)
         fresh = [
             it
@@ -290,38 +557,57 @@ def fetch_window(fetch, endpoint: str, sub: str, start: int, end: int, limit: in
 
 
 def cmd_arctic(args) -> int:
-    import zstandard  # only needed for this command
+    """Filtered month-by-month fetch from Arctic Shift.
 
+    Posts: every post in the month is fetched, mention-counted and filtered.
+    Comments: fetched *only* for kept threads (via ``link_id``), covering the
+    first ``--comment-days`` days of each thread. Note: comment mention counts
+    therefore only cover kept threads on this path.
+    """
     after = datetime.fromisoformat(args.after).replace(tzinfo=timezone.utc)
     before = datetime.fromisoformat(args.before).replace(tzinfo=timezone.utc)
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+    matcher = TickerMatcher(load_tickers(args.tickers, Path(args.ref_dir)))
 
     def fetch(endpoint, params):
         return _arctic_get(endpoint, params, args.delay)
 
     for sub in args.subs:
-        for kind in args.kinds:
-            endpoint = "posts/search" if kind == "submissions" else "comments/search"
-            for lo, hi in _month_windows(after, before):
-                final = out / f"{sub}_{kind}_{lo:%Y-%m}.zst"
-                if final.exists():
-                    print(f"skip {final.name} (exists)")
-                    continue
-                tmp = final.with_suffix(".zst.part")
-                n = 0
-                cctx = zstandard.ZstdCompressor(level=10)
-                with open(tmp, "wb") as fh, cctx.stream_writer(fh) as zw:
-                    text = io.TextIOWrapper(zw, encoding="utf-8")
-                    for item in fetch_window(
-                        fetch, endpoint, sub, int(lo.timestamp()), int(hi.timestamp()), 100
-                    ):
-                        text.write(json.dumps(item, separators=(",", ":")) + "\n")
-                        n += 1
-                    text.flush()
-                    text.detach()
-                tmp.rename(final)
-                print(f"{final.name}: {n:,} records, {human(final.stat().st_size)}")
+        sub_dir = Path(args.out) / sub
+        for lo, hi in _month_windows(after, before):
+            tag = f"{lo:%Y-%m}"
+            done = sub_dir / f"mentions_{tag}.csv"  # written last = month complete
+            if done.exists():
+                print(f"[{sub} {tag}] done; skipping")
+                continue
+            counter, stats = MentionCounter(), Counter()
+            kept: list[tuple[str, int]] = []
+            with ZstLineWriter(sub_dir / f"posts_{tag}.zst") as w:
+                posts = fetch_window(fetch, "posts/search", sub, int(lo.timestamp()),
+                                     int(hi.timestamp()), 100)
+                for p in posts:
+                    counter.add(p["created_utc"], sub,
+                                matcher.match(p.get("title")) | matcher.match(p.get("selftext")),
+                                "post")
+                    keep, reason, tickers = is_relevant_post(p, matcher)
+                    stats[("kept:" if keep else "dropped:") + reason] += 1
+                    if keep:
+                        w.write(slim(p, POST_FIELDS, tickers))
+                        kept.append((p["id"], int(p["created_utc"])))
+            n_comments = 0
+            if not args.no_comments and kept:
+                with ZstLineWriter(sub_dir / f"comments_{tag}.zst") as w:
+                    for pid, pts in kept:
+                        end = min(pts + args.comment_days * 86400, now)
+                        for c in fetch_window(fetch, "comments/search", None, pts, end, 100,
+                                              extra={"link_id": pid}):
+                            counter.add(c["created_utc"], sub, matcher.match(c.get("body")),
+                                        "comment")
+                            w.write(slim(c, COMMENT_FIELDS))
+                    n_comments = w.n
+            counter.write_csv(done)
+            print(f"[{sub} {tag}] {len(kept):,} posts kept, {n_comments:,} comments")
+            _print_stats("posts", stats)
     return 0
 
 
@@ -365,29 +651,64 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sp = ap.add_subparsers(dest="cmd", required=True)
 
-    def common(p, torrent=False):
+    def subs(p, kinds=False):
         p.add_argument("--subs", nargs="+", default=DEFAULT_SUBS)
-        p.add_argument("--kinds", nargs="+", choices=KINDS, default=list(KINDS))
-        if torrent:
-            p.add_argument("--torrent", default=TORRENT_URL, help=".torrent path or URL")
+        if kinds:
+            p.add_argument("--kinds", nargs="+", choices=KINDS, default=list(KINDS))
+
+    def torrent(p):
+        p.add_argument("--torrent", default=TORRENT_URL, help=".torrent path or URL")
+
+    def tickers(p):
+        p.add_argument("--tickers", help="ticker list file, one per line (default: SEC list)")
+        p.add_argument("--ref-dir", default="data/ref", help="cache for the SEC ticker list")
 
     p = sp.add_parser("list", help="print exact sizes from torrent metadata")
-    common(p, torrent=True)
+    subs(p, kinds=True)
+    torrent(p)
     p.set_defaults(func=cmd_list)
 
-    p = sp.add_parser("torrent", help="download selected subreddit files via aria2c")
-    common(p, torrent=True)
+    p = sp.add_parser("pipeline", help="download + filter one subreddit file at a time")
+    subs(p)
+    torrent(p)
+    tickers(p)
+    p.add_argument("--raw-dir", default="data/raw/reddit", help="temporary raw downloads")
+    p.add_argument("--out", default="data/corpus/reddit", help="filtered output")
+    p.add_argument("--from-year", type=int, default=2005)
+    p.add_argument("--to-year", type=int, default=2024)
+    p.add_argument("--keep-raw", action="store_true", help="don't delete raw files")
+    p.add_argument("--posts-only", action="store_true", help="skip comment files")
+    p.set_defaults(func=cmd_pipeline)
+
+    p = sp.add_parser("preview", help="show what the filter keeps/drops on a sample")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--file", help="a local *_submissions.zst")
+    src.add_argument("--sub", help="fetch one month of this sub from Arctic Shift")
+    p.add_argument("--month", default="2024-06", help="YYYY-MM, with --sub")
+    p.add_argument("--n", type=int, default=5000, help="posts to examine")
+    p.add_argument("--samples", type=int, default=15)
+    p.add_argument("--delay", type=float, default=1.0)
+    tickers(p)
+    p.set_defaults(func=cmd_preview)
+
+    p = sp.add_parser("arctic", help="filtered fetch of a date range from Arctic Shift")
+    subs(p)
+    tickers(p)
+    p.add_argument("--after", default="2025-01-01", help="ISO date, inclusive")
+    p.add_argument("--before", required=True, help="ISO date, exclusive")
+    p.add_argument("--out", default="data/corpus/reddit_arctic")
+    p.add_argument("--delay", type=float, default=1.0, help="seconds between requests")
+    p.add_argument("--no-comments", action="store_true")
+    p.add_argument("--comment-days", type=int, default=180,
+                   help="fetch comments made within N days of the post")
+    p.set_defaults(func=cmd_arctic)
+
+    p = sp.add_parser("torrent", help="plain download of whole files (no filtering)")
+    subs(p, kinds=True)
+    torrent(p)
     p.add_argument("--out", default="data/raw/reddit")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_torrent)
-
-    p = sp.add_parser("arctic", help="fetch a date range from the Arctic Shift API")
-    common(p)
-    p.add_argument("--after", default="2025-01-01", help="ISO date, inclusive")
-    p.add_argument("--before", required=True, help="ISO date, exclusive")
-    p.add_argument("--out", default="data/raw/reddit_arctic")
-    p.add_argument("--delay", type=float, default=1.0, help="seconds between requests")
-    p.set_defaults(func=cmd_arctic)
 
     p = sp.add_parser("stats", help="per-year record/byte breakdown of .zst files")
     p.add_argument("files", nargs="+")
