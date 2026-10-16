@@ -544,3 +544,116 @@ def test_aria2_command_is_safe_for_kept_raw_files(tmp_path, monkeypatch):
     assert "--bt-remove-unselected-file=true" not in cmd  # could delete other kept raw files
     assert "--continue=true" in cmd and "--select-file=3" in cmd
     assert "--console-log-level=warn" in cmd
+
+
+# --------------------------------------------------------------------------- #
+# filter v2 integration, fragment sweep, report
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_drops_empty_comments_and_keeps_discussed_links(tmp_path, monkeypatch):
+    t = 1600000000
+    posts = [
+        {"id": "L1", "created_utc": t, "title": "Annual letter", "selftext": "", "is_self": False,
+         "num_comments": 7, "domain": "example.com"},
+        {"id": "L2", "created_utc": t, "title": "Other letter", "selftext": "", "is_self": False,
+         "num_comments": 1},
+    ]
+    comments = [
+        {"id": "k", "link_id": "t3_L1", "created_utc": t + 1, "body": "good read"},
+        {"id": "r", "link_id": "t3_L1", "created_utc": t + 2, "body": "[removed]"},
+        {"id": "d", "link_id": "t3_L1", "created_utc": t + 3, "body": "[deleted]"},
+        {"id": "x", "link_id": "t3_L2", "created_utc": t + 4, "body": "meh"},
+    ]
+    src = tmp_path / "src"
+    _write_zst(src / "stocks_submissions.zst", posts)
+    _write_zst(src / "stocks_comments.zst", comments)
+    sizes = [(src / n).stat().st_size for n in ("stocks_submissions.zst", "stocks_comments.zst")]
+    torrent = tmp_path / "t.torrent"
+    torrent.write_bytes(benc({"info": {"name": "reddit", "piece length": 1, "pieces": b"", "files": [
+        {"length": sizes[0], "path": ["d", "stocks_submissions.zst"]},
+        {"length": sizes[1], "path": ["d", "stocks_comments.zst"]}]}}))
+
+    def fake_aria2(tp, indices, out):
+        for i, rel, _ in dr.torrent_files(tp.read_bytes()):
+            if i in indices:
+                (out / rel).parent.mkdir(parents=True, exist_ok=True)
+                (out / rel).write_bytes((src / Path(rel).name).read_bytes())
+        return 0
+
+    monkeypatch.setattr(dr, "_aria2_fetch", fake_aria2)
+    tick = tmp_path / "t.txt"
+    tick.write_text("NET\n")
+    args = ["pipeline", "--subs", "stocks", "--torrent", str(torrent), "--tickers", str(tick),
+            "--raw-dir", str(tmp_path / "raw"), "--out", str(tmp_path / "corpus")]
+    assert dr.main(args) == 0
+    out = tmp_path / "corpus" / "stocks"
+    assert [p["id"] for p in _read_zst(out / "posts.zst")] == ["L1"]
+    assert [c["id"] for c in _read_zst(out / "comments.zst")] == ["k"]
+    m = json.loads((out / "manifest.json").read_text())
+    assert m["posts"]["kept:discussed_link"] == 1 and m["comments"]["dropped_empty"] == 2
+    assert m["filter_version"] == "posts-v2" and m["min_link_comments"] == 5
+    # changing the threshold invalidates the finished manifest, so it re-runs
+    assert dr.main(args + ["--min-link-comments", "1"]) == 0
+    m = json.loads((out / "manifest.json").read_text())
+    assert m["min_link_comments"] == 1 and m["posts"]["kept:discussed_link"] == 2
+
+
+def test_sweep_fragments_only_removes_incomplete_neighbours(tmp_path):
+    files = [(1, "r/d/a_comments.zst", 100), (2, "r/d/b_comments.zst", 100),
+             (3, "r/d/c_comments.zst", 100), (4, "r/d/d_comments.zst", 100)]
+    folder = tmp_path / "r" / "d"
+    folder.mkdir(parents=True)
+    (folder / "a_comments.zst").write_bytes(b"x" * 100)   # the file we fetched
+    (folder / "b_comments.zst").write_bytes(b"x" * 30)    # fragment -> removed
+    (folder / "c_comments.zst").write_bytes(b"x" * 100)   # complete kept raw file -> kept
+    (folder / "d_comments.zst").write_bytes(b"x" * 40)    # resumable partial...
+    (folder / "d_comments.zst.aria2").write_bytes(b"ctl")  # ...has a sidecar -> kept
+    (folder / "unrelated.txt").write_bytes(b"hi")
+    removed, freed = dr.sweep_fragments(files, folder, keep=folder / "a_comments.zst")
+    assert (removed, freed) == (1, 30)
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "a_comments.zst", "c_comments.zst", "d_comments.zst", "d_comments.zst.aria2",
+        "unrelated.txt"]
+    # a fetch sweeps automatically too
+    (folder / "b_comments.zst").write_bytes(b"x" * 30)
+    dr.sweep_fragments(files, folder)
+    assert not (folder / "b_comments.zst").exists()
+
+
+def test_clean_raw_command(tmp_path, capsys):
+    t = tmp_path / "t.torrent"
+    t.write_bytes(benc({"info": {"name": "reddit", "piece length": 1, "pieces": b"", "files": [
+        {"length": 100, "path": ["d", "a.zst"]}, {"length": 100, "path": ["d", "b.zst"]}]}}))
+    raw = tmp_path / "raw"
+    (raw / "reddit" / "d").mkdir(parents=True)
+    (raw / "reddit" / "d" / "a.zst").write_bytes(b"x" * 10)
+    (raw / "reddit" / "d" / "b.zst").write_bytes(b"x" * 100)
+    assert dr.main(["clean-raw", "--torrent", str(t), "--raw-dir", str(raw)]) == 0
+    assert "removed 1 leftover fragment files" in capsys.readouterr().out
+    assert [p.name for p in (raw / "reddit" / "d").iterdir()] == ["b.zst"]
+
+
+def test_report_command(tmp_path, capsys):
+    out = tmp_path / "stocks"
+    t18, t19 = 1514764800, 1546300800  # 2018-01-01, 2019-01-01
+    _write_zst(out / "posts.zst", [
+        {"id": "a", "created_utc": t18, "title": "Thesis on NET", "matched_tickers": ["NET"]},
+        {"id": "b", "created_utc": t19, "title": "A letter", "matched_tickers": []}])
+    _write_zst(out / "comments.zst", [{"id": "c%d" % i, "created_utc": t18 + i} for i in range(4)])
+    (out / "mentions_posts.csv").write_text(
+        "date,subreddit,ticker,source,count\n2018-01-01,stocks,NET,post,3\n")
+    (out / "mentions_comments.csv").write_text(
+        "date,subreddit,ticker,source,count\n2018-01-01,stocks,NET,comment,4\n"
+        "2018-01-02,stocks,IT,comment,2\n")
+    (out / "manifest.json").write_text(json.dumps({
+        "filter_version": "posts-v2", "years": [2005, 2024],
+        "posts": {"kept:ticker": 1, "kept:discussed_link": 1, "dropped:no_text": 2},
+        "comments": {"kept": 4, "dropped": 6, "dropped_empty": 2}}))
+    assert dr.main(["report", "--sub", "stocks", "--out", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert "posts: kept 2 of 4 (50.0%)" in text
+    assert "NET:7" in text and "IT:2" in text
+    assert "[2018 NET] Thesis on NET" in text
+    assert "2018:      1 posts        4 comments" in text
+    assert dr.main(["report", "--sub", "nope", "--out", str(tmp_path)]) == 1

@@ -47,10 +47,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from reddit_filter import (  # noqa: E402
     COMMENT_FIELDS,
+    DISCUSSED_LINK_MIN_COMMENTS,
     FILTER_VERSION,
     POST_FIELDS,
     MentionCounter,
     TickerMatcher,
+    is_empty_comment,
     is_relevant_post,
     load_tickers,
     slim,
@@ -366,7 +368,8 @@ def _year(created_utc) -> int:
     return datetime.fromtimestamp(int(float(created_utc)), tz=timezone.utc).year
 
 
-def filter_posts(records, sub, matcher, counter, years, writer, stats) -> set[str]:
+def filter_posts(records, sub, matcher, counter, years, writer, stats,
+                 min_link_comments=DISCUSSED_LINK_MIN_COMMENTS) -> set[str]:
     """Write relevant posts; return their ids. Mentions are counted for all posts."""
     kept: set[str] = set()
     for rec in records:
@@ -380,7 +383,7 @@ def filter_posts(records, sub, matcher, counter, years, writer, stats) -> set[st
         counter.add(
             ts, sub, matcher.match(rec.get("title")) | matcher.match(rec.get("selftext")), "post"
         )
-        keep, reason, tickers = is_relevant_post(rec, matcher)
+        keep, reason, tickers = is_relevant_post(rec, matcher, min_link_comments)
         stats[("kept:" if keep else "dropped:") + reason] += 1
         if keep:
             writer.write(slim(rec, POST_FIELDS, tickers))
@@ -394,6 +397,9 @@ def filter_comments(records, sub, kept_posts, matcher, counter, years, writer, s
         ts = rec.get("created_utc")
         if ts is None:
             stats["malformed"] += 1
+            continue
+        if is_empty_comment(rec):
+            stats["dropped_empty"] += 1
             continue
         if years[0] <= _year(ts) <= years[1]:
             counter.add(ts, sub, matcher.match(rec.get("body")), "comment")
@@ -462,7 +468,43 @@ def _fetch_raw(sub, kind, files, torrent_path, raw_dir) -> Path | None:
             f"download of {Path(rel).name} did not finish (aria2c exit code {rc}). "
             "Nothing was lost: rerun the same command and it will resume where it stopped."
         )
+    sweep_fragments(files, raw.parent, keep=raw)
     return raw
+
+
+def sweep_fragments(files, folder: Path, keep: Path | None = None) -> tuple[int, int]:
+    """Delete leftover bytes of neighbouring torrent files from ``folder``.
+
+    Torrent files are contiguous, so aria2c must download whole pieces that overlap file
+    boundaries and writes the overlapping bytes of adjacent files too. Those fragments are
+    incomplete (wrong size) and useless. Never touched: complete files (exact declared
+    size), the file in ``keep``, and anything with an ``.aria2`` sidecar (a download that
+    can still be resumed). Returns ``(files_removed, bytes_freed)``.
+    """
+    declared = {Path(rel).name: size for _, rel, size in files}
+    removed = freed = 0
+    if not folder.is_dir():
+        return 0, 0
+    for f in folder.iterdir():
+        size = declared.get(f.name)
+        if size is None or not f.is_file() or (keep and f.resolve() == keep.resolve()):
+            continue
+        if f.stat().st_size != size and not _aria2_sidecar(f).exists():
+            freed += f.stat().st_size
+            f.unlink()
+            removed += 1
+    return removed, freed
+
+
+def cmd_clean_raw(args) -> int:
+    raw_dir = Path(args.raw_dir)
+    files = torrent_files(_ensure_torrent(args.torrent, raw_dir).read_bytes())
+    removed = freed = 0
+    for folder in {(raw_dir / rel).parent for _, rel, _ in files}:
+        r, f = sweep_fragments(files, folder)
+        removed, freed = removed + r, freed + f
+    print(f"removed {removed} leftover fragment files, freed {human(freed)}")
+    return 0
 
 
 def _discard(raw: Path, keep_raw: bool) -> None:
@@ -481,10 +523,12 @@ def _print_stats(label: str, stats: Counter) -> None:
 
 
 def run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, years,
-                     keep_raw=False, comments=True) -> dict:
+                     keep_raw=False, comments=True,
+                     min_link_comments=DISCUSSED_LINK_MIN_COMMENTS) -> dict:
     sub_dir = corpus_dir / sub
     sub_dir.mkdir(parents=True, exist_ok=True)
-    stamp = {"filter_version": FILTER_VERSION, "years": list(years)}
+    stamp = {"filter_version": FILTER_VERSION, "years": list(years),
+             "min_link_comments": min_link_comments}
     manifest_path = sub_dir / "manifest.json"
     manifest = _read_json(manifest_path)
     if manifest and all(manifest.get(k) == v for k, v in stamp.items()):
@@ -505,7 +549,8 @@ def run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, yea
             return {}
         post_stats, counter = Counter(), MentionCounter()
         with ZstLineWriter(posts_out) as w:
-            kept = filter_posts(iter_records(raw), sub, matcher, counter, years, w, post_stats)
+            kept = filter_posts(iter_records(raw), sub, matcher, counter, years, w, post_stats,
+                                min_link_comments)
         counter.write_csv(sub_dir / "mentions_posts.csv")
         _write_json(posts_stage, {**stamp, "stats": post_stats, "raw_bytes": raw.stat().st_size})
         _discard(raw, keep_raw)
@@ -550,7 +595,8 @@ def cmd_pipeline(args) -> int:
     years = (args.from_year, args.to_year)
     for sub in args.subs:
         run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, years,
-                         keep_raw=args.keep_raw, comments=not args.posts_only)
+                         keep_raw=args.keep_raw, comments=not args.posts_only,
+                         min_link_comments=args.min_link_comments)
     return 0
 
 
@@ -569,7 +615,7 @@ def cmd_preview(args) -> int:
         for i, rec in enumerate(records):
             if i >= args.n:
                 break
-            keep, reason, tickers = is_relevant_post(rec, matcher)
+            keep, reason, tickers = is_relevant_post(rec, matcher, args.min_link_comments)
             stats[("kept:" if keep else "dropped:") + reason] += 1
             tag = reason + (" " + ",".join(sorted(tickers)) if tickers else "")
             (kept if keep else dropped).append(f"[{tag}] {rec.get('title', '')[:110]}")
@@ -739,7 +785,7 @@ def cmd_arctic(args) -> int:
                     counter.add(p["created_utc"], sub,
                                 matcher.match(p.get("title")) | matcher.match(p.get("selftext")),
                                 "post")
-                    keep, reason, tickers = is_relevant_post(p, matcher)
+                    keep, reason, tickers = is_relevant_post(p, matcher, args.min_link_comments)
                     stats[("kept:" if keep else "dropped:") + reason] += 1
                     if keep:
                         w.write(slim(p, POST_FIELDS, tickers))
@@ -751,6 +797,8 @@ def cmd_arctic(args) -> int:
                         end = min(pts + args.comment_days * 86400, now)
                         for c in fetch_window(fetch, "comments/search", None, pts, end, 100,
                                               extra={"link_id": pid}):
+                            if is_empty_comment(c):
+                                continue
                             counter.add(c["created_utc"], sub, matcher.match(c.get("body")),
                                         "comment")
                             w.write(slim(c, COMMENT_FIELDS))
@@ -758,6 +806,54 @@ def cmd_arctic(args) -> int:
             counter.write_csv(done)
             print(f"[{sub} {tag}] {len(kept):,} posts kept, {n_comments:,} comments")
             _print_stats("posts", stats)
+    return 0
+
+
+def cmd_report(args) -> int:
+    """Sanity-check a filtered subreddit: keep rates, top tickers, sample titles, comment depth."""
+    sub_dir = Path(args.out) / args.sub
+    manifest = _read_json(sub_dir / "manifest.json")
+    if not manifest:
+        print(f"no manifest in {sub_dir}; run the pipeline for this subreddit first")
+        return 1
+    print(f"== {args.sub}  (filter {manifest['filter_version']}, years {manifest['years']}) ==")
+    for label in ("posts", "comments"):
+        counts = manifest.get(label) or {}
+        total = sum(counts.values())
+        kept = sum(v for k, v in counts.items() if k.startswith("kept"))
+        print(f"\n{label}: kept {kept:,} of {total:,}" + (f" ({kept / total:.1%})" if total else ""))
+        for k, v in sorted(counts.items(), key=lambda kv: -kv[1]):
+            print(f"    {k:24} {v:>10,} {v / total:>7.1%}")
+
+    totals: Counter = Counter()
+    for name in ("mentions_posts.csv", "mentions_comments.csv"):
+        f = sub_dir / name
+        if f.exists():
+            for line in f.read_text().splitlines()[1:]:
+                _, _, ticker, _, n = line.split(",")
+                totals[ticker] += int(n)
+    print("\ntop tickers by mentions (look for English words posing as tickers):")
+    print("    " + "  ".join(f"{t}:{n:,}" for t, n in totals.most_common(25)))
+
+    posts_f, comments_f = sub_dir / "posts.zst", sub_dir / "comments.zst"
+    if posts_f.exists():
+        posts = list(iter_records(posts_f))
+        rng = random.Random(0)
+        print(f"\n{min(20, len(posts))} random kept posts:")
+        for r in rng.sample(posts, min(20, len(posts))):
+            t = ",".join(r.get("matched_tickers") or [])
+            print(f"    [{_year(r['created_utc'])} {t or '-'}] {(r.get('title') or '')[:100]}")
+        if comments_f.exists():
+            by_year_posts, by_year_comments = Counter(), Counter()
+            for r in posts:
+                by_year_posts[_year(r["created_utc"])] += 1
+            for r in iter_records(comments_f):
+                by_year_comments[_year(r["created_utc"])] += 1
+            print("\ncomments per kept post, by year (by comment date / post date):")
+            for y in sorted(by_year_posts):
+                ratio = by_year_comments[y] / by_year_posts[y]
+                print(f"    {y}: {by_year_posts[y]:>6,} posts {by_year_comments[y]:>8,} comments"
+                      f"  {ratio:>6.1f} per post")
     return 0
 
 
@@ -851,6 +947,21 @@ def main(argv=None) -> int:
         p.add_argument("--tickers", help="ticker list file, one per line (default: SEC list)")
         p.add_argument("--ref-dir", default="data/ref", help="cache for the SEC ticker list")
 
+    def link_threshold(p):
+        p.add_argument("--min-link-comments", type=int, default=DISCUSSED_LINK_MIN_COMMENTS,
+                       help="keep link posts (articles, letters) with at least this many "
+                            "comments even without a ticker (default %(default)s)")
+
+    p = sp.add_parser("report", help="sanity-check a filtered subreddit")
+    p.add_argument("--sub", required=True)
+    p.add_argument("--out", default="data/corpus/reddit")
+    p.set_defaults(func=cmd_report)
+
+    p = sp.add_parser("clean-raw", help="delete leftover neighbour-file fragments from raw downloads")
+    torrent(p)
+    p.add_argument("--raw-dir", default="data/raw/reddit")
+    p.set_defaults(func=cmd_clean_raw)
+
     p = sp.add_parser("check", help="test each external service once (run this first)")
     torrent(p)
     tickers(p)
@@ -871,6 +982,7 @@ def main(argv=None) -> int:
     p.add_argument("--out", default="data/corpus/reddit", help="filtered output")
     p.add_argument("--from-year", type=int, default=2005)
     p.add_argument("--to-year", type=int, default=2024)
+    link_threshold(p)
     p.add_argument("--keep-raw", action="store_true", help="don't delete raw files")
     p.add_argument("--posts-only", action="store_true", help="skip comment files")
     p.set_defaults(func=cmd_pipeline)
@@ -882,6 +994,7 @@ def main(argv=None) -> int:
     p.add_argument("--month", default="2024-06", help="YYYY-MM, with --sub")
     p.add_argument("--n", type=int, default=5000, help="posts to examine")
     p.add_argument("--samples", type=int, default=15)
+    link_threshold(p)
     p.add_argument("--delay", type=float, default=1.0)
     tickers(p)
     p.set_defaults(func=cmd_preview)
@@ -893,6 +1006,7 @@ def main(argv=None) -> int:
     p.add_argument("--before", required=True, help="ISO date, exclusive")
     p.add_argument("--out", default="data/corpus/reddit_arctic")
     p.add_argument("--delay", type=float, default=1.0, help="seconds between requests")
+    link_threshold(p)
     p.add_argument("--no-comments", action="store_true")
     p.add_argument("--comment-days", type=int, default=180,
                    help="fetch comments made within N days of the post")

@@ -15,7 +15,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-FILTER_VERSION = "posts-v1"
+FILTER_VERSION = "posts-v2"
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_USER_AGENT = "redditstockscraper research (personal; contact via repo owner)"
@@ -75,6 +75,7 @@ FLAIR_ALLOW = frozenset(
     }
 )
 LONGFORM_MIN_CHARS = 800
+DISCUSSED_LINK_MIN_COMMENTS = 5  # link posts with at least this many comments are kept
 REMOVED_MARKERS = frozenset({"[removed]", "[deleted]", "[removed by reddit]"})
 
 POST_FIELDS = (
@@ -140,8 +141,16 @@ def _is_removed(post: dict) -> bool:
     return bool(post.get("removed_by_category")) or body in REMOVED_MARKERS
 
 
-def is_relevant_post(post: dict, matcher: TickerMatcher) -> tuple[bool, str, set[str]]:
-    """Return ``(keep, reason, tickers)``. Reasons are stable strings for stats."""
+def is_relevant_post(
+    post: dict, matcher: TickerMatcher, min_link_comments: int = DISCUSSED_LINK_MIN_COMMENTS
+) -> tuple[bool, str, set[str]]:
+    """Return ``(keep, reason, tickers)``. Reasons are stable strings for stats.
+
+    Link posts (articles, letters, podcasts) often name a company without a ticker, so
+    one with an active discussion is kept as ``discussed_link``. ``num_comments`` is a
+    final, hindsight count; that is fine for deciding what to *store*, but must never be
+    used as a signal in a backtest.
+    """
     title = post.get("title") or ""
     if post.get("stickied") or MEGATHREAD_RE.search(title):
         return False, "megathread", set()
@@ -163,7 +172,19 @@ def is_relevant_post(post: dict, matcher: TickerMatcher) -> tuple[bool, str, set
     if len(body) >= LONGFORM_MIN_CHARS and len(set(FINANCE_KW_RE.findall(body.lower()))) >= 2:
         return True, "longform", tickers
 
+    if (
+        post.get("is_self") is False
+        and int(post.get("num_comments") or 0) >= min_link_comments
+    ):
+        return True, "discussed_link", tickers
+
     return False, ("no_text" if not body.strip() else "no_signal"), set()
+
+
+def is_empty_comment(comment: dict) -> bool:
+    """Deleted/removed comments carry no information (and shouldn't be retained)."""
+    body = (comment.get("body") or "").strip().lower()
+    return not body or body in REMOVED_MARKERS
 
 
 def slim(record: dict, fields: list[str], tickers: set[str] | None = None) -> dict:

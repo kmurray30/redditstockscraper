@@ -95,3 +95,31 @@ def test_load_tickers_from_file(tmp_path):
     f = tmp_path / "t.txt"
     f.write_text("# comment\naapl\nNET\n\n")
     assert load_tickers(str(f), tmp_path) == {"AAPL", "NET"}
+
+
+def test_discussed_link_posts_kept_without_a_ticker():
+    link = post(title="Berkshire's 2019 shareholder letter", is_self=False,
+                url="https://berkshirehathaway.com/letters/2019ltr.pdf", num_comments=5)
+    keep, reason, _ = is_relevant_post(link, M)
+    assert (keep, reason) == (True, "discussed_link")
+    quiet = dict(link, num_comments=4)
+    assert is_relevant_post(quiet, M)[:2] == (False, "no_text")
+    # a text post with the same comment count is not rescued by the link rule
+    selfpost = post(title="what do you think", selftext="hmm", is_self=True, num_comments=50)
+    assert is_relevant_post(selfpost, M)[:2] == (False, "no_signal")
+    # threshold is configurable
+    assert is_relevant_post(quiet, M, min_link_comments=3)[1] == "discussed_link"
+
+
+def test_removed_link_posts_and_megathreads_are_still_dropped():
+    removed = post(title="great letter", is_self=False, num_comments=99, removed_by_category="moderator")
+    assert is_relevant_post(removed, M)[:2] == (False, "removed")
+    mega = post(title="Daily Discussion Thread", is_self=False, num_comments=999)
+    assert is_relevant_post(mega, M)[:2] == (False, "megathread")
+
+
+def test_is_empty_comment():
+    from reddit_filter import is_empty_comment
+    assert is_empty_comment({"body": "[removed]"}) and is_empty_comment({"body": " [Deleted] "})
+    assert is_empty_comment({"body": ""}) and is_empty_comment({})
+    assert not is_empty_comment({"body": "NET looks cheap"})

@@ -39,6 +39,27 @@ python scripts/download_reddit.py pipeline --subs stocks investing ValueInvestin
 python scripts/download_reddit.py arctic --subs stocks investing --after 2025-01-01 --before 2026-10-01
 ```
 
+### Checking the result
+
+```bash
+python scripts/download_reddit.py report --sub SecurityAnalysis
+```
+
+Prints keep/drop rates by reason, the most-mentioned tickers (look for English words posing as
+tickers), 20 random kept titles, and comments per post by year.
+
+The filter also keeps **link posts with discussion** (articles, letters, podcasts with at least
+5 comments, change with `--min-link-comments`), since those often name a company without a
+ticker, and drops removed/deleted comments. Changing the filter version or these settings
+re-runs finished subreddits the next time you run `pipeline`.
+
+### Leftover files in `data/raw`
+
+Torrent files are stored back to back, so aria2c also writes the edges of neighbouring
+subreddits' files. `pipeline` deletes those fragments after each download; run
+`python scripts/download_reddit.py clean-raw` to sweep ones already on disk. Complete files and
+resumable partial downloads are never touched.
+
 ### Stopping and resuming
 
 Ctrl-C is safe at any point. Outputs are written to temporary `.part` files and renamed only
