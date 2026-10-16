@@ -906,8 +906,8 @@ def cmd_report(args) -> int:
             for line in f.read_text().splitlines()[1:]:
                 _, _, ticker, _, n = line.split(",")
                 totals[ticker] += int(n)
-    print("\ntop tickers by mentions (look for English words posing as tickers):")
-    print("    " + "  ".join(f"{t}:{n:,}" for t, n in totals.most_common(25)))
+    print(f"\ntop {args.top} tickers by mentions (look for English words posing as tickers):")
+    print("    " + "  ".join(f"{t}:{n:,}" for t, n in totals.most_common(args.top)))
 
     posts_f, comments_f = sub_dir / "posts.zst", sub_dir / "comments.zst"
     if posts_f.exists():
@@ -1031,6 +1031,7 @@ def main(argv=None) -> int:
     p = sp.add_parser("report", help="sanity-check a filtered subreddit")
     p.add_argument("--sub", required=True)
     p.add_argument("--out", default="data/corpus/reddit")
+    p.add_argument("--top", type=int, default=25, help="how many top tickers to list")
     p.set_defaults(func=cmd_report)
 
     p = sp.add_parser("clean-raw", help="delete unverified leftover files from raw downloads")

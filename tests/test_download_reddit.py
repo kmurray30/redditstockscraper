@@ -597,7 +597,7 @@ def test_pipeline_drops_empty_comments_and_keeps_discussed_links(tmp_path, monke
     assert [c["id"] for c in _read_zst(out / "comments.zst")] == ["k"]
     m = json.loads((out / "manifest.json").read_text())
     assert m["posts"]["kept:discussed_link"] == 1 and m["comments"]["dropped_empty"] == 2
-    assert m["filter_version"] == "posts-v3" and m["min_link_comments"] == 5
+    assert m["filter_version"] == dr.FILTER_VERSION and m["min_link_comments"] == 5
     # changing the threshold invalidates the finished manifest, so it re-runs
     assert dr.main(args + ["--min-link-comments", "1"]) == 0
     m = json.loads((out / "manifest.json").read_text())
@@ -849,3 +849,17 @@ def test_changing_the_stoplist_reruns_a_finished_subreddit(pipeline_env, tmp_pat
     # it re-ran with the new setting; the post survives because "$NET" is a cashtag, and
     # cashtags still count for stoplisted words
     assert [p["id"] for p in _read_zst(out / "posts.zst")] == ["a"]
+
+
+def test_report_top_option_limits_the_ticker_list(tmp_path, capsys):
+    out = tmp_path / "s"
+    _write_zst(out / "posts.zst", [])
+    (out / "mentions_posts.csv").write_text(
+        "date,subreddit,ticker,source,count\n" + "".join(
+            f"2018-01-01,s,T{i},post,{100 - i}\n" for i in range(10)))
+    (out / "manifest.json").write_text(json.dumps({
+        "filter_version": "posts-v4", "years": [2005, 2024], "posts": {"kept:ticker": 1},
+        "comments": {"kept": 1}}))
+    assert dr.main(["report", "--sub", "s", "--out", str(tmp_path), "--top", "3"]) == 0
+    text = capsys.readouterr().out
+    assert "top 3 tickers" in text and "T2:98" in text and "T3:" not in text

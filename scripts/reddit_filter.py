@@ -17,7 +17,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-FILTER_VERSION = "posts-v3"
+FILTER_VERSION = "posts-v4"
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_USER_AGENT = "redditstockscraper research (personal; contact via repo owner)"
@@ -56,6 +56,16 @@ STOPLIST = frozenset(
     """.split()
 )
 
+# Seen as top "tickers" in r/investing: ordinary words, personal-finance terms and brokers that
+# are also tickers (CD = certificate of deposit, TD = TD Ameritrade, LOT = "a LOT", YOU, LINK,
+# NOTE...). Still match as cashtags.
+STOPLIST = STOPLIST | frozenset(
+    """
+    CD LOT YOU LINK NOTE IEX TD KEY TRUE FAST CARE FREE SAVE FIRE ROTH APR APY FDIC HSA RSU
+    ESPP HELOC PMI FICO SSA SSN
+    """.split()
+)
+
 # Text that is mostly capitals (shouting titles) would turn every word into a candidate.
 SHOUTING_RATIO = 0.7
 CASHTAG_STOPLIST = frozenset("USD EUR CAD GBP JPY AUD CNY BTC ETH".split())
@@ -65,7 +75,9 @@ BARE_RE = re.compile(r"(?<![\w$])([A-Z]{2,5})(?![\w])")
 
 MEGATHREAD_RE = re.compile(
     r"daily discussion|weekend discussion|what are your moves|rate my portfolio"
-    r"|moves tomorrow|daily thread|weekly .*thread|discussion thread|megathread",
+    r"|moves tomorrow|daily thread|weekly .*thread|discussion thread|megathread"
+    r"|moronic monday|advice thread|newbie wednesday|simple questions|stupid questions"
+    r"|dumb questions|(?:saturday|sunday|friday) (?:discussion|thread)",
     re.I,
 )
 FINANCE_KW_RE = re.compile(

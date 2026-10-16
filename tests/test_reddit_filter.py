@@ -158,3 +158,20 @@ def test_slim_unescapes_html_entities():
     out = slim({"id": "a", "title": "$TAL &amp; $EDU &gt; peers", "selftext": "R&amp;D",
                 "score": 1}, ["id", "title", "selftext", "score"])
     assert out["title"] == "$TAL & $EDU > peers" and out["selftext"] == "R&D" and out["score"] == 1
+
+
+def test_personal_finance_words_from_r_investing_are_not_tickers():
+    m = TickerMatcher({"CD", "TD", "LOT", "YOU", "LINK", "NOTE", "IEX", "KEY", "FDIC", "HSA",
+                       "ROTH", "AAPL"})
+    text = "Best CD rates? I use TD, a LOT, YOU should NOTE the KEY LINK on the FDIC HSA ROTH page"
+    assert m.match(text) == set()
+    assert m.match("$CD and $TD still work as cashtags; AAPL bare too") == {"CD", "TD", "AAPL"}
+
+
+def test_recurring_advice_threads_are_megathreads():
+    for title in ("It's moronic Monday, the Wednesday edition, your chance to ask questions",
+                  "Daily Advice Thread - ask anything", "Newbie Wednesday", "Simple Questions",
+                  "Sunday Discussion Thread"):
+        assert is_relevant_post(post(title=title + " $AAPL"), M)[:2] == (False, "megathread"), title
+    # a normal question with a ticker is untouched
+    assert is_relevant_post(post(title="Is AAPL a buy?"), TickerMatcher({"AAPL"}))[0] is True
