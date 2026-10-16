@@ -251,3 +251,123 @@ def test_arctic_fetches_comments_only_for_kept_threads(tmp_path, monkeypatch):
     assert [p["id"] for p in _read_zst(out / "posts_2025-01.zst")] == ["k1"]
     assert [c["id"] for c in _read_zst(out / "comments_2025-01.zst")] == ["x1"]
     assert (out / "mentions_2025-01.csv").exists()
+
+
+# --------------------------------------------------------------------------- #
+# network failure handling (all faked)
+# --------------------------------------------------------------------------- #
+
+import io  # noqa: E402
+import urllib.error  # noqa: E402
+
+HASH40 = "1614740ac8c94505e4ecb9d88be8bed7b6afddd4"
+
+
+def _http_err(code, body=b""):
+    return urllib.error.HTTPError("http://x", code, "Err", {}, io.BytesIO(body))
+
+
+class _Resp:
+    def __init__(self, data):
+        self._d = data
+
+    def read(self):
+        return self._d
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_load_torrent_falls_back_through_urls_and_rejects_html(monkeypatch):
+    good = benc({"info": {"name": "x", "length": 1}})
+    seen = []
+
+    def fake_urlopen(req, timeout=0):
+        seen.append((req.full_url, req.get_header("User-agent")))
+        n = len(seen)
+        if n == 1:
+            raise _http_err(404)
+        if n == 2:
+            return _Resp(b"<html>nope</html>")  # 200 but not a torrent
+        return _Resp(good)
+
+    monkeypatch.setattr(dr.urllib.request, "urlopen", fake_urlopen)
+    url = f"https://academictorrents.com/download/{HASH40}.torrent"
+    assert dr.load_torrent(url) == good
+    assert seen[0][0] == url
+    assert seen[1][0] == url[: -len(".torrent")]  # extension-less variant
+    assert seen[2][0] == url and seen[2][1] == dr.BROWSER_UA  # browser UA retry
+
+
+def test_load_torrent_total_failure_explains_workaround(monkeypatch, tmp_path):
+    monkeypatch.setattr(dr.urllib.request, "urlopen",
+                        lambda req, timeout=0: (_ for _ in ()).throw(_http_err(404, b"gone")))
+    monkeypatch.setattr(dr.shutil, "which", lambda name: None)  # no aria2 -> no magnet
+    with pytest.raises(RuntimeError) as ei:
+        dr.load_torrent(f"https://academictorrents.com/download/{HASH40}.torrent", tmp_path)
+    msg = str(ei.value)
+    assert "HTTP 404" in msg and "gone" in msg and "--torrent" in msg and dr.TORRENT_PAGE in msg
+
+
+def test_load_torrent_magnet_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(dr.urllib.request, "urlopen",
+                        lambda req, timeout=0: (_ for _ in ()).throw(_http_err(404)))
+    monkeypatch.setattr(dr.shutil, "which", lambda name: "/usr/bin/aria2c")
+    good = benc({"info": {"name": "x", "length": 1}})
+    cmds = []
+
+    def fake_run(cmd, **kw):
+        cmds.append(cmd)
+        (tmp_path / f"{HASH40}.torrent").write_bytes(good)
+
+    monkeypatch.setattr(dr.subprocess, "run", fake_run)
+    got = dr.load_torrent(f"https://academictorrents.com/download/{HASH40}.torrent", tmp_path)
+    assert got == good
+    assert "--bt-metadata-only=true" in cmds[0] and f"btih:{HASH40}" in cmds[0][-1]
+
+
+def test_arctic_get_sends_iso_dates_and_reports_error_body(monkeypatch):
+    seen = []
+
+    def fake_urlopen(req, timeout=0):
+        seen.append(req.full_url)
+        raise _http_err(422, b'{"error":"bad parameter: after"}')
+
+    monkeypatch.setattr(dr.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(RuntimeError) as ei:
+        dr._arctic_get("posts/search", {"subreddit": "stocks", "after": 1614556800,
+                                        "before": 1617235200, "limit": 5}, 0)
+    assert "after=2021-03-01T00%3A00%3A00" in seen[0]
+    assert "before=2021-04-01T00%3A00%3A00" in seen[0]
+    assert "bad parameter: after" in str(ei.value) and "422" in str(ei.value)
+    assert len(seen) == 1  # 4xx (other than 429) is not retried
+
+
+def test_main_turns_network_errors_into_one_line(monkeypatch, capsys):
+    monkeypatch.setattr(dr.urllib.request, "urlopen",
+                        lambda req, timeout=0: (_ for _ in ()).throw(_http_err(422, b"nope")))
+    rc = dr.main(["preview", "--sub", "stocks", "--month", "2021-03", "--delay", "0",
+                  "--tickers", "/dev/null"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("\nerror:") and "nope" in err and "Traceback" not in err
+
+
+def test_check_reports_pass_and_fail(monkeypatch, tmp_path, capsys):
+    tfile = tmp_path / "t.torrent"
+    tfile.write_bytes(benc({"info": {"name": "x", "length": 2048}}))
+    monkeypatch.setattr(dr, "_arctic_get",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("422 bad")))
+    monkeypatch.setattr(dr.shutil, "which", lambda name: "/usr/bin/aria2c")
+    tick = tmp_path / "tick.txt"
+    tick.write_text("NET\nAAPL\n")
+    rc = dr.main(["check", "--torrent", str(tfile), "--tickers", str(tick),
+                  "--raw-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "PASS  torrent metadata" in out and "1 files" in out
+    assert "FAIL  Arctic Shift API: 422 bad" in out
+    assert "PASS  ticker list (SEC): 2 tickers loaded" in out

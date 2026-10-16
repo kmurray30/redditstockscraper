@@ -63,8 +63,12 @@ try:  # ~3-5x faster JSON parsing on big comment files, if installed
 except ImportError:  # pragma: no cover
     _loads = json.loads
 
-TORRENT_URL = (
-    "https://academictorrents.com/download/1614740ac8c94505e4ecb9d88be8bed7b6afddd4.torrent"
+TORRENT_HASH = "1614740ac8c94505e4ecb9d88be8bed7b6afddd4"  # subreddits, 2005-06..2024-12
+TORRENT_URL = f"https://academictorrents.com/download/{TORRENT_HASH}.torrent"
+TORRENT_PAGE = f"https://academictorrents.com/details/{TORRENT_HASH}"
+BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 ARCTIC_BASE = "https://arctic-shift.photon-reddit.com/api"
 USER_AGENT = "redditstockscraper-research/0.1 (personal, non-commercial)"
@@ -133,12 +137,72 @@ def torrent_files(torrent_bytes: bytes) -> list[tuple[int, str, int]]:
     return files
 
 
-def load_torrent(src: str) -> bytes:
-    if src.startswith(("http://", "https://")):
-        req = urllib.request.Request(src, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            return r.read()
-    return Path(src).read_bytes()
+def _http_error_text(e: urllib.error.HTTPError) -> str:
+    try:
+        body = e.read().decode("utf-8", "replace").strip()
+    except Exception:  # noqa: BLE001
+        body = ""
+    return f"HTTP {e.code} {e.reason}" + (f": {body[:500]}" if body else "")
+
+
+def _torrent_url_candidates(src: str) -> list[tuple[str, str]]:
+    """(url, user-agent) pairs to try. The site is picky, so vary both."""
+    urls = [src]
+    if src.endswith(".torrent"):
+        urls.append(src[: -len(".torrent")])  # some mirrors serve it without extension
+    return [(u, ua) for ua in (USER_AGENT, BROWSER_UA) for u in urls]
+
+
+def _fetch_magnet_metadata(info_hash: str, out: Path) -> bytes | None:
+    """Get the .torrent file list from the swarm via aria2 (no website needed)."""
+    aria2 = shutil.which("aria2c")
+    if not aria2:
+        return None
+    out.mkdir(parents=True, exist_ok=True)
+    magnet = (
+        f"magnet:?xt=urn:btih:{info_hash}"
+        "&tr=https%3A%2F%2Facademictorrents.com%2Fannounce.php"
+        "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
+    )
+    print("  trying magnet link via aria2c (can take a minute)...")
+    cmd = [aria2, "--bt-metadata-only=true", "--bt-save-metadata=true",
+           "--follow-torrent=false", "--bt-stop-timeout=120", f"--dir={out}", magnet]
+    try:
+        subprocess.run(cmd, check=False, timeout=300, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None
+    saved = out / f"{info_hash}.torrent"
+    return saved.read_bytes() if saved.exists() else None
+
+
+def load_torrent(src: str, cache_dir: Path | None = None) -> bytes:
+    """Load a .torrent from a path or URL; for URLs, fall back to a magnet link."""
+    if not src.startswith(("http://", "https://")):
+        return Path(src).read_bytes()
+    errors = []
+    for url, ua in _torrent_url_candidates(src):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": ua})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = r.read()
+            bdecode(data)  # reject HTML error pages served with a 200
+            return data
+        except urllib.error.HTTPError as e:
+            errors.append(f"{url}: {_http_error_text(e)}")
+        except (urllib.error.URLError, TimeoutError, ValueError, IndexError) as e:
+            errors.append(f"{url}: {e}")
+    info_hash = next((h for h in [src.rsplit("/", 1)[-1].removesuffix(".torrent")]
+                      if len(h) == 40), None)
+    if info_hash:
+        data = _fetch_magnet_metadata(info_hash, cache_dir or Path("data/raw/reddit"))
+        if data:
+            return data
+    raise RuntimeError(
+        "could not fetch the torrent file:\n  " + "\n  ".join(errors) + "\n\n"
+        "Workaround: open " + TORRENT_PAGE + " in a browser, download the .torrent, then pass "
+        "--torrent /path/to/file.torrent (install aria2 for the magnet-link fallback)."
+    )
 
 
 def select_files(
@@ -171,7 +235,7 @@ def human(n: float) -> str:
 
 
 def cmd_list(args) -> int:
-    files = torrent_files(load_torrent(args.torrent))
+    files = torrent_files(_ensure_torrent(args.torrent, Path(args.raw_dir)).read_bytes())
     chosen, missing = select_files(files, args.subs, args.kinds)
     total = 0
     print(f"{'file':45} {'compressed':>12}")
@@ -207,7 +271,7 @@ def _ensure_torrent(src: str, out: Path) -> Path:
     path = out / "subreddits_2024-12.torrent"
     if not path.exists():
         print(f"fetching {src}")
-        path.write_bytes(load_torrent(src))
+        path.write_bytes(load_torrent(src, out))
     return path
 
 
@@ -491,7 +555,15 @@ def _month_windows(after: datetime, before: datetime):
         cur = nxt
 
 
+def _iso(value) -> str:
+    """Epoch seconds -> ISO-8601 UTC. Plain integers are ambiguous (s vs ms)."""
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    return value
+
+
 def _arctic_get(endpoint: str, params: dict, polite_delay: float) -> list[dict]:
+    params = {k: (_iso(v) if k in ("after", "before") else v) for k, v in params.items()}
     url = f"{ARCTIC_BASE}/{endpoint}?{urllib.parse.urlencode(params)}"
     for attempt in range(8):
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -511,7 +583,8 @@ def _arctic_get(endpoint: str, params: dict, polite_delay: float) -> list[dict]:
             if e.code >= 500:
                 time.sleep(2**attempt)
                 continue
-            raise
+            raise RuntimeError(f"Arctic Shift rejected the request ({_http_error_text(e)})\n"
+                               f"  url: {url}") from e
         except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
             print(f"    {e!r}; retrying")
             time.sleep(2**attempt)
@@ -611,6 +684,44 @@ def cmd_arctic(args) -> int:
     return 0
 
 
+def cmd_check(args) -> int:
+    """Poke each external service once and report PASS/FAIL, with no tracebacks."""
+    ok = True
+
+    def report(name, fn):
+        nonlocal ok
+        try:
+            print(f"PASS  {name}: {fn()}")
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print(f"FAIL  {name}: {e}")
+
+    def torrent():
+        out = Path(args.raw_dir)
+        files = torrent_files(_ensure_torrent(args.torrent, out).read_bytes())
+        return f"{len(files):,} files, {human(sum(f[2] for f in files))} total"
+
+    def arctic():
+        rows = _arctic_get("posts/search", {"subreddit": "stocks", "after": "2021-03-01",
+                                            "before": "2021-03-02", "sort": "asc",
+                                            "limit": 3}, 0)
+        return f"{len(rows)} posts returned"
+
+    def sec():
+        n = len(load_tickers(args.tickers, Path(args.ref_dir)))
+        return f"{n:,} tickers loaded"
+
+    report("torrent metadata (Academic Torrents)", torrent)
+    report("Arctic Shift API", arctic)
+    report("ticker list (SEC)", sec)
+    if shutil.which("aria2c"):
+        print("PASS  aria2c: installed")
+    else:
+        ok = False
+        print("FAIL  aria2c: not found (brew install aria2)")
+    return 0 if ok else 1
+
+
 def iter_zst_lines(path: Path):
     import zstandard
 
@@ -663,9 +774,16 @@ def main(argv=None) -> int:
         p.add_argument("--tickers", help="ticker list file, one per line (default: SEC list)")
         p.add_argument("--ref-dir", default="data/ref", help="cache for the SEC ticker list")
 
+    p = sp.add_parser("check", help="test each external service once (run this first)")
+    torrent(p)
+    tickers(p)
+    p.add_argument("--raw-dir", default="data/raw/reddit")
+    p.set_defaults(func=cmd_check)
+
     p = sp.add_parser("list", help="print exact sizes from torrent metadata")
     subs(p, kinds=True)
     torrent(p)
+    p.add_argument("--raw-dir", default="data/raw/reddit", help="where the .torrent is cached")
     p.set_defaults(func=cmd_list)
 
     p = sp.add_parser("pipeline", help="download + filter one subreddit file at a time")
@@ -715,7 +833,11 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_stats)
 
     args = ap.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (RuntimeError, urllib.error.URLError) as e:
+        print(f"\nerror: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

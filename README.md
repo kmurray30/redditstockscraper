@@ -21,6 +21,9 @@ redistribute it, and use it only for research and LLM inference (no model traini
 pip install -r requirements.txt
 brew install aria2          # or: sudo apt install aria2
 
+# 0. Test each external service once (torrent index, Arctic Shift, SEC, aria2) - run this first
+python scripts/download_reddit.py check
+
 # 1. Exact sizes from the torrent metadata (no data downloaded)
 python scripts/download_reddit.py list --subs stocks investing SecurityAnalysis ValueInvesting StockMarket
 
@@ -35,6 +38,19 @@ python scripts/download_reddit.py pipeline --subs stocks investing ValueInvestin
 # 4. Optional: 2025+ from Arctic Shift, same filter; comments only for kept threads
 python scripts/download_reddit.py arctic --subs stocks investing --after 2025-01-01 --before 2026-10-01
 ```
+
+### If something fails
+
+Run `check`: it prints PASS/FAIL per service with the server's own error message.
+
+- **Torrent index won't download (404):** the script tries several URL forms, then a magnet
+  link through `aria2c`. If both fail, open
+  <https://academictorrents.com/details/1614740ac8c94505e4ecb9d88be8bed7b6afddd4> in a
+  browser, download the `.torrent`, and pass it with `--torrent /path/to/file.torrent`.
+- **Arctic Shift rejects a request (4xx):** the message includes the API's reason and the
+  exact URL; paste it into an issue and the parameters can be adjusted.
+- **SEC ticker list refused (403):** pass your own list with `--tickers myfile.txt`
+  (one symbol per line).
 
 ### What `pipeline` does
 
