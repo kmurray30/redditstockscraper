@@ -126,14 +126,20 @@ def bdecode(data: bytes):
 
 
 def torrent_files(torrent_bytes: bytes) -> list[tuple[int, str, int]]:
-    """Return ``(aria2_index, path, size)`` for each file; index is 1-based."""
+    """Return ``(aria2_index, path, size)`` for each file; index is 1-based.
+
+    ``path`` is relative to the download directory. For multi-file torrents aria2c
+    saves everything under a folder named after the torrent, so that name is the
+    first path component.
+    """
     info = bdecode(torrent_bytes)[b"info"]
+    name = info[b"name"].decode("utf-8", "replace")
     if b"files" not in info:
-        return [(1, info[b"name"].decode(), info[b"length"])]
+        return [(1, name, info[b"length"])]
     files = []
     for idx, f in enumerate(info[b"files"], start=1):
-        path = "/".join(p.decode("utf-8", "replace") for p in f[b"path"])
-        files.append((idx, path, f[b"length"]))
+        parts = [p.decode("utf-8", "replace") for p in f[b"path"]]
+        files.append((idx, "/".join([name, *parts]), f[b"length"]))
     return files
 
 
@@ -286,7 +292,7 @@ def _aria2_fetch(torrent_path: Path, indices: list[int], out: Path) -> int:
         "--seed-time=0",  # flip to e.g. 60 (minutes) if you want to give back
         "--file-allocation=none",
         "--continue=true",
-        "--bt-remove-unselected-file=true",
+        "--console-log-level=warn",  # hide routine tracker/peer noise; keep real errors
         "--summary-interval=60",
         f"--dir={out}",
         str(torrent_path),
@@ -412,20 +418,50 @@ def _write_json(path: Path, obj) -> None:
     tmp.replace(path)
 
 
+def _aria2_sidecar(raw: Path) -> Path:
+    return raw.with_name(raw.name + ".aria2")
+
+
+def _locate(raw_dir: Path, rel: str) -> Path | None:
+    """Where aria2c put the file: the expected path, else search by file name."""
+    expected = raw_dir / rel
+    if expected.exists():
+        return expected
+    found = sorted(raw_dir.rglob(Path(rel).name))
+    return found[0] if found else None
+
+
+def _is_complete(raw: Path | None, size: int) -> bool:
+    """Complete = right size AND no aria2c control file.
+
+    Size alone is not enough: aria2c (with --file-allocation=none) can write the last
+    piece early, so an unfinished file may already have its full length. The ``.aria2``
+    sidecar exists exactly while the download is unfinished.
+    """
+    return bool(raw) and raw.stat().st_size == size and not _aria2_sidecar(raw).exists()
+
+
 def _fetch_raw(sub, kind, files, torrent_path, raw_dir) -> Path | None:
     chosen, _ = select_files(files, [sub], [kind])
     if not chosen:
         print(f"  {sub}_{kind}.zst is not in the torrent; skipping")
         return None
     idx, rel, size = chosen[0]
-    raw = raw_dir / rel
-    if raw.exists() and raw.stat().st_size == size:
+    raw = _locate(raw_dir, rel)
+    if _is_complete(raw, size):
         print(f"  using existing {raw}")
         return raw
-    print(f"  downloading {Path(rel).name} ({human(size)})")
+    if raw is not None and _aria2_sidecar(raw).exists():
+        print(f"  resuming partial download of {Path(rel).name}")
+    else:
+        print(f"  downloading {Path(rel).name} ({human(size)})")
     rc = _aria2_fetch(torrent_path, [idx], raw_dir)
-    if rc != 0 or not raw.exists() or raw.stat().st_size != size:
-        raise RuntimeError(f"download of {rel} failed (aria2c exit code {rc})")
+    raw = _locate(raw_dir, rel)
+    if rc != 0 or not _is_complete(raw, size):
+        raise RuntimeError(
+            f"download of {Path(rel).name} did not finish (aria2c exit code {rc}). "
+            "Nothing was lost: rerun the same command and it will resume where it stopped."
+        )
     return raw
 
 

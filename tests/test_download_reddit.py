@@ -45,7 +45,7 @@ TORRENT = benc(
 
 def test_torrent_files_indices_are_one_based():
     files = dr.torrent_files(TORRENT)
-    assert files[0] == (1, "subreddits24/AskReddit_comments.zst", 100)
+    assert files[0] == (1, "reddit/subreddits24/AskReddit_comments.zst", 100)
     assert files[3][0] == 4
 
 
@@ -465,3 +465,82 @@ def test_preview_prints_partial_results_on_transient_failure(monkeypatch, capsys
                   "--tickers", str(t)])
     out = capsys.readouterr().out
     assert rc == 0 and "stopped early after 1 posts" in out and "kept:ticker" in out
+
+
+# --------------------------------------------------------------------------- #
+# resume safety for raw downloads
+# --------------------------------------------------------------------------- #
+
+
+def _one_file_torrent(tmp_path, size):
+    t = tmp_path / "one.torrent"
+    t.write_bytes(benc({"info": {"name": "reddit", "piece length": 1, "pieces": b"", "files": [
+        {"length": size, "path": ["subreddits24", "stocks_submissions.zst"]}]}}))
+    return t, dr.torrent_files(t.read_bytes())
+
+
+def test_torrent_paths_include_the_torrent_folder_name(tmp_path):
+    _, files = _one_file_torrent(tmp_path, 10)
+    assert files == [(1, "reddit/subreddits24/stocks_submissions.zst", 10)]
+
+
+def test_full_size_file_with_aria2_sidecar_is_not_treated_as_complete(tmp_path, monkeypatch):
+    torrent, files = _one_file_torrent(tmp_path, 10)
+    raw_dir = tmp_path / "raw"
+    f = raw_dir / "reddit" / "subreddits24" / "stocks_submissions.zst"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"x" * 10)  # full length, but holes: last piece landed early
+    Path(str(f) + ".aria2").write_bytes(b"control")
+    calls = []
+
+    def fake_aria2(torrent_path, indices, out):
+        calls.append(indices)
+        Path(str(f) + ".aria2").unlink()  # aria2c removes it when finished
+        return 0
+
+    monkeypatch.setattr(dr, "_aria2_fetch", fake_aria2)
+    assert dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir) == f
+    assert calls == [[1]]  # resumed instead of trusting the file
+
+
+def test_complete_file_without_sidecar_is_reused(tmp_path, monkeypatch):
+    torrent, files = _one_file_torrent(tmp_path, 10)
+    raw_dir = tmp_path / "raw"
+    f = raw_dir / "reddit" / "subreddits24" / "stocks_submissions.zst"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"x" * 10)
+    monkeypatch.setattr(dr, "_aria2_fetch", lambda *a: pytest.fail("should not download"))
+    assert dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir) == f
+
+
+def test_file_is_found_by_name_if_aria2_used_a_different_layout(tmp_path, monkeypatch):
+    torrent, files = _one_file_torrent(tmp_path, 10)
+    raw_dir = tmp_path / "raw"
+
+    def fake_aria2(torrent_path, indices, out):
+        elsewhere = out / "other" / "stocks_submissions.zst"
+        elsewhere.parent.mkdir(parents=True)
+        elsewhere.write_bytes(b"x" * 10)
+        return 0
+
+    monkeypatch.setattr(dr, "_aria2_fetch", fake_aria2)
+    got = dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir)
+    assert got.name == "stocks_submissions.zst" and got.parent.name == "other"
+
+
+def test_unfinished_download_raises_with_resume_hint(tmp_path, monkeypatch):
+    torrent, files = _one_file_torrent(tmp_path, 10)
+    monkeypatch.setattr(dr, "_aria2_fetch", lambda *a: 7)  # aria2c interrupted / failed
+    with pytest.raises(RuntimeError, match="rerun the same command"):
+        dr._fetch_raw("stocks", "submissions", files, torrent, tmp_path / "raw")
+
+
+def test_aria2_command_is_safe_for_kept_raw_files(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(dr, "_require_aria2", lambda: "/usr/bin/aria2c")
+    monkeypatch.setattr(dr.subprocess, "call", lambda cmd: seen.append(cmd) or 0)
+    dr._aria2_fetch(tmp_path / "t.torrent", [3], tmp_path)
+    cmd = seen[0]
+    assert "--bt-remove-unselected-file=true" not in cmd  # could delete other kept raw files
+    assert "--continue=true" in cmd and "--select-file=3" in cmd
+    assert "--console-log-level=warn" in cmd

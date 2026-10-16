@@ -39,6 +39,12 @@ python scripts/download_reddit.py pipeline --subs stocks investing ValueInvestin
 python scripts/download_reddit.py arctic --subs stocks investing --after 2025-01-01 --before 2026-10-01
 ```
 
+### Stopping and resuming
+
+Ctrl-C is safe at any point. Outputs are written to temporary `.part` files and renamed only
+when complete, finished subreddits are skipped, and an unfinished torrent download resumes
+from its `.aria2` control file. Rerun the same command to carry on.
+
 ### If something fails
 
 Run `check`: it prints PASS/FAIL per service with the server's own error message.
