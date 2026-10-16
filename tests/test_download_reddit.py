@@ -371,3 +371,97 @@ def test_check_reports_pass_and_fail(monkeypatch, tmp_path, capsys):
     assert "PASS  torrent metadata" in out and "1 files" in out
     assert "FAIL  Arctic Shift API: 422 bad" in out
     assert "PASS  ticker list (SEC): 2 tickers loaded" in out
+
+
+# --------------------------------------------------------------------------- #
+# Arctic Shift timeouts (reported as HTTP 422 "Timeout. Maybe slow down a bit")
+# --------------------------------------------------------------------------- #
+
+TIMEOUT_BODY = b'{"data":null,"error":"Timeout. Maybe slow down a bit"}'
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(dr.time, "sleep", sleeps.append)
+    monkeypatch.setattr(dr, "_arctic_penalty", 0.0)
+    return sleeps
+
+
+def _ok_resp(rows):
+    return _Resp(json.dumps({"data": rows, "error": None}).encode())
+
+
+def test_arctic_timeout_422_is_retried_and_limit_shrinks(monkeypatch, no_sleep):
+    urls = []
+
+    def fake_urlopen(req, timeout=0):
+        urls.append(req.full_url)
+        if len(urls) <= 3:
+            raise _http_err(422, TIMEOUT_BODY)
+        return _ok_resp([{"id": "a", "created_utc": 5}])
+
+    monkeypatch.setattr(dr.urllib.request, "urlopen", fake_urlopen)
+    page = dr._arctic_get("posts/search", {"subreddit": "stocks", "limit": 100}, 0)
+    assert [r["id"] for r in page] == ["a"]
+    limits = [int(u.split("limit=")[1].split("&")[0]) for u in urls]
+    assert limits == [100, 100, 50, 25]  # halves from the 2nd consecutive timeout onward
+    assert page.limit_used == 25
+    assert len(no_sleep) >= 3 and all(x <= 62 for x in no_sleep)  # backed off, capped
+
+
+def test_arctic_real_bad_request_is_not_retried(monkeypatch, no_sleep):
+    calls = []
+
+    def fake_urlopen(req, timeout=0):
+        calls.append(1)
+        raise _http_err(422, b'{"error":"Invalid value for parameter after"}')
+
+    monkeypatch.setattr(dr.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(RuntimeError, match="Invalid value"):
+        dr._arctic_get("posts/search", {"limit": 10}, 0)
+    assert len(calls) == 1
+
+
+def test_arctic_gives_up_with_overloaded_message(monkeypatch, no_sleep):
+    monkeypatch.setattr(dr.urllib.request, "urlopen",
+                        lambda req, timeout=0: (_ for _ in ()).throw(_http_err(422, TIMEOUT_BODY)))
+    with pytest.raises(RuntimeError) as ei:
+        dr._arctic_get("posts/search", {"limit": 100}, 0)
+    assert "overloaded" in str(ei.value) and "--delay" in str(ei.value)
+
+
+def test_fetch_window_does_not_stop_early_when_page_size_was_shrunk():
+    items = [{"id": f"x{i}", "created_utc": 100 + i} for i in range(10)]
+
+    def fetch(endpoint, params):
+        lo, hi = params["after"], params["before"]
+        rows = [it for it in items if lo < it["created_utc"] < hi][:3]  # server only gives 3
+        page = dr._Page(rows)
+        page.limit_used = 3  # ...because _arctic_get shrank the limit from 100 to 3
+        return page
+
+    got = list(dr.fetch_window(fetch, "posts/search", "stocks", 100, 200, limit=100))
+    assert [g["id"] for g in got] == [it["id"] for it in items]
+
+
+def test_preview_prints_partial_results_on_transient_failure(monkeypatch, capsys, tmp_path):
+    base = 1614556800  # 2021-03-01
+    calls = []
+
+    def fake_get(endpoint, params, delay):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("Arctic Shift kept failing (overloaded)")
+        page = dr._Page([{"id": "a", "created_utc": base + 5, "title": "$NET thesis",
+                          "selftext": "x"}])
+        page.limit_used = 1  # a full page, so the loop asks for more (and then fails)
+        return page
+
+    monkeypatch.setattr(dr, "_arctic_get", fake_get)
+    t = tmp_path / "t.txt"
+    t.write_text("NET\n")
+    rc = dr.main(["preview", "--sub", "stocks", "--month", "2021-03", "--delay", "0",
+                  "--tickers", str(t)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "stopped early after 1 posts" in out and "kept:ticker" in out

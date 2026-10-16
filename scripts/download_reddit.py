@@ -529,13 +529,18 @@ def cmd_preview(args) -> int:
                                args.sub, int(lo.timestamp()), int(hi.timestamp()), 100)
     stats: Counter = Counter()
     kept, dropped = [], []
-    for i, rec in enumerate(records):
-        if i >= args.n:
-            break
-        keep, reason, tickers = is_relevant_post(rec, matcher)
-        stats[("kept:" if keep else "dropped:") + reason] += 1
-        line = f"[{reason}{' ' + ','.join(sorted(tickers)) if tickers else ''}] {rec.get('title', '')[:110]}"
-        (kept if keep else dropped).append(line)
+    try:
+        for i, rec in enumerate(records):
+            if i >= args.n:
+                break
+            keep, reason, tickers = is_relevant_post(rec, matcher)
+            stats[("kept:" if keep else "dropped:") + reason] += 1
+            tag = reason + (" " + ",".join(sorted(tickers)) if tickers else "")
+            (kept if keep else dropped).append(f"[{tag}] {rec.get('title', '')[:110]}")
+    except RuntimeError as e:
+        if not stats:
+            raise
+        print(f"\nstopped early after {sum(stats.values()):,} posts: {e}\n")
     _print_stats("posts", stats)
     rng = random.Random(0)
     for label, rows in (("KEPT", kept), ("DROPPED", dropped)):
@@ -562,33 +567,68 @@ def _iso(value) -> str:
     return value
 
 
+class _Page(list):
+    """A page of results that remembers the page size actually requested."""
+
+    limit_used: int | None = None
+
+
+_arctic_penalty = 0.0  # extra seconds between requests; grows on timeouts, decays on success
+
+
+def _is_transient(code: int, body: str) -> bool:
+    """429 and 5xx are retryable. So is the 422 this API uses for query timeouts."""
+    if code == 429 or code >= 500:
+        return True
+    return any(w in body.lower() for w in ("timeout", "timed out", "slow down"))
+
+
 def _arctic_get(endpoint: str, params: dict, polite_delay: float) -> list[dict]:
+    """GET one page, retrying transient failures. Shrinks ``limit`` after repeated timeouts
+    (the API's own advice for "Query timed out"). The returned page records the size it
+    actually used in ``limit_used`` so callers can tell a short page from the last page."""
+    global _arctic_penalty
     params = {k: (_iso(v) if k in ("after", "before") else v) for k, v in params.items()}
-    url = f"{ARCTIC_BASE}/{endpoint}?{urllib.parse.urlencode(params)}"
+    timeouts, last = 0, "no response"
     for attempt in range(8):
+        url = f"{ARCTIC_BASE}/{endpoint}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 payload = json.load(r)
-            time.sleep(polite_delay)
             if payload.get("error"):
                 raise RuntimeError(payload["error"])
-            return payload.get("data") or []
+            time.sleep(polite_delay + _arctic_penalty)
+            _arctic_penalty *= 0.5
+            page = _Page(payload.get("data") or [])
+            page.limit_used = int(params.get("limit") or 0) or None
+            return page
         except urllib.error.HTTPError as e:
+            body = _http_error_text(e)
+            if not _is_transient(e.code, body):
+                raise RuntimeError(
+                    f"Arctic Shift rejected the request ({body})\n  url: {url}"
+                ) from e
+            last = body
             if e.code == 429:
                 wait = float(e.headers.get("X-RateLimit-Reset") or 30)
-                print(f"    rate limited; sleeping {wait:.0f}s")
-                time.sleep(wait + 1)
-                continue
-            if e.code >= 500:
-                time.sleep(2**attempt)
-                continue
-            raise RuntimeError(f"Arctic Shift rejected the request ({_http_error_text(e)})\n"
-                               f"  url: {url}") from e
-        except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
+            else:
+                timeouts += 1
+                wait = min(60.0, 2.0**attempt) + random.random()
+                _arctic_penalty = min(30.0, _arctic_penalty + 1.0)
+                if timeouts >= 2 and int(params.get("limit", 0) or 0) > 10:
+                    params["limit"] = max(10, int(params["limit"]) // 2)
+            print(f"    transient error ({body[:80]}); retrying in {wait:.0f}s "
+                  f"(limit={params.get('limit')})")
+            time.sleep(wait)
+        except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError) as e:
+            last = repr(e)
             print(f"    {e!r}; retrying")
-            time.sleep(2**attempt)
-    raise RuntimeError(f"giving up on {url}")
+            time.sleep(min(60.0, 2.0**attempt))
+    raise RuntimeError(
+        f"Arctic Shift kept failing (last: {last}). It is a free best-effort service and may "
+        f"be overloaded: try again later or raise --delay.\n  url: {url}"
+    )
 
 
 def fetch_window(fetch, endpoint: str, sub: str | None, start: int, end: int, limit: int,
@@ -597,7 +637,7 @@ def fetch_window(fetch, endpoint: str, sub: str | None, start: int, end: int, li
 
     Pages by the last-seen timestamp: re-queries from one second before it and
     de-duplicates by id, so it works whether the API's ``after`` is inclusive
-    or exclusive. Only fails if more than ``limit`` items share ~2 seconds, in
+    or exclusive. Only misbehaves if more than ``limit`` items share ~2 seconds, in
     which case it warns and skips ahead one second.
     """
     cursor = start
@@ -608,15 +648,16 @@ def fetch_window(fetch, endpoint: str, sub: str | None, start: int, end: int, li
             params["subreddit"] = sub
         params.update(extra or {})
         page = fetch(endpoint, params)
+        eff_limit = getattr(page, "limit_used", None) or limit  # may have been shrunk
         fresh = [
             it
             for it in page
             if cursor <= int(it["created_utc"]) < end and it["id"] not in seen_at_cursor
         ]
         if not fresh:
-            if len(page) < limit:
+            if len(page) < eff_limit:
                 return
-            print(f"    warning: >{limit} items near ts={cursor}; some may be skipped")
+            print(f"    warning: >{eff_limit} items near ts={cursor}; some may be skipped")
             cursor, seen_at_cursor = cursor + 1, set()
             continue
         yield from fresh
@@ -625,7 +666,7 @@ def fetch_window(fetch, endpoint: str, sub: str | None, start: int, end: int, li
             seen_at_cursor = set()
             cursor = last_ts
         seen_at_cursor.update(it["id"] for it in fresh if int(it["created_utc"]) == cursor)
-        if len(page) < limit:
+        if len(page) < eff_limit:
             return
 
 

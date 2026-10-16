@@ -49,6 +49,10 @@ Run `check`: it prints PASS/FAIL per service with the server's own error message
   browser, download the `.torrent`, and pass it with `--torrent /path/to/file.torrent`.
 - **Arctic Shift rejects a request (4xx):** the message includes the API's reason and the
   exact URL; paste it into an issue and the parameters can be adjusted.
+- **Arctic Shift says "Timeout. Maybe slow down a bit" (HTTP 422):** it's a free, best-effort
+  service and its queries time out under load. The script retries automatically with
+  backoff and smaller pages. If it keeps failing, raise `--delay` (e.g. `--delay 3`) or try
+  at a quieter time.
 - **SEC ticker list refused (403):** pass your own list with `--tickers myfile.txt`
   (one symbol per line).
 
