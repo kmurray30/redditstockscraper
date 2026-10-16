@@ -283,8 +283,12 @@ def _ensure_torrent(src: str, out: Path) -> Path:
     return path
 
 
-def _aria2_fetch(torrent_path: Path, indices: list[int], out: Path) -> int:
-    """Download only the given (1-based) file indices of a torrent into ``out``."""
+def _aria2_fetch(torrent_path: Path, indices: list[int], out: Path,
+                 check_integrity: bool = False) -> int:
+    """Download only the given (1-based) file indices of a torrent into ``out``.
+
+    ``check_integrity`` makes aria2c hash what is already on disk and fetch only the
+    pieces that are missing or wrong."""
     aria2 = _require_aria2()
     if not aria2:
         return 1
@@ -299,6 +303,8 @@ def _aria2_fetch(torrent_path: Path, indices: list[int], out: Path) -> int:
         f"--dir={out}",
         str(torrent_path),
     ]
+    if check_integrity:
+        cmd.insert(1, "--check-integrity=true")
     print(" ".join(cmd))
     return subprocess.call(cmd)
 
@@ -428,6 +434,22 @@ def _aria2_sidecar(raw: Path) -> Path:
     return raw.with_name(raw.name + ".aria2")
 
 
+def _marker(raw: Path) -> Path:
+    """Written by us once aria2c exited 0 and the file has its full size."""
+    return raw.with_name(raw.name + ".ok")
+
+
+def _control_files(raw_dir: Path, rel: str) -> list[Path]:
+    """aria2c's progress files that exist for ``rel``.
+
+    A multi-file torrent has ONE control file for the whole torrent, named after its
+    top-level folder (``<raw_dir>/<folder>.aria2``); single files get ``<file>.aria2``.
+    """
+    top = Path(rel).parts[0]
+    candidates = [raw_dir / f"{top}.aria2", _aria2_sidecar(raw_dir / rel)]
+    return [c for c in dict.fromkeys(candidates) if c.exists()]
+
+
 def _locate(raw_dir: Path, rel: str) -> Path | None:
     """Where aria2c put the file: the expected path, else search by file name."""
     expected = raw_dir / rel
@@ -437,14 +459,8 @@ def _locate(raw_dir: Path, rel: str) -> Path | None:
     return found[0] if found else None
 
 
-def _is_complete(raw: Path | None, size: int) -> bool:
-    """Complete = right size AND no aria2c control file.
-
-    Size alone is not enough: aria2c (with --file-allocation=none) can write the last
-    piece early, so an unfinished file may already have its full length. The ``.aria2``
-    sidecar exists exactly while the download is unfinished.
-    """
-    return bool(raw) and raw.stat().st_size == size and not _aria2_sidecar(raw).exists()
+def _size_ok(raw: Path | None, size: int) -> bool:
+    return raw is not None and raw.is_file() and raw.stat().st_size == size
 
 
 def _fetch_raw(sub, kind, files, torrent_path, raw_dir) -> Path | None:
@@ -454,20 +470,39 @@ def _fetch_raw(sub, kind, files, torrent_path, raw_dir) -> Path | None:
         return None
     idx, rel, size = chosen[0]
     raw = _locate(raw_dir, rel)
-    if _is_complete(raw, size):
+    # Size alone can't prove completeness (aria2c may write the last piece first), and
+    # aria2c's own bookkeeping can lie, so we trust only our marker plus the exact size.
+    if _size_ok(raw, size) and _marker(raw).exists():
         print(f"  using existing {raw}")
         return raw
-    if raw is not None and _aria2_sidecar(raw).exists():
-        print(f"  resuming partial download of {Path(rel).name}")
+    if raw is not None:
+        print(f"  resuming {Path(rel).name} ({human(size)})")
     else:
         print(f"  downloading {Path(rel).name} ({human(size)})")
     rc = _aria2_fetch(torrent_path, [idx], raw_dir)
     raw = _locate(raw_dir, rel)
-    if rc != 0 or not _is_complete(raw, size):
+    if rc == 0 and not _size_ok(raw, size):
+        # aria2c says "done" but the file isn't there: its control file still records
+        # pieces we deleted. Throw the bookkeeping away and have it re-check the disk.
+        stale = _control_files(raw_dir, rel)
+        if stale:
+            print("  aria2c reported success without the file; its progress record is stale. "
+                  "Resetting it and retrying.")
+            for c in stale:
+                c.unlink(missing_ok=True)
+            rc = _aria2_fetch(torrent_path, [idx], raw_dir, check_integrity=True)
+            raw = _locate(raw_dir, rel)
+    if rc != 0 or not _size_ok(raw, size):
+        actual = raw.stat().st_size if raw is not None and raw.is_file() else "missing"
+        controls = ", ".join(c.name for c in _control_files(raw_dir, rel)) or "none"
         raise RuntimeError(
-            f"download of {Path(rel).name} did not finish (aria2c exit code {rc}). "
-            "Nothing was lost: rerun the same command and it will resume where it stopped."
+            f"download of {Path(rel).name} did not finish (aria2c exit code {rc}).\n"
+            f"  expected size: {size:,}   on disk: {actual if actual == 'missing' else f'{actual:,}'}\n"
+            f"  aria2c control files present: {controls}\n"
+            "  Rerun the same command to resume. A tracker message such as 'Torrent not "
+            "registered' is usually harmless; peers also come from other sources."
         )
+    _marker(raw).write_text(str(size))
     sweep_fragments(files, raw.parent, keep=raw)
     return raw
 
@@ -507,11 +542,23 @@ def cmd_clean_raw(args) -> int:
     return 0
 
 
-def _discard(raw: Path, keep_raw: bool) -> None:
+def _discard(raw: Path, keep_raw: bool, raw_dir: Path) -> None:
+    """Delete a raw file together with every record that says it exists.
+
+    Deleting only the data would leave aria2c's control file claiming the pieces are done,
+    so the next download of that file would "succeed" instantly without writing anything.
+    """
     if keep_raw:
         return
+    try:
+        rel = str(raw.relative_to(raw_dir))
+    except ValueError:
+        rel = raw.name
+    controls = _control_files(raw_dir, rel)
     raw.unlink(missing_ok=True)
-    Path(str(raw) + ".aria2").unlink(missing_ok=True)
+    _marker(raw).unlink(missing_ok=True)
+    for c in controls:
+        c.unlink(missing_ok=True)
 
 
 def _print_stats(label: str, stats: Counter) -> None:
@@ -553,7 +600,7 @@ def run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, yea
                                 min_link_comments)
         counter.write_csv(sub_dir / "mentions_posts.csv")
         _write_json(posts_stage, {**stamp, "stats": post_stats, "raw_bytes": raw.stat().st_size})
-        _discard(raw, keep_raw)
+        _discard(raw, keep_raw, raw_dir)
     _print_stats("posts", post_stats)
 
     comment_stats: Counter = Counter()
@@ -566,7 +613,7 @@ def run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, yea
                 filter_comments(iter_records(raw), sub, kept, matcher, counter, years, w,
                                 comment_stats)
             counter.write_csv(sub_dir / "mentions_comments.csv")
-            _discard(raw, keep_raw)
+            _discard(raw, keep_raw, raw_dir)
         _print_stats("comments", comment_stats)
 
     manifest = {

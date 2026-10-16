@@ -60,6 +60,17 @@ subreddits' files. `pipeline` deletes those fragments after each download; run
 `python scripts/download_reddit.py clean-raw` to sweep ones already on disk. Complete files and
 resumable partial downloads are never touched.
 
+### Don't delete raw files by hand
+
+aria2c keeps one progress file for the whole torrent (`data/raw/reddit/reddit.aria2`). If you
+delete a raw `.zst` yourself, that file still says the data exists and aria2c will report
+"download completed, 0 B/s" without writing anything. The pipeline now notices this, resets the
+progress file and re-downloads, and it cleans up after itself when it discards a raw file. Let it
+(or `clean-raw`) do the deleting.
+
+A tracker line such as `Torrent not registered with Academic Torrents` is usually harmless; peers
+also come from other sources.
+
 ### Stopping and resuming
 
 Ctrl-C is safe at any point. Outputs are written to temporary `.part` files and renamed only

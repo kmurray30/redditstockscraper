@@ -503,12 +503,13 @@ def test_full_size_file_with_aria2_sidecar_is_not_treated_as_complete(tmp_path, 
     assert calls == [[1]]  # resumed instead of trusting the file
 
 
-def test_complete_file_without_sidecar_is_reused(tmp_path, monkeypatch):
+def test_complete_file_with_marker_is_reused(tmp_path, monkeypatch):
     torrent, files = _one_file_torrent(tmp_path, 10)
     raw_dir = tmp_path / "raw"
     f = raw_dir / "reddit" / "subreddits24" / "stocks_submissions.zst"
     f.parent.mkdir(parents=True)
     f.write_bytes(b"x" * 10)
+    dr._marker(f).write_text("10")
     monkeypatch.setattr(dr, "_aria2_fetch", lambda *a: pytest.fail("should not download"))
     assert dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir) == f
 
@@ -531,7 +532,7 @@ def test_file_is_found_by_name_if_aria2_used_a_different_layout(tmp_path, monkey
 def test_unfinished_download_raises_with_resume_hint(tmp_path, monkeypatch):
     torrent, files = _one_file_torrent(tmp_path, 10)
     monkeypatch.setattr(dr, "_aria2_fetch", lambda *a: 7)  # aria2c interrupted / failed
-    with pytest.raises(RuntimeError, match="rerun the same command"):
+    with pytest.raises(RuntimeError, match="Rerun the same command"):
         dr._fetch_raw("stocks", "submissions", files, torrent, tmp_path / "raw")
 
 
@@ -657,3 +658,74 @@ def test_report_command(tmp_path, capsys):
     assert "[2018 NET] Thesis on NET" in text
     assert "2018:      1 posts        4 comments" in text
     assert dr.main(["report", "--sub", "nope", "--out", str(tmp_path)]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# stale aria2c control file ("OK, 0B/s" but the file is gone)
+# --------------------------------------------------------------------------- #
+
+
+def test_stale_torrent_control_file_is_reset_and_retried(tmp_path, monkeypatch, capsys):
+    torrent, files = _one_file_torrent(tmp_path, 10)
+    raw_dir = tmp_path / "raw"
+    control = raw_dir / "reddit.aria2"  # one control file for the whole torrent folder
+    control.parent.mkdir(parents=True)
+    control.write_bytes(b"says every piece is done")
+    target = raw_dir / "reddit" / "subreddits24" / "stocks_submissions.zst"
+    calls = []
+
+    def fake_aria2(torrent_path, indices, out, check_integrity=False):
+        calls.append(check_integrity)
+        if control.exists():  # aria2c trusts its record: exits 0 having written nothing
+            return 0
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x" * 10)
+        return 0
+
+    monkeypatch.setattr(dr, "_aria2_fetch", fake_aria2)
+    got = dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir)
+    assert got == target and calls == [False, True]
+    assert not control.exists() and dr._marker(target).exists()
+    assert "progress record is stale" in capsys.readouterr().out
+
+
+def test_file_without_marker_is_checked_by_aria2_even_if_size_matches(tmp_path, monkeypatch):
+    torrent, files = _one_file_torrent(tmp_path, 10)
+    raw_dir = tmp_path / "raw"
+    f = raw_dir / "reddit" / "subreddits24" / "stocks_submissions.zst"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"x" * 10)  # full length; could still have holes
+    calls = []
+    monkeypatch.setattr(dr, "_aria2_fetch", lambda *a, **k: calls.append(a) or 0)
+    assert dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir) == f
+    assert len(calls) == 1 and dr._marker(f).exists()
+
+
+def test_discard_removes_marker_and_aria2_records(tmp_path):
+    raw_dir = tmp_path / "raw"
+    f = raw_dir / "reddit" / "subreddits24" / "a.zst"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"x")
+    dr._marker(f).write_text("1")
+    (raw_dir / "reddit.aria2").write_bytes(b"c")
+    dr._discard(f, keep_raw=False, raw_dir=raw_dir)
+    assert not f.exists() and not dr._marker(f).exists() and not (raw_dir / "reddit.aria2").exists()
+    # --keep-raw leaves everything alone
+    f.write_bytes(b"x")
+    dr._marker(f).write_text("1")
+    (raw_dir / "reddit.aria2").write_bytes(b"c")
+    dr._discard(f, keep_raw=True, raw_dir=raw_dir)
+    assert f.exists() and dr._marker(f).exists() and (raw_dir / "reddit.aria2").exists()
+
+
+def test_persistent_failure_reports_sizes_and_control_files(tmp_path, monkeypatch):
+    torrent, files = _one_file_torrent(tmp_path, 10)
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "reddit.aria2").write_bytes(b"c")
+    monkeypatch.setattr(dr, "_aria2_fetch", lambda *a, **k: 0)  # never writes the file
+    with pytest.raises(RuntimeError) as ei:
+        dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir)
+    msg = str(ei.value)
+    assert "expected size: 10" in msg and "on disk: missing" in msg
+    assert "Torrent not registered" in msg
