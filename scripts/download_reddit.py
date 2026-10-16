@@ -285,12 +285,8 @@ def _ensure_torrent(src: str, out: Path) -> Path:
     return path
 
 
-def _aria2_fetch(torrent_path: Path, indices: list[int], out: Path,
-                 check_integrity: bool = False) -> int:
-    """Download only the given (1-based) file indices of a torrent into ``out``.
-
-    ``check_integrity`` makes aria2c hash what is already on disk and fetch only the
-    pieces that are missing or wrong."""
+def _aria2_fetch(torrent_path: Path, indices: list[int], out: Path) -> int:
+    """Download only the given (1-based) file indices of a torrent into ``out``."""
     aria2 = _require_aria2()
     if not aria2:
         return 1
@@ -305,8 +301,6 @@ def _aria2_fetch(torrent_path: Path, indices: list[int], out: Path,
         f"--dir={out}",
         str(torrent_path),
     ]
-    if check_integrity:
-        cmd.insert(1, "--check-integrity=true")
     print(
         "  Note: lines saying 'Torrent not registered' or 'Checksum error' are normal. It is\n"
         "  working while the progress line (DL: speed, ETA) keeps moving. A small file can show a\n"
@@ -447,18 +441,24 @@ def _aria2_sidecar(raw: Path) -> Path:
 
 
 def _marker(raw: Path) -> Path:
-    """Written by us once aria2c exited 0 and the file has its full size."""
+    """Written by us once a file is verified and moved into place."""
     return raw.with_name(raw.name + ".ok")
 
 
-def _control_files(raw_dir: Path, rel: str) -> list[Path]:
-    """aria2c's progress files that exist for ``rel``.
+def _workdir(raw_dir: Path, sub: str, kind: str) -> Path:
+    """Private scratch folder for one fetch. aria2c's progress file, resume state and the
+    bytes it writes for neighbouring files all stay in here and are deleted together."""
+    return raw_dir / ".work" / f"{sub}_{kind}"
+
+
+def _control_files(folder: Path, rel: str) -> list[Path]:
+    """aria2c's progress files in ``folder``.
 
     A multi-file torrent has ONE control file for the whole torrent, named after its
-    top-level folder (``<raw_dir>/<folder>.aria2``); single files get ``<file>.aria2``.
+    top-level folder (``<folder>/<top>.aria2``); single files get ``<file>.aria2``.
     """
     top = Path(rel).parts[0]
-    candidates = [raw_dir / f"{top}.aria2", _aria2_sidecar(raw_dir / rel)]
+    candidates = [folder / f"{top}.aria2", _aria2_sidecar(folder / rel)]
     return [c for c in dict.fromkeys(candidates) if c.exists()]
 
 
@@ -467,7 +467,7 @@ def _locate(raw_dir: Path, rel: str) -> Path | None:
     expected = raw_dir / rel
     if expected.exists():
         return expected
-    found = sorted(raw_dir.rglob(Path(rel).name))
+    found = sorted(raw_dir.rglob(Path(rel).name)) if raw_dir.exists() else []
     return found[0] if found else None
 
 
@@ -476,50 +476,47 @@ def _size_ok(raw: Path | None, size: int) -> bool:
 
 
 def _fetch_raw(sub, kind, files, torrent_path, raw_dir) -> Path | None:
+    """Return a verified local copy of ``<sub>_<kind>.zst``, downloading it if needed.
+
+    Each download happens in its own scratch folder. aria2c refuses to start in a torrent
+    folder that already exists without its progress file, and it downloads whole pieces, so
+    it also writes the edges of the neighbouring files, which then look like real files
+    (sparse, even full length). Isolating the fetch avoids both: only a file that aria2c
+    finished, whose size matches, is moved into ``raw_dir`` and given an ``.ok`` marker, and
+    everything else is deleted with the scratch folder.
+    """
     chosen, _ = select_files(files, [sub], [kind])
     if not chosen:
         print(f"  {sub}_{kind}.zst is not in the torrent; skipping")
         return None
     idx, rel, size = chosen[0]
-    raw = _locate(raw_dir, rel)
-    # Trust only what we verified: our marker plus the exact size. Size alone proves
-    # nothing (aria2c may write the last piece first, leaving a sparse file of full length).
-    if _size_ok(raw, size) and _marker(raw).exists():
-        print(f"  using existing {raw}")
-        return raw
-    if raw is not None and raw.is_file() and not _control_files(raw_dir, rel):
-        # No aria2c progress record, so this can't be a download we are resuming: it is
-        # spill from a neighbouring file's download (mostly holes). aria2c would refuse it.
-        print(f"  discarding an unverified leftover copy of {Path(rel).name}")
-        raw.unlink()
-        _marker(raw).unlink(missing_ok=True)
-        raw = None
-    if raw is not None:
+    final = raw_dir / rel
+    if _size_ok(final, size) and _marker(final).exists():
+        print(f"  using existing {final}")
+        return final
+
+    work = _workdir(raw_dir, sub, kind)
+    if work.exists() and not _control_files(work, rel):
+        shutil.rmtree(work)  # leftovers with no progress record: can't be resumed
+    if work.exists():
         print(f"  resuming {Path(rel).name} ({human(size)})")
     else:
         print(f"  downloading {Path(rel).name} ({human(size)})")
-    rc = _aria2_fetch(torrent_path, [idx], raw_dir)
-    raw = _locate(raw_dir, rel)
-    if rc == 13 and raw is not None and raw.is_file():
-        # "file exists but control file does not": same situation, caught late
-        print("  aria2c refused an existing unverified file; deleting it and retrying")
-        raw.unlink()
-        rc = _aria2_fetch(torrent_path, [idx], raw_dir)
-        raw = _locate(raw_dir, rel)
-    if rc == 0 and not _size_ok(raw, size):
-        # aria2c says "done" but the file isn't there: its control file still records
-        # pieces we deleted. Throw the bookkeeping away and have it re-check the disk.
-        stale = _control_files(raw_dir, rel)
-        if stale:
-            print("  aria2c reported success without the file; its progress record is stale. "
-                  "Resetting it and retrying.")
-            for c in stale:
-                c.unlink(missing_ok=True)
-            rc = _aria2_fetch(torrent_path, [idx], raw_dir, check_integrity=True)
-            raw = _locate(raw_dir, rel)
-    if rc != 0 or not _size_ok(raw, size):
-        actual = raw.stat().st_size if raw is not None and raw.is_file() else "missing"
-        controls = ", ".join(c.name for c in _control_files(raw_dir, rel)) or "none"
+    work.mkdir(parents=True, exist_ok=True)
+
+    rc = _aria2_fetch(torrent_path, [idx], work)
+    got = _locate(work, rel)
+    if rc == 0 and not _size_ok(got, size):
+        # aria2c says "done" but the file isn't there or is short: its progress record is
+        # out of step with the disk. Start this one fetch over in a clean folder.
+        print("  aria2c reported success without the complete file; starting this file over.")
+        shutil.rmtree(work)
+        work.mkdir(parents=True)
+        rc = _aria2_fetch(torrent_path, [idx], work)
+        got = _locate(work, rel)
+    if rc != 0 or not _size_ok(got, size):
+        actual = got.stat().st_size if got is not None and got.is_file() else "missing"
+        controls = ", ".join(c.name for c in _control_files(work, rel)) or "none"
         raise RuntimeError(
             f"download of {Path(rel).name} did not finish (aria2c exit code {rc}).\n"
             f"  expected size: {size:,}   on disk: {actual if actual == 'missing' else f'{actual:,}'}\n"
@@ -527,80 +524,67 @@ def _fetch_raw(sub, kind, files, torrent_path, raw_dir) -> Path | None:
             "  Rerun the same command to resume. A tracker message such as 'Torrent not "
             "registered' is usually harmless; peers also come from other sources."
         )
-    _marker(raw).write_text(str(size))
-    # The download also wrote bytes of neighbouring files (whole pieces overlap file
-    # boundaries). Delete that spill AND aria2c's record of it: a record claiming pieces are
-    # done after we deleted their data would make a later download finish with holes.
-    sweep_untrusted(files, raw.parent, keep=raw)
-    for c in _control_files(raw_dir, rel):
-        c.unlink(missing_ok=True)
-    return raw
+
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.unlink(missing_ok=True)
+    shutil.move(str(got), str(final))
+    _marker(final).write_text(str(size))
+    shutil.rmtree(work, ignore_errors=True)  # spill, control file and all
+    return final
 
 
-def sweep_untrusted(files, folder: Path, keep: Path | None = None) -> tuple[int, int]:
-    """Delete every file of the torrent in ``folder`` that we have not verified.
+def sweep_untrusted(files, folder: Path) -> tuple[int, int]:
+    """Delete every file of the torrent in ``folder`` that has no ``.ok`` marker.
 
-    Torrent files are stored back to back and aria2c downloads whole pieces, so fetching
-    one file also writes the edges of its neighbours. With ``--file-allocation=none`` such a
-    neighbour can even have its full length while being mostly holes, so size cannot tell
-    spill from a real file. Only files with our ``.ok`` marker are trusted. ``keep`` is the
-    file just fetched. Returns ``(files_removed, bytes_freed)``.
+    Older versions downloaded straight into ``raw_dir``, leaving unverified neighbour spill
+    there. Size can't identify spill (it may have its full length while mostly holes), so
+    only marked files are trusted. Returns ``(files_removed, bytes_freed)``.
     """
     declared = {Path(rel).name for _, rel, _ in files}
     removed = freed = 0
     if not folder.is_dir():
         return 0, 0
     for f in folder.iterdir():
-        if f.name not in declared or not f.is_file():
-            continue
-        if (keep and f.resolve() == keep.resolve()) or _marker(f).exists():
-            continue
-        freed += f.stat().st_size
-        f.unlink()
-        removed += 1
+        if f.name in declared and f.is_file() and not _marker(f).exists():
+            freed += f.stat().st_size
+            f.unlink()
+            removed += 1
     return removed, freed
 
 
 def cmd_clean_raw(args) -> int:
+    """Remove scratch folders, old progress files and unverified torrent files."""
     raw_dir = Path(args.raw_dir)
     files = torrent_files(_ensure_torrent(args.torrent, raw_dir).read_bytes())
-    folders = {(raw_dir / rel).parent for _, rel, _ in files}
+    work_root = raw_dir / ".work"
     tops = {Path(rel).parts[0] for _, rel, _ in files}
-    controls = [raw_dir / f"{t}.aria2" for t in tops if (raw_dir / f"{t}.aria2").exists()]
-    for folder in folders:
-        controls += list(folder.glob("*.aria2")) if folder.is_dir() else []
-    if controls and not args.force:
-        print("A download is in progress or was interrupted (" +
-              ", ".join(sorted({c.name for c in controls})) + ").\n"
+    interrupted = [c for w in (work_root.iterdir() if work_root.is_dir() else [])
+                   for c in w.rglob("*.aria2")]
+    if interrupted and not args.force:
+        names = sorted({c.relative_to(work_root).parts[0] for c in interrupted})
+        print("A download was interrupted (" + ", ".join(names) + ").\n"
               "Rerun `pipeline` to finish it, or use --force to throw it away and clean up.")
         return 1
     removed = freed = 0
-    for folder in folders:
+    for f in work_root.rglob("*") if work_root.is_dir() else []:
+        if f.is_file():
+            freed += f.stat().st_size
+    shutil.rmtree(work_root, ignore_errors=True)
+    for folder in {(raw_dir / rel).parent for _, rel, _ in files}:
         r, f = sweep_untrusted(files, folder)
         removed, freed = removed + r, freed + f
-    for c in controls:
-        c.unlink(missing_ok=True)
+    for t in tops:  # progress file left by older versions
+        (raw_dir / f"{t}.aria2").unlink(missing_ok=True)
     print(f"removed {removed} unverified files, freed {human(freed)}")
     return 0
 
 
 def _discard(raw: Path, keep_raw: bool, raw_dir: Path) -> None:
-    """Delete a raw file together with every record that says it exists.
-
-    Deleting only the data would leave aria2c's control file claiming the pieces are done,
-    so the next download of that file would "succeed" instantly without writing anything.
-    """
+    """Delete a verified raw file and its marker."""
     if keep_raw:
         return
-    try:
-        rel = str(raw.relative_to(raw_dir))
-    except ValueError:
-        rel = raw.name
-    controls = _control_files(raw_dir, rel)
     raw.unlink(missing_ok=True)
     _marker(raw).unlink(missing_ok=True)
-    for c in controls:
-        c.unlink(missing_ok=True)
 
 
 def _print_stats(label: str, stats: Counter) -> None:

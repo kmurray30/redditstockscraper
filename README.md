@@ -61,22 +61,21 @@ stoplisted, and text written mostly in capitals only matches `$cashtags`. To add
 word per line in a file and pass `--stoplist myfile.txt` to `pipeline`; changing it re-runs finished
 subreddits. A stoplisted word still counts when written as a cashtag (`$IP`).
 
-### Leftover files in `data/raw`
+### How raw downloads are kept clean
 
 Torrent files are stored back to back and aria2c downloads whole pieces, so fetching one file also
-writes the edges of its neighbours. Those neighbour files can even have their full length while
-being mostly empty, so the script never trusts a raw file by its size. A file is trusted only if
-the script itself verified it (it leaves a `<file>.ok` marker next to it). After every download it
-deletes the unverified neighbours; `clean-raw` does the same on demand, and refuses (unless you pass
-`--force`) while an interrupted download is waiting to be resumed.
+writes the edges of its neighbours (sometimes producing a neighbour with its full length but mostly
+empty), and aria2c refuses to start in a torrent folder that exists without its own progress file.
+So every file is downloaded in its own scratch folder, `data/raw/reddit/.work/<sub>_<kind>/`. Only
+a file that aria2c finished, whose size matches, is moved into `data/raw/reddit/reddit/...` and
+given a `<file>.ok` marker; the scratch folder, with all the spill and progress files, is then
+deleted. `clean-raw` removes scratch folders and any unverified files left by older versions; it
+refuses (unless you pass `--force`) while an interrupted download is waiting to be resumed.
 
 ### Don't delete raw files by hand
 
-aria2c keeps one progress file for the whole torrent (`data/raw/reddit/reddit.aria2`). If you
-delete a raw `.zst` yourself, that file still says the data exists and aria2c will report
-"download completed, 0 B/s" without writing anything. The pipeline now notices this, resets the
-progress file and re-downloads, and it cleans up after itself when it discards a raw file. Let it
-(or `clean-raw`) do the deleting.
+Let the pipeline (or `clean-raw`) do the deleting; the `.ok` markers and scratch folders are how it
+knows what it can trust.
 
 Two aria2c messages look like errors but are normal: `Torrent not registered with Academic
 Torrents` (peers come from other sources) and `Checksum error detected` right after an integrity
