@@ -482,17 +482,30 @@ def _fetch_raw(sub, kind, files, torrent_path, raw_dir) -> Path | None:
         return None
     idx, rel, size = chosen[0]
     raw = _locate(raw_dir, rel)
-    # Size alone can't prove completeness (aria2c may write the last piece first), and
-    # aria2c's own bookkeeping can lie, so we trust only our marker plus the exact size.
+    # Trust only what we verified: our marker plus the exact size. Size alone proves
+    # nothing (aria2c may write the last piece first, leaving a sparse file of full length).
     if _size_ok(raw, size) and _marker(raw).exists():
         print(f"  using existing {raw}")
         return raw
+    if raw is not None and raw.is_file() and not _control_files(raw_dir, rel):
+        # No aria2c progress record, so this can't be a download we are resuming: it is
+        # spill from a neighbouring file's download (mostly holes). aria2c would refuse it.
+        print(f"  discarding an unverified leftover copy of {Path(rel).name}")
+        raw.unlink()
+        _marker(raw).unlink(missing_ok=True)
+        raw = None
     if raw is not None:
         print(f"  resuming {Path(rel).name} ({human(size)})")
     else:
         print(f"  downloading {Path(rel).name} ({human(size)})")
     rc = _aria2_fetch(torrent_path, [idx], raw_dir)
     raw = _locate(raw_dir, rel)
+    if rc == 13 and raw is not None and raw.is_file():
+        # "file exists but control file does not": same situation, caught late
+        print("  aria2c refused an existing unverified file; deleting it and retrying")
+        raw.unlink()
+        rc = _aria2_fetch(torrent_path, [idx], raw_dir)
+        raw = _locate(raw_dir, rel)
     if rc == 0 and not _size_ok(raw, size):
         # aria2c says "done" but the file isn't there: its control file still records
         # pieces we deleted. Throw the bookkeeping away and have it re-check the disk.
@@ -515,42 +528,59 @@ def _fetch_raw(sub, kind, files, torrent_path, raw_dir) -> Path | None:
             "registered' is usually harmless; peers also come from other sources."
         )
     _marker(raw).write_text(str(size))
-    sweep_fragments(files, raw.parent, keep=raw)
+    # The download also wrote bytes of neighbouring files (whole pieces overlap file
+    # boundaries). Delete that spill AND aria2c's record of it: a record claiming pieces are
+    # done after we deleted their data would make a later download finish with holes.
+    sweep_untrusted(files, raw.parent, keep=raw)
+    for c in _control_files(raw_dir, rel):
+        c.unlink(missing_ok=True)
     return raw
 
 
-def sweep_fragments(files, folder: Path, keep: Path | None = None) -> tuple[int, int]:
-    """Delete leftover bytes of neighbouring torrent files from ``folder``.
+def sweep_untrusted(files, folder: Path, keep: Path | None = None) -> tuple[int, int]:
+    """Delete every file of the torrent in ``folder`` that we have not verified.
 
-    Torrent files are contiguous, so aria2c must download whole pieces that overlap file
-    boundaries and writes the overlapping bytes of adjacent files too. Those fragments are
-    incomplete (wrong size) and useless. Never touched: complete files (exact declared
-    size), the file in ``keep``, and anything with an ``.aria2`` sidecar (a download that
-    can still be resumed). Returns ``(files_removed, bytes_freed)``.
+    Torrent files are stored back to back and aria2c downloads whole pieces, so fetching
+    one file also writes the edges of its neighbours. With ``--file-allocation=none`` such a
+    neighbour can even have its full length while being mostly holes, so size cannot tell
+    spill from a real file. Only files with our ``.ok`` marker are trusted. ``keep`` is the
+    file just fetched. Returns ``(files_removed, bytes_freed)``.
     """
-    declared = {Path(rel).name: size for _, rel, size in files}
+    declared = {Path(rel).name for _, rel, _ in files}
     removed = freed = 0
     if not folder.is_dir():
         return 0, 0
     for f in folder.iterdir():
-        size = declared.get(f.name)
-        if size is None or not f.is_file() or (keep and f.resolve() == keep.resolve()):
+        if f.name not in declared or not f.is_file():
             continue
-        if f.stat().st_size != size and not _aria2_sidecar(f).exists():
-            freed += f.stat().st_size
-            f.unlink()
-            removed += 1
+        if (keep and f.resolve() == keep.resolve()) or _marker(f).exists():
+            continue
+        freed += f.stat().st_size
+        f.unlink()
+        removed += 1
     return removed, freed
 
 
 def cmd_clean_raw(args) -> int:
     raw_dir = Path(args.raw_dir)
     files = torrent_files(_ensure_torrent(args.torrent, raw_dir).read_bytes())
+    folders = {(raw_dir / rel).parent for _, rel, _ in files}
+    tops = {Path(rel).parts[0] for _, rel, _ in files}
+    controls = [raw_dir / f"{t}.aria2" for t in tops if (raw_dir / f"{t}.aria2").exists()]
+    for folder in folders:
+        controls += list(folder.glob("*.aria2")) if folder.is_dir() else []
+    if controls and not args.force:
+        print("A download is in progress or was interrupted (" +
+              ", ".join(sorted({c.name for c in controls})) + ").\n"
+              "Rerun `pipeline` to finish it, or use --force to throw it away and clean up.")
+        return 1
     removed = freed = 0
-    for folder in {(raw_dir / rel).parent for _, rel, _ in files}:
-        r, f = sweep_fragments(files, folder)
+    for folder in folders:
+        r, f = sweep_untrusted(files, folder)
         removed, freed = removed + r, freed + f
-    print(f"removed {removed} leftover fragment files, freed {human(freed)}")
+    for c in controls:
+        c.unlink(missing_ok=True)
+    print(f"removed {removed} unverified files, freed {human(freed)}")
     return 0
 
 
@@ -1019,9 +1049,11 @@ def main(argv=None) -> int:
     p.add_argument("--out", default="data/corpus/reddit")
     p.set_defaults(func=cmd_report)
 
-    p = sp.add_parser("clean-raw", help="delete leftover neighbour-file fragments from raw downloads")
+    p = sp.add_parser("clean-raw", help="delete unverified leftover files from raw downloads")
     torrent(p)
     p.add_argument("--raw-dir", default="data/raw/reddit")
+    p.add_argument("--force", action="store_true",
+                   help="also discard an interrupted download's progress record")
     p.set_defaults(func=cmd_clean_raw)
 
     p = sp.add_parser("check", help="test each external service once (run this first)")

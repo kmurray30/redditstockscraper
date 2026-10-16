@@ -63,10 +63,12 @@ subreddits. A stoplisted word still counts when written as a cashtag (`$IP`).
 
 ### Leftover files in `data/raw`
 
-Torrent files are stored back to back, so aria2c also writes the edges of neighbouring
-subreddits' files. `pipeline` deletes those fragments after each download; run
-`python scripts/download_reddit.py clean-raw` to sweep ones already on disk. Complete files and
-resumable partial downloads are never touched.
+Torrent files are stored back to back and aria2c downloads whole pieces, so fetching one file also
+writes the edges of its neighbours. Those neighbour files can even have their full length while
+being mostly empty, so the script never trusts a raw file by its size. A file is trusted only if
+the script itself verified it (it leaves a `<file>.ok` marker next to it). After every download it
+deletes the unverified neighbours; `clean-raw` does the same on demand, and refuses (unless you pass
+`--force`) while an interrupted download is waiting to be resumed.
 
 ### Don't delete raw files by hand
 

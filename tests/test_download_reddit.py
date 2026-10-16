@@ -599,39 +599,44 @@ def test_pipeline_drops_empty_comments_and_keeps_discussed_links(tmp_path, monke
     assert m["min_link_comments"] == 1 and m["posts"]["kept:discussed_link"] == 2
 
 
-def test_sweep_fragments_only_removes_incomplete_neighbours(tmp_path):
+def test_sweep_untrusted_deletes_unmarked_files_even_if_full_length(tmp_path):
     files = [(1, "r/d/a_comments.zst", 100), (2, "r/d/b_comments.zst", 100),
              (3, "r/d/c_comments.zst", 100), (4, "r/d/d_comments.zst", 100)]
     folder = tmp_path / "r" / "d"
     folder.mkdir(parents=True)
-    (folder / "a_comments.zst").write_bytes(b"x" * 100)   # the file we fetched
-    (folder / "b_comments.zst").write_bytes(b"x" * 30)    # fragment -> removed
-    (folder / "c_comments.zst").write_bytes(b"x" * 100)   # complete kept raw file -> kept
-    (folder / "d_comments.zst").write_bytes(b"x" * 40)    # resumable partial...
-    (folder / "d_comments.zst.aria2").write_bytes(b"ctl")  # ...has a sidecar -> kept
+    (folder / "a_comments.zst").write_bytes(b"x" * 100)   # the file we just fetched
+    (folder / "b_comments.zst").write_bytes(b"\0" * 100)  # sparse spill: full length, no marker
+    (folder / "c_comments.zst").write_bytes(b"x" * 100)   # verified earlier (--keep-raw)
+    dr._marker(folder / "c_comments.zst").write_text("100")
+    (folder / "d_comments.zst").write_bytes(b"x" * 40)    # partial spill
     (folder / "unrelated.txt").write_bytes(b"hi")
-    removed, freed = dr.sweep_fragments(files, folder, keep=folder / "a_comments.zst")
-    assert (removed, freed) == (1, 30)
+    removed, freed = dr.sweep_untrusted(files, folder, keep=folder / "a_comments.zst")
+    assert (removed, freed) == (2, 140)
     assert sorted(p.name for p in folder.iterdir()) == [
-        "a_comments.zst", "c_comments.zst", "d_comments.zst", "d_comments.zst.aria2",
-        "unrelated.txt"]
-    # a fetch sweeps automatically too
-    (folder / "b_comments.zst").write_bytes(b"x" * 30)
-    dr.sweep_fragments(files, folder)
-    assert not (folder / "b_comments.zst").exists()
+        "a_comments.zst", "c_comments.zst", "c_comments.zst.ok", "unrelated.txt"]
 
 
-def test_clean_raw_command(tmp_path, capsys):
+def test_clean_raw_removes_unverified_and_refuses_while_a_download_is_in_progress(
+        tmp_path, capsys):
     t = tmp_path / "t.torrent"
     t.write_bytes(benc({"info": {"name": "reddit", "piece length": 1, "pieces": b"", "files": [
         {"length": 100, "path": ["d", "a.zst"]}, {"length": 100, "path": ["d", "b.zst"]}]}}))
     raw = tmp_path / "raw"
-    (raw / "reddit" / "d").mkdir(parents=True)
-    (raw / "reddit" / "d" / "a.zst").write_bytes(b"x" * 10)
-    (raw / "reddit" / "d" / "b.zst").write_bytes(b"x" * 100)
-    assert dr.main(["clean-raw", "--torrent", str(t), "--raw-dir", str(raw)]) == 0
-    assert "removed 1 leftover fragment files" in capsys.readouterr().out
-    assert [p.name for p in (raw / "reddit" / "d").iterdir()] == ["b.zst"]
+    folder = raw / "reddit" / "d"
+    folder.mkdir(parents=True)
+    (folder / "a.zst").write_bytes(b"x" * 100)  # full length but unverified (sparse spill)
+    (folder / "b.zst").write_bytes(b"x" * 100)
+    dr._marker(folder / "b.zst").write_text("100")
+    (raw / "reddit.aria2").write_bytes(b"ctl")  # an interrupted download's progress record
+    args = ["clean-raw", "--torrent", str(t), "--raw-dir", str(raw)]
+    assert dr.main(args) == 1
+    assert "in progress or was interrupted" in capsys.readouterr().out
+    assert (folder / "a.zst").exists()  # nothing touched
+    assert dr.main(args + ["--force"]) == 0
+    assert "removed 1 unverified files" in capsys.readouterr().out
+    assert sorted(p.name for p in folder.iterdir()) == ["b.zst", "b.zst.ok"]
+    assert not (raw / "reddit.aria2").exists()
+    assert dr.main(args) == 0  # nothing left to refuse on
 
 
 def test_report_command(tmp_path, capsys):
@@ -688,16 +693,95 @@ def test_stale_torrent_control_file_is_reset_and_retried(tmp_path, monkeypatch, 
     assert "progress record is stale" in capsys.readouterr().out
 
 
-def test_file_without_marker_is_checked_by_aria2_even_if_size_matches(tmp_path, monkeypatch):
+def test_full_length_file_without_marker_or_control_file_is_discarded_then_redownloaded(
+        tmp_path, monkeypatch, capsys):
     torrent, files = _one_file_torrent(tmp_path, 10)
     raw_dir = tmp_path / "raw"
     f = raw_dir / "reddit" / "subreddits24" / "stocks_submissions.zst"
     f.parent.mkdir(parents=True)
-    f.write_bytes(b"x" * 10)  # full length; could still have holes
-    calls = []
-    monkeypatch.setattr(dr, "_aria2_fetch", lambda *a, **k: calls.append(a) or 0)
+    f.write_bytes(b"\0" * 10)  # full length, mostly holes: spill from a neighbour's download
+    seen = []
+
+    def fake_aria2(torrent_path, indices, out, check_integrity=False):
+        if f.exists():  # what real aria2c does: errorCode=13, refuses to touch it
+            seen.append("refused")
+            return 13
+        f.write_bytes(b"x" * 10)
+        seen.append("downloaded")
+        return 0
+
+    monkeypatch.setattr(dr, "_aria2_fetch", fake_aria2)
     assert dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir) == f
-    assert len(calls) == 1 and dr._marker(f).exists()
+    assert seen == ["downloaded"] and f.read_bytes() == b"x" * 10 and dr._marker(f).exists()
+    assert "discarding an unverified leftover copy" in capsys.readouterr().out
+
+
+def test_exit_13_is_handled_even_if_the_precheck_missed_the_file(tmp_path, monkeypatch):
+    torrent, files = _one_file_torrent(tmp_path, 10)
+    raw_dir = tmp_path / "raw"
+    f = raw_dir / "reddit" / "subreddits24" / "stocks_submissions.zst"
+    calls = []
+
+    def fake_aria2(torrent_path, indices, out, check_integrity=False):
+        calls.append(1)
+        if len(calls) == 1:  # a file appears and aria2c rejects it
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"\0" * 10)
+            return 13
+        assert not f.exists()
+        f.write_bytes(b"x" * 10)
+        return 0
+
+    monkeypatch.setattr(dr, "_aria2_fetch", fake_aria2)
+    assert dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir) == f
+    assert len(calls) == 2
+
+
+def test_partial_download_with_a_control_file_is_resumed_not_deleted(tmp_path, monkeypatch):
+    torrent, files = _one_file_torrent(tmp_path, 10)
+    raw_dir = tmp_path / "raw"
+    f = raw_dir / "reddit" / "subreddits24" / "stocks_submissions.zst"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"x" * 4)
+    control = raw_dir / "reddit.aria2"
+    control.write_bytes(b"progress")
+
+    def fake_aria2(torrent_path, indices, out, check_integrity=False):
+        assert f.read_bytes() == b"x" * 4 and control.exists()  # untouched before resuming
+        f.write_bytes(b"x" * 10)
+        return 0
+
+    monkeypatch.setattr(dr, "_aria2_fetch", fake_aria2)
+    assert dr._fetch_raw("stocks", "submissions", files, torrent, raw_dir) == f
+    assert dr._marker(f).exists()
+    assert not control.exists()  # forgotten once verified
+
+
+def test_fetch_deletes_neighbour_spill_and_the_control_file(tmp_path, monkeypatch):
+    t = tmp_path / "t.torrent"
+    t.write_bytes(benc({"info": {"name": "reddit", "piece length": 1, "pieces": b"", "files": [
+        {"length": 50, "path": ["d", "x_comments.zst"]},
+        {"length": 10, "path": ["d", "x_submissions.zst"]},
+        {"length": 30, "path": ["d", "y_comments.zst"]}]}}))
+    files = dr.torrent_files(t.read_bytes())
+    raw_dir = tmp_path / "raw"
+    folder = raw_dir / "reddit" / "d"
+    folder.mkdir(parents=True)
+    (folder / "y_comments.zst").write_bytes(b"x" * 30)  # verified earlier with --keep-raw
+    dr._marker(folder / "y_comments.zst").write_text("30")
+
+    def fake_aria2(torrent_path, indices, out, check_integrity=False):
+        (folder / "x_submissions.zst").write_bytes(b"s" * 10)
+        (folder / "x_comments.zst").write_bytes(b"\0" * 50)  # neighbour spill, full length
+        (raw_dir / "reddit.aria2").write_bytes(b"ctl says spill pieces are done")
+        return 0
+
+    monkeypatch.setattr(dr, "_aria2_fetch", fake_aria2)
+    got = dr._fetch_raw("x", "submissions", files, t, raw_dir)
+    assert got.name == "x_submissions.zst" and dr._marker(got).exists()
+    assert not (folder / "x_comments.zst").exists()       # unverified spill deleted
+    assert (folder / "y_comments.zst").exists()           # verified file untouched
+    assert not (raw_dir / "reddit.aria2").exists()        # no record claiming the spill is done
 
 
 def test_discard_removes_marker_and_aria2_records(tmp_path):
