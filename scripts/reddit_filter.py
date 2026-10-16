@@ -8,6 +8,8 @@ happen later, on what this keeps.
 
 from __future__ import annotations
 
+import hashlib
+import html
 import json
 import re
 import urllib.request
@@ -15,7 +17,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-FILTER_VERSION = "posts-v2"
+FILTER_VERSION = "posts-v3"
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_USER_AGENT = "redditstockscraper research (personal; contact via repo owner)"
@@ -37,7 +39,25 @@ STOPLIST = frozenset(
     RH Q1 Q2 Q3 Q4 FY TTM MOM DOD AH PDT LEAPS LEAP PLS PSA AMA ELI IIRC AFAIK
     TIL OC NSFW MOD BOT RIP GG WOW YES WHO WHY HOW WHAT WHEN ANY ALSO EVEN EVER
     """.split()
+) | frozenset(
+    # Finance/business abbreviations that are also tickers (seen in r/SecurityAnalysis:
+    # VC, IP, IR, SG, NPV, FT, SA, BV, CF, AR, IQ were all top "tickers"), Roman numerals,
+    # US state and country codes, legal suffixes, and common acronyms. They still match
+    # as cashtags. GM, GE, GS, MS are left out on purpose: bare, they usually are the company.
+    """
+    VC IP IR SG NPV FT SA BV CF AR IQ AP PB PS TBV AUM NAV IRR WACC GAAP IFRS SOTP LBO MBO
+    SPAC PIPE YTM BPS FX QE QT DCF LTM NTM ARPU MAU DAU CAC LTV SKU OEM B2B B2C ROA ROCE
+    CAGR LLC INC LTD PLC CORP TBD TBA ETA FAQ PDF URL ASAP AKA DIY FBI CIA NSA UN WTO IMF
+    OPEC NATO NYC DC
+    II III IV VI VII VIII IX XI XII
+    AL AK AZ CA CO CT DE FL GA HI ID IL IA KS KY LA ME MD MA MI MN MO MT NE NV NH NJ NM NY
+    NC ND OH OR PA RI SC SD TN TX UT VT VA WA WV WI WY
+    CN JP FR ES RU BR MX AU NZ KR TW HK
+    """.split()
 )
+
+# Text that is mostly capitals (shouting titles) would turn every word into a candidate.
+SHOUTING_RATIO = 0.7
 CASHTAG_STOPLIST = frozenset("USD EUR CAD GBP JPY AUD CNY BTC ETH".split())
 
 CASHTAG_RE = re.compile(r"(?<![\w$])\$([A-Za-z]{1,5})(?:\.[A-Za-z])?(?![\w])")
@@ -113,9 +133,27 @@ def load_tickers(path: str | None, cache_dir: Path) -> set[str]:
     return {str(v["ticker"]).upper().split("-")[0] for v in data.values()}
 
 
+def load_stoplist(path: str | None) -> frozenset[str]:
+    """Extra words to never treat as bare tickers; one per line, ``#`` comments allowed."""
+    if not path:
+        return frozenset()
+    lines = Path(path).read_text().splitlines()
+    return frozenset(ln.strip().upper() for ln in lines if ln.strip() and not ln.startswith("#"))
+
+
+def stoplist_fingerprint(extra: frozenset[str]) -> str:
+    return hashlib.sha1(",".join(sorted(extra)).encode()).hexdigest()[:8] if extra else ""
+
+
+def _shouting(text: str) -> bool:
+    letters = [c for c in text if c.isalpha()]
+    return len(letters) >= 12 and sum(c.isupper() for c in letters) / len(letters) > SHOUTING_RATIO
+
+
 class TickerMatcher:
-    def __init__(self, tickers: set[str]):
+    def __init__(self, tickers: set[str], extra_stoplist: frozenset[str] = frozenset()):
         self.tickers = frozenset(t for t in tickers if t.isalpha())
+        self.stoplist = STOPLIST | extra_stoplist
 
     def match(self, text: str | None) -> set[str]:
         if not text:
@@ -125,9 +163,10 @@ class TickerMatcher:
             for m in CASHTAG_RE.findall(text)
             if m.upper() not in CASHTAG_STOPLIST
         }
-        found.update(
-            t for t in BARE_RE.findall(text) if t in self.tickers and t not in STOPLIST
-        )
+        if not _shouting(text):
+            found.update(
+                t for t in BARE_RE.findall(text) if t in self.tickers and t not in self.stoplist
+            )
         return found
 
 
@@ -187,8 +226,14 @@ def is_empty_comment(comment: dict) -> bool:
     return not body or body in REMOVED_MARKERS
 
 
+TEXT_FIELDS = ("title", "selftext", "body")
+
+
 def slim(record: dict, fields: list[str], tickers: set[str] | None = None) -> dict:
     out = {k: record[k] for k in fields if k in record}
+    for k in TEXT_FIELDS:  # Reddit stores "&amp;", "&gt;" etc. escaped
+        if isinstance(out.get(k), str):
+            out[k] = html.unescape(out[k])
     if tickers is not None:
         out["matched_tickers"] = sorted(tickers)
     return out

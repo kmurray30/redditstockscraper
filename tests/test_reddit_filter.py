@@ -123,3 +123,38 @@ def test_is_empty_comment():
     assert is_empty_comment({"body": "[removed]"}) and is_empty_comment({"body": " [Deleted] "})
     assert is_empty_comment({"body": ""}) and is_empty_comment({})
     assert not is_empty_comment({"body": "NET looks cheap"})
+
+
+def test_finance_abbreviations_roman_numerals_and_codes_are_not_tickers():
+    m = TickerMatcher({"VC", "IP", "IR", "SG", "NPV", "FT", "SA", "BV", "CF", "AR", "IQ", "III",
+                       "CA", "NET", "GM", "GE"})
+    text = "VC and IP stuff, IR page, SG&A, NPV vs BV, CF, AR, IQ, FT, SA, Q4 III, CA"
+    assert m.match(text) == set()
+    # genuine company usage still works bare, and every one still works as a cashtag
+    assert m.match("GM and GE reported; NET too") == {"GM", "GE", "NET"}
+    assert m.match("$VC $IP $III") == {"VC", "IP", "III"}
+
+
+def test_shouting_text_only_matches_cashtags():
+    m = TickerMatcher({"NET", "AAPL"})
+    assert m.match("THE NEXT BIG THING IS NET AND AAPL TO THE MOON") == set()
+    assert m.match("THE NEXT BIG THING IS $NET TO THE MOON") == {"NET"}
+    assert m.match("Short ALL CAPS NET is fine") == {"NET"}  # too short to count as shouting
+
+
+def test_extra_stoplist_file(tmp_path):
+    from reddit_filter import load_stoplist, stoplist_fingerprint
+    f = tmp_path / "stop.txt"
+    f.write_text("# my words\nnet\n\nAAPL\n")
+    extra = load_stoplist(str(f))
+    assert extra == frozenset({"NET", "AAPL"})
+    m = TickerMatcher({"NET", "AAPL", "TSLA"}, extra)
+    assert m.match("NET AAPL TSLA") == {"TSLA"}
+    assert m.match("$NET") == {"NET"}
+    assert stoplist_fingerprint(extra) != stoplist_fingerprint(frozenset()) == ""
+
+
+def test_slim_unescapes_html_entities():
+    out = slim({"id": "a", "title": "$TAL &amp; $EDU &gt; peers", "selftext": "R&amp;D",
+                "score": 1}, ["id", "title", "selftext", "score"])
+    assert out["title"] == "$TAL & $EDU > peers" and out["selftext"] == "R&D" and out["score"] == 1

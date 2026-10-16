@@ -54,8 +54,10 @@ from reddit_filter import (  # noqa: E402
     TickerMatcher,
     is_empty_comment,
     is_relevant_post,
+    load_stoplist,
     load_tickers,
     slim,
+    stoplist_fingerprint,
 )
 
 try:  # ~3-5x faster JSON parsing on big comment files, if installed
@@ -422,6 +424,11 @@ def filter_comments(records, sub, kept_posts, matcher, counter, years, writer, s
             stats["dropped"] += 1
 
 
+def _make_matcher(args) -> TickerMatcher:
+    return TickerMatcher(load_tickers(args.tickers, Path(args.ref_dir)),
+                         load_stoplist(args.stoplist))
+
+
 def _read_json(path: Path):
     try:
         return json.loads(path.read_text())
@@ -576,11 +583,11 @@ def _print_stats(label: str, stats: Counter) -> None:
 
 def run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, years,
                      keep_raw=False, comments=True,
-                     min_link_comments=DISCUSSED_LINK_MIN_COMMENTS) -> dict:
+                     min_link_comments=DISCUSSED_LINK_MIN_COMMENTS, stoplist_id="") -> dict:
     sub_dir = corpus_dir / sub
     sub_dir.mkdir(parents=True, exist_ok=True)
     stamp = {"filter_version": FILTER_VERSION, "years": list(years),
-             "min_link_comments": min_link_comments}
+             "min_link_comments": min_link_comments, "stoplist": stoplist_id}
     manifest_path = sub_dir / "manifest.json"
     manifest = _read_json(manifest_path)
     if manifest and all(manifest.get(k) == v for k, v in stamp.items()):
@@ -643,17 +650,18 @@ def cmd_pipeline(args) -> int:
     raw_dir, corpus_dir = Path(args.raw_dir), Path(args.out)
     torrent_path = _ensure_torrent(args.torrent, raw_dir)
     files = torrent_files(torrent_path.read_bytes())
-    matcher = TickerMatcher(load_tickers(args.tickers, Path(args.ref_dir)))
+    matcher = _make_matcher(args)
     years = (args.from_year, args.to_year)
     for sub in args.subs:
         run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, years,
                          keep_raw=args.keep_raw, comments=not args.posts_only,
-                         min_link_comments=args.min_link_comments)
+                         min_link_comments=args.min_link_comments,
+                         stoplist_id=stoplist_fingerprint(load_stoplist(args.stoplist)))
     return 0
 
 
 def cmd_preview(args) -> int:
-    matcher = TickerMatcher(load_tickers(args.tickers, Path(args.ref_dir)))
+    matcher = _make_matcher(args)
     if args.file:
         records = iter_records(Path(args.file))
     else:
@@ -815,7 +823,7 @@ def cmd_arctic(args) -> int:
     after = datetime.fromisoformat(args.after).replace(tzinfo=timezone.utc)
     before = datetime.fromisoformat(args.before).replace(tzinfo=timezone.utc)
     now = int(time.time())
-    matcher = TickerMatcher(load_tickers(args.tickers, Path(args.ref_dir)))
+    matcher = _make_matcher(args)
 
     def fetch(endpoint, params):
         return _arctic_get(endpoint, params, args.delay)
@@ -997,6 +1005,8 @@ def main(argv=None) -> int:
 
     def tickers(p):
         p.add_argument("--tickers", help="ticker list file, one per line (default: SEC list)")
+        p.add_argument("--stoplist", help="extra words that must never count as bare tickers, "
+                                          "one per line (e.g. abbreviations that clash)")
         p.add_argument("--ref-dir", default="data/ref", help="cache for the SEC ticker list")
 
     def link_threshold(p):

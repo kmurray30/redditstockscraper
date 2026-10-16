@@ -592,7 +592,7 @@ def test_pipeline_drops_empty_comments_and_keeps_discussed_links(tmp_path, monke
     assert [c["id"] for c in _read_zst(out / "comments.zst")] == ["k"]
     m = json.loads((out / "manifest.json").read_text())
     assert m["posts"]["kept:discussed_link"] == 1 and m["comments"]["dropped_empty"] == 2
-    assert m["filter_version"] == "posts-v2" and m["min_link_comments"] == 5
+    assert m["filter_version"] == "posts-v3" and m["min_link_comments"] == 5
     # changing the threshold invalidates the finished manifest, so it re-runs
     assert dr.main(args + ["--min-link-comments", "1"]) == 0
     m = json.loads((out / "manifest.json").read_text())
@@ -746,3 +746,19 @@ def test_ctrl_c_exits_cleanly_without_a_traceback(monkeypatch, capsys):
     rc = dr.main(["stats", "whatever.zst"])
     err = capsys.readouterr().err
     assert rc == 130 and "rerun the same command to resume" in err and "Traceback" not in err
+
+
+def test_changing_the_stoplist_reruns_a_finished_subreddit(pipeline_env, tmp_path):
+    tmp, args, fetched = pipeline_env
+    assert dr.main(args + ["--keep-raw"]) == 0
+    fetched.clear()
+    assert dr.main(args) == 0 and fetched == []  # unchanged settings: skipped
+    stop = tmp / "stop.txt"
+    stop.write_text("NET\n")
+    assert dr.main(args + ["--stoplist", str(stop)]) == 0
+    out = tmp / "corpus" / "stocks"
+    m = json.loads((out / "manifest.json").read_text())
+    assert m["stoplist"] != ""
+    # it re-ran with the new setting; the post survives because "$NET" is a cashtag, and
+    # cashtags still count for stoplisted words
+    assert [p["id"] for p in _read_zst(out / "posts.zst")] == ["a"]

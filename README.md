@@ -53,6 +53,14 @@ The filter also keeps **link posts with discussion** (articles, letters, podcast
 ticker, and drops removed/deleted comments. Changing the filter version or these settings
 re-runs finished subreddits the next time you run `pipeline`.
 
+### Ticker false positives
+
+The crude matcher counts an ALL-CAPS word as a ticker if it's on the SEC list, so business
+abbreviations can slip through (`VC`, `IP`, `IR`, `NPV`, `CF`, `III`...). Many are already
+stoplisted, and text written mostly in capitals only matches `$cashtags`. To add your own, put one
+word per line in a file and pass `--stoplist myfile.txt` to `pipeline`; changing it re-runs finished
+subreddits. A stoplisted word still counts when written as a cashtag (`$IP`).
+
 ### Leftover files in `data/raw`
 
 Torrent files are stored back to back, so aria2c also writes the edges of neighbouring
