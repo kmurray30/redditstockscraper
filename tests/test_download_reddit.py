@@ -209,8 +209,7 @@ def test_pipeline_resumes_after_posts_stage(pipeline_env, monkeypatch):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(dr, "filter_comments", boom)
-    with pytest.raises(KeyboardInterrupt):
-        dr.main(args)
+    assert dr.main(args) == 130  # Ctrl-C: clean exit code, no traceback
     assert not (tmp / "corpus" / "stocks" / "comments.zst").exists()  # .part cleaned up
     monkeypatch.setattr(dr, "filter_comments", real)
     fetched.clear()
@@ -729,3 +728,21 @@ def test_persistent_failure_reports_sizes_and_control_files(tmp_path, monkeypatc
     msg = str(ei.value)
     assert "expected size: 10" in msg and "on disk: missing" in msg
     assert "Torrent not registered" in msg
+
+
+def test_aria2_prints_what_is_normal_before_starting(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(dr, "_require_aria2", lambda: "/usr/bin/aria2c")
+    monkeypatch.setattr(dr.subprocess, "call", lambda cmd: 0)
+    dr._aria2_fetch(tmp_path / "t.torrent", [1], tmp_path)
+    out = capsys.readouterr().out
+    assert "Torrent not registered" in out and "Checksum error" in out and "Ctrl-C is safe" in out
+
+
+def test_ctrl_c_exits_cleanly_without_a_traceback(monkeypatch, capsys):
+    def boom(args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dr, "cmd_stats", boom)
+    rc = dr.main(["stats", "whatever.zst"])
+    err = capsys.readouterr().err
+    assert rc == 130 and "rerun the same command to resume" in err and "Traceback" not in err

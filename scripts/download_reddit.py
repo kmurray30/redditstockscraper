@@ -305,6 +305,11 @@ def _aria2_fetch(torrent_path: Path, indices: list[int], out: Path,
     ]
     if check_integrity:
         cmd.insert(1, "--check-integrity=true")
+    print(
+        "  Note: lines saying 'Torrent not registered' or 'Checksum error' are normal. It is\n"
+        "  working while the progress line (DL: speed, ETA) keeps moving. A small file can show a\n"
+        "  bigger total because torrents transfer whole pieces. Ctrl-C is safe; rerun to resume."
+    )
     print(" ".join(cmd))
     return subprocess.call(cmd)
 
@@ -1073,6 +1078,10 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     try:
         return args.func(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted. Nothing is lost; rerun the same command to resume.",
+              file=sys.stderr)
+        return 130
     except (RuntimeError, urllib.error.URLError) as e:
         print(f"\nerror: {e}", file=sys.stderr)
         return 1

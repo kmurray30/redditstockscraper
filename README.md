@@ -68,8 +68,11 @@ delete a raw `.zst` yourself, that file still says the data exists and aria2c wi
 progress file and re-downloads, and it cleans up after itself when it discards a raw file. Let it
 (or `clean-raw`) do the deleting.
 
-A tracker line such as `Torrent not registered with Academic Torrents` is usually harmless; peers
-also come from other sources.
+Two aria2c messages look like errors but are normal: `Torrent not registered with Academic
+Torrents` (peers come from other sources) and `Checksum error detected` right after an integrity
+check (it just means those pieces still need downloading). It is working while the progress line
+(`DL:` speed and `ETA`) keeps moving. A small file can show a bigger total, for example 64 MiB for
+an 8.6 MB file, because torrents transfer whole pieces.
 
 ### Stopping and resuming
 
