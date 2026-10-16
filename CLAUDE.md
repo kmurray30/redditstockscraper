@@ -24,7 +24,8 @@ resilient base) by scoring *information quality* in Reddit investment discussion
 with a strictly point-in-time backtest. Nothing can guarantee a safe downside; the system finds
 candidates for human research.
 
-Key ideas from the research report (the report file itself is not in the repo):
+Key ideas from the research report (full text: `docs/Reddit_Long_Horizon_Stock_Scouting_Full_Report.md`;
+read it before designing the scorer, backtest or validation):
 
 - Academic evidence: raw mention counts / sentiment are weak or negative at 1y horizons;
   well-sourced DD, external links and *niche* low-saturation discussion do better at 8+ weeks.
