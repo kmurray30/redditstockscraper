@@ -42,11 +42,16 @@ python scripts/download_reddit.py arctic --subs stocks investing --after 2025-01
 ### Checking the result
 
 ```bash
-python scripts/download_reddit.py report --sub SecurityAnalysis
+python scripts/download_reddit.py report --all
 ```
 
-Prints keep/drop rates by reason, the most-mentioned tickers (look for English words posing as
-tickers), 20 random kept titles, and comments per post by year.
+One paste covering every finished subreddit: keep/drop rates by reason, the most-mentioned
+tickers, sample titles, comments per post by year, and a summary table (kept posts before 2019,
+2019-20, 2021+). `--sub NAME` does a single subreddit.
+
+Tickers that are mostly written in lowercase or Title case (`LOT`, `YOU`, `LINK`...) are flagged as
+"probably ordinary words". `--write-stoplist data/ref/stoplist.txt` saves them (merged with what is
+already in the file) so you can re-run with `pipeline --stoplist data/ref/stoplist.txt`.
 
 The filter also keeps **link posts with discussion** (articles, letters, podcasts with at least
 5 comments, change with `--min-link-comments`), since those often name a company without a

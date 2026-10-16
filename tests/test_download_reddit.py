@@ -863,3 +863,48 @@ def test_report_top_option_limits_the_ticker_list(tmp_path, capsys):
     assert dr.main(["report", "--sub", "s", "--out", str(tmp_path), "--top", "3"]) == 0
     text = capsys.readouterr().out
     assert "top 3 tickers" in text and "T2:98" in text and "T3:" not in text
+
+
+def _make_corpus_sub(root, name, titles, comments, mentions):
+    out = root / name
+    t = 1514764800  # 2018-01-01
+    _write_zst(out / "posts.zst", [{"id": f"p{i}", "created_utc": t + i, "title": ttl,
+                                    "selftext": "", "matched_tickers": []}
+                                   for i, ttl in enumerate(titles)])
+    _write_zst(out / "comments.zst", [{"id": f"c{i}", "created_utc": t + i, "body": b}
+                                      for i, b in enumerate(comments)])
+    (out / "mentions_comments.csv").write_text(
+        "date,subreddit,ticker,source,count\n" + "".join(
+            f"2018-01-01,{name},{tk},comment,{n}\n" for tk, n in mentions.items()))
+    (out / "manifest.json").write_text(json.dumps({
+        "filter_version": "x", "years": [2005, 2024], "posts": {"kept:ticker": len(titles)},
+        "comments": {"kept": len(comments), "dropped": 1}}))
+
+
+def test_report_all_flags_ordinary_words_and_writes_a_stoplist(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(dr, "WORD_MIN_USES", 5)
+    root = tmp_path / "corpus"
+    # "lot" is mostly written in lowercase, AAPL always in capitals
+    _make_corpus_sub(root, "alpha", ["AAPL up", "a lot of risk"],
+                     ["a lot", "such a lot", "Lot of it", "a lot", "one LOT", "AAPL AAPL AAPL"],
+                     {"LOT": 50, "AAPL": 40})
+    _make_corpus_sub(root, "beta", ["Is AAPL cheap?"], ["AAPL yes"], {"AAPL": 5})
+    stop = tmp_path / "stop.txt"
+    rc = dr.main(["report", "--all", "--out", str(root), "--top", "5",
+                  "--write-stoplist", str(stop)])
+    text = capsys.readouterr().out
+    assert rc == 0
+    assert "== alpha" in text and "== beta" in text and "SUMMARY" in text
+    assert "probably ordinary words" in text and "LOT(" in text
+    assert "AAPL(" not in text.split("probably ordinary words")[1].split("\n")[1]
+    assert "<=2018 | 2019-20 | 2021+" in text
+    assert stop.read_text().splitlines()[1:] == ["LOT"]
+    # re-running merges instead of overwriting
+    stop.write_text("# mine\nZZZ\n")
+    dr.main(["report", "--all", "--out", str(root), "--top", "5", "--write-stoplist", str(stop)])
+    assert stop.read_text().splitlines()[1:] == ["LOT", "ZZZ"]
+
+
+def test_report_needs_sub_or_all(tmp_path, capsys):
+    assert dr.main(["report", "--out", str(tmp_path)]) == 1
+    assert "--sub NAME or --all" in capsys.readouterr().out

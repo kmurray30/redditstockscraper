@@ -32,6 +32,7 @@ import argparse
 import io
 import json
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -883,14 +884,46 @@ def cmd_arctic(args) -> int:
     return 0
 
 
-def cmd_report(args) -> int:
-    """Sanity-check a filtered subreddit: keep rates, top tickers, sample titles, comment depth."""
-    sub_dir = Path(args.out) / args.sub
+WORD_SHARE_MAX = 0.25  # uppercase in under 25% of uses => probably an ordinary word
+WORD_MIN_USES = 200
+
+
+def _word_evidence(sub_dir: Path, tickers: list[str]) -> dict[str, tuple[int, int]]:
+    """For each ticker: (times written in capitals, times written any other way) in the
+    kept text. A token that is mostly lowercase/Title-case (LOT, YOU, LINK, NOTE) is an
+    ordinary word being shouted, not a company."""
+    if not tickers:
+        return {}
+    rx = re.compile(r"(?<![\w$])(" + "|".join(map(re.escape, tickers)) + r")(?![\w])", re.I)
+    counts = {t: [0, 0] for t in tickers}
+    for name, keys in (("posts.zst", ("title", "selftext")), ("comments.zst", ("body",))):
+        f = sub_dir / name
+        if not f.exists():
+            continue
+        for rec in iter_records(f):
+            for k in keys:
+                for m in rx.finditer(rec.get(k) or ""):
+                    word = m.group(1)
+                    counts[word.upper()][0 if word.isupper() else 1] += 1
+    return {t: (u, o) for t, (u, o) in counts.items()}
+
+
+def _suspect_words(evidence: dict[str, tuple[int, int]]) -> dict[str, float]:
+    out = {}
+    for t, (upper, other) in evidence.items():
+        total = upper + other
+        if total >= WORD_MIN_USES and upper / total < WORD_SHARE_MAX:
+            out[t] = upper / total
+    return out
+
+
+def _report_one(args, sub: str, brief: bool) -> tuple[dict, dict[str, float]] | None:
+    sub_dir = Path(args.out) / sub
     manifest = _read_json(sub_dir / "manifest.json")
     if not manifest:
         print(f"no manifest in {sub_dir}; run the pipeline for this subreddit first")
-        return 1
-    print(f"== {args.sub}  (filter {manifest['filter_version']}, years {manifest['years']}) ==")
+        return None
+    print(f"== {sub}  (filter {manifest['filter_version']}, years {manifest['years']}) ==")
     for label in ("posts", "comments"):
         counts = manifest.get(label) or {}
         total = sum(counts.values())
@@ -906,15 +939,27 @@ def cmd_report(args) -> int:
             for line in f.read_text().splitlines()[1:]:
                 _, _, ticker, _, n = line.split(",")
                 totals[ticker] += int(n)
-    print(f"\ntop {args.top} tickers by mentions (look for English words posing as tickers):")
-    print("    " + "  ".join(f"{t}:{n:,}" for t, n in totals.most_common(args.top)))
+    top = totals.most_common(args.top)
+    print(f"\ntop {args.top} tickers by mentions:")
+    print("    " + "  ".join(f"{t}:{n:,}" for t, n in top))
+    suspects = _suspect_words(_word_evidence(sub_dir, [t for t, _ in top]))
+    if suspects:
+        print("  probably ordinary words, not companies (written in capitals in under "
+              f"{WORD_SHARE_MAX:.0%} of uses):")
+        print("    " + "  ".join(f"{t}({share:.0%})" for t, share in
+                                 sorted(suspects.items(), key=lambda kv: -totals[kv[0]])))
 
     posts_f, comments_f = sub_dir / "posts.zst", sub_dir / "comments.zst"
+    summary = {"manifest": manifest, "eras": Counter()}
     if posts_f.exists():
         posts = list(iter_records(posts_f))
+        for r in posts:
+            y = _year(r["created_utc"])
+            summary["eras"]["<=2018" if y <= 2018 else "2019-20" if y <= 2020 else "2021+"] += 1
         rng = random.Random(0)
-        print(f"\n{min(20, len(posts))} random kept posts:")
-        for r in rng.sample(posts, min(20, len(posts))):
+        n_samples = 5 if brief else 20
+        print(f"\n{min(n_samples, len(posts))} random kept posts:")
+        for r in rng.sample(posts, min(n_samples, len(posts))):
             t = ",".join(r.get("matched_tickers") or [])
             print(f"    [{_year(r['created_utc'])} {t or '-'}] {(r.get('title') or '')[:100]}")
         if comments_f.exists():
@@ -928,6 +973,56 @@ def cmd_report(args) -> int:
                 ratio = by_year_comments[y] / by_year_posts[y]
                 print(f"    {y}: {by_year_posts[y]:>6,} posts {by_year_comments[y]:>8,} comments"
                       f"  {ratio:>6.1f} per post")
+    return summary, suspects
+
+
+def cmd_report(args) -> int:
+    """Sanity-check filtered subreddits: keep rates, top tickers, word-like false tickers,
+    sample titles, comment depth. ``--all`` covers every subreddit in one paste."""
+    out = Path(args.out)
+    if args.all:
+        subs = sorted(d.name for d in out.iterdir() if (d / "manifest.json").exists()) \
+            if out.is_dir() else []
+    elif args.sub:
+        subs = [args.sub]
+    else:
+        print("pass --sub NAME or --all")
+        return 1
+    if not subs:
+        print(f"no finished subreddits in {out}")
+        return 1
+    summaries, all_suspects = {}, {}
+    for i, sub in enumerate(subs):
+        if i:
+            print("\n" + "-" * 78 + "\n")
+        res = _report_one(args, sub, brief=args.all)
+        if res is None:
+            return 1
+        summaries[sub], suspects = res
+        all_suspects.update(suspects)
+    if args.all:
+        print("\n" + "=" * 78 + "\nSUMMARY\n")
+        print(f"{'subreddit':18} {'posts kept':>20} {'comments kept':>22}   "
+              f"{'kept posts: <=2018 | 2019-20 | 2021+':>40}")
+        for sub, sm in summaries.items():
+            row = []
+            for label in ("posts", "comments"):
+                c = sm["manifest"].get(label) or {}
+                tot = sum(c.values())
+                kept = sum(v for k, v in c.items() if k.startswith("kept"))
+                row.append(f"{kept:,}/{tot:,} ({kept / tot:.0%})" if tot else "-")
+            e = sm["eras"]
+            print(f"{sub:18} {row[0]:>20} {row[1]:>22}   "
+                  f"{e['<=2018']:>12,} | {e['2019-20']:>7,} | {e['2021+']:>6,}")
+    if args.write_stoplist:
+        path = Path(args.write_stoplist)
+        have = set(load_stoplist(str(path))) if path.exists() else set()
+        merged = sorted(have | set(all_suspects))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# words that are not companies when written bare (from `report`)\n" +
+                        "\n".join(merged) + "\n")
+        print(f"\nwrote {len(merged)} words to {path} ({len(set(all_suspects) - have)} new). "
+              f"Use it with: pipeline --stoplist {path}")
     return 0
 
 
@@ -1029,9 +1124,14 @@ def main(argv=None) -> int:
                             "comments even without a ticker (default %(default)s)")
 
     p = sp.add_parser("report", help="sanity-check a filtered subreddit")
-    p.add_argument("--sub", required=True)
+    p.add_argument("--sub", help="one subreddit")
+    p.add_argument("--all", action="store_true",
+                   help="every finished subreddit, in one compact paste, plus a summary table")
     p.add_argument("--out", default="data/corpus/reddit")
-    p.add_argument("--top", type=int, default=25, help="how many top tickers to list")
+    p.add_argument("--top", type=int, default=40, help="how many top tickers to list")
+    p.add_argument("--write-stoplist", metavar="FILE",
+                   help="save the words flagged as 'probably ordinary words' to FILE "
+                        "(merged with what is there) for use with pipeline --stoplist")
     p.set_defaults(func=cmd_report)
 
     p = sp.add_parser("clean-raw", help="delete unverified leftover files from raw downloads")
