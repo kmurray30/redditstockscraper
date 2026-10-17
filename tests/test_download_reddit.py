@@ -905,6 +905,14 @@ def test_report_all_flags_ordinary_words_and_writes_a_stoplist(tmp_path, monkeyp
     assert stop.read_text().splitlines()[1:] == ["LOT", "ZZZ"]
 
 
+def test_report_survives_case_folding_lookalikes(tmp_path, capsys):
+    # Turkish dotted capital I: matches the case-insensitive ticker regex as "NIO" but
+    # upper-cases to a string that is not a ticker. It used to crash the report.
+    root = tmp_path / "corpus"
+    _make_corpus_sub(root, "alpha", ["NIO up", "N\u0130O rally"], ["NIO", "N\u0130O"], {"NIO": 5})
+    assert dr.main(["report", "--sub", "alpha", "--out", str(root), "--top", "5"]) == 0
+
+
 def test_report_needs_sub_or_all(tmp_path, capsys):
     assert dr.main(["report", "--out", str(tmp_path)]) == 1
     assert "--sub NAME or --all" in capsys.readouterr().out

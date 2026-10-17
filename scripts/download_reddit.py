@@ -904,7 +904,10 @@ def _word_evidence(sub_dir: Path, tickers: list[str]) -> dict[str, tuple[int, in
             for k in keys:
                 for m in rx.finditer(rec.get(k) or ""):
                     word = m.group(1)
-                    counts[word.upper()][0 if word.isupper() else 1] += 1
+                    bucket = counts.get(word.upper())
+                    if bucket is None:  # a case-folding lookalike, e.g. Turkish dotted I in "NİO"
+                        continue
+                    bucket[0 if word.isupper() else 1] += 1
     return {t: (u, o) for t, (u, o) in counts.items()}
 
 
