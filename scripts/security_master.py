@@ -358,6 +358,52 @@ class SecurityMaster:
         return ok[0], "ok"
 
 
+EXPORT_SYMBOL_TYPES = {"Common Stock", "ETF"}
+_TICKER_BASE = re.compile(r"^[A-Z]{1,5}$")
+
+
+def ticker_base(code: str | None) -> str | None:
+    """'BRK.A' / 'BRK-B' / 'brk' -> 'BRK'; None when the base is not 1-5 letters."""
+    if not code:
+        return None
+    base = re.split(r"[.\-/ ]", code.strip().upper(), maxsplit=1)[0]
+    return base if _TICKER_BASE.fullmatch(base) else None
+
+
+def all_tickers(snapshots: list[dict], symbols: list[dict] | None = None) -> set[str]:
+    """Every ticker that was listed at any snapshot date (delisted ones included), plus
+    EODHD's common-stock / ETF codes, active and delisted.
+
+    The download filter keeps a post when a bare ALL-CAPS token is on its ticker list. With
+    the SEC's *current* list, posts about companies that have since been delisted were
+    dropped unless they used a cashtag, which tilts the corpus toward survivors. This list
+    has no such tilt."""
+    out = {t for r in snapshots if (t := ticker_base(r.get("ticker")))}
+    for r in symbols or ():
+        if r.get("type") in EXPORT_SYMBOL_TYPES and (t := ticker_base(r.get("code"))):
+            out.add(t)
+    return out
+
+
+def cmd_export_tickers(args) -> int:
+    rows: list[dict] = []
+    for f in sorted((Path(args.out) / "snapshots").glob("*.parquet")):
+        rows += pq.read_table(f, columns=["ticker"]).to_pylist()
+    symbols = None
+    if args.symbols and Path(args.symbols).exists():
+        symbols = pq.read_table(args.symbols, columns=["code", "type"]).to_pylist()
+    if not rows and not symbols:
+        raise SystemExit(f"no snapshots under {args.out}/snapshots and no symbols file")
+    tickers = sorted(all_tickers(rows, symbols))
+    dest = Path(args.dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(f"# {len(tickers)} tickers ever listed: Massive snapshots (all dates, active and "
+                    f"delisted) + EODHD common stock / ETF codes. For download_reddit.py "
+                    f"pipeline --tickers\n" + "\n".join(tickers) + "\n")
+    print(f"{len(tickers):,} tickers -> {dest}")
+    return 0
+
+
 def cmd_snapshots(args) -> int:
     root = Path(args.out)
     dates = args.dates or grid_dates(args.from_year, args.to_year, args.per_year)
@@ -382,8 +428,13 @@ def main(argv=None) -> int:
     s.add_argument("--to-year", type=int, default=date.today().year)
     s.add_argument("--per-year", type=int, choices=(1, 2), default=1)
     s.add_argument("--dates", nargs="+", metavar="YYYY-MM-DD", help="exact dates instead of a grid")
+    s.set_defaults(func=cmd_snapshots)
+    e = sub.add_parser("export-tickers", help="every ticker ever listed, for the download filter")
+    e.add_argument("--symbols", default="data/market/eodhd/symbols.parquet")
+    e.add_argument("--dest", default="data/ref/tickers_all.txt")
+    e.set_defaults(func=cmd_export_tickers)
     args = p.parse_args(argv)
-    return cmd_snapshots(args)
+    return args.func(args)
 
 
 if __name__ == "__main__":

@@ -182,6 +182,42 @@ def _lift(p_top: float, p_ref: float) -> float:
     return p_top / p_ref if p_ref and np.isfinite(p_top) and np.isfinite(p_ref) else float("nan")
 
 
+EVENT_COLS = {"p2": ("max_mult", 2), "p5": ("max_mult", 5), "p10": ("max_mult", 10),
+              "p_loss": ("perm_loss", None)}
+
+
+def _event(a: dict, name: str) -> np.ndarray:
+    col, k = EVENT_COLS[name]
+    return a[col].astype(bool) if k is None else (a[col] >= k)
+
+
+def matched_lift(sel: dict, uni: dict, strata_key: str = "size_q") -> dict:
+    """Lift against the universe re-weighted to the selected set's mix of ``strata_key``
+    (size/liquidity buckets): P(event | selected) / sum_q w_q P(event | universe, bucket q)
+    with w_q the share of selected holdings in bucket q.
+
+    The plain lift compares the picks with *every* eligible stock; this one compares them
+    with the same kind of stock. The gap between the two is how much of the plain lift is
+    just exposure to volatile small names rather than picking well within them."""
+    fs, fu = final_mask(sel), final_mask(uni)
+    if not fs.any() or not fu.any():
+        return {}
+    ks, ku = sel[strata_key][fs], uni[strata_key][fu]
+    out = {}
+    for name in EVENT_COLS:
+        es, eu = _event(sel, name)[fs], _event(uni, name)[fu]
+        p_sel = float(es.mean())
+        num = den = 0.0
+        for q in np.unique(ks):
+            w = float((ks == q).mean())
+            in_u = ku == q
+            if in_u.any():
+                num += w * float(eu[in_u].mean())
+                den += w
+        out[name] = _lift(p_sel, num / den) if den > 0 else float("nan")
+    return out
+
+
 # ---------------------------------------------------------------- the evaluator
 
 class Evaluator:
@@ -252,6 +288,7 @@ class Evaluator:
         t, u, r = rep["top"], rep["universe"], rep["mentioned_rest"]
         if t["n"] and u["n"]:
             rep["lift"] = {k: _lift(t[k], u[k]) for k in ("p2", "p5", "p10", "p_loss")}
+            rep["lift_matched"] = matched_lift(sel, uni)
             rep["lift_vs_mentioned"] = {k: _lift(t[k], r.get(k, float("nan")))
                                         for k in ("p2", "p5", "p10", "p_loss")} if r["n"] else {}
             rep["recall10"] = self._recall(sel, uni, 10)
@@ -471,6 +508,8 @@ def headline(report: dict) -> dict:
             out[f"lift_p5_{h}y"] = r["lift"]["p5"]
             out[f"lift_p10_{h}y"] = r["lift"]["p10"]
             out[f"lift_loss_{h}y"] = r["lift"]["p_loss"]
+            out[f"lift_p5_matched_{h}y"] = r.get("lift_matched", {}).get("p5")
+            out[f"lift_loss_matched_{h}y"] = r.get("lift_matched", {}).get("p_loss")
             out[f"perm_p5_{h}y"] = r.get("perm_p5")
     if report.get("portfolio"):
         out["sharpe_monthly"] = report["portfolio"].get("sharpe_monthly")
@@ -497,8 +536,10 @@ def format_report(report: dict) -> str:
         lines.append(
             f"  {h}y  selected {r['n_selected']:>6,} ({r['unique_selected']:,} names)  "
             f"P5x {_f(t['p5'], True)} vs {_f(u['p5'], True)} univ  lift5 {_f(r['lift']['p5'])} {ci5}  "
-            f"(vs mentioned {_f(r.get('lift_vs_mentioned', {}).get('p5'))})  "
-            f"lift10 {_f(r['lift']['p10'])}  ploss lift {_f(r['lift']['p_loss'])}  "
+            f"(size-matched {_f(r.get('lift_matched', {}).get('p5'))}; "
+            f"vs mentioned {_f(r.get('lift_vs_mentioned', {}).get('p5'))})  "
+            f"lift10 {_f(r['lift']['p10'])}  ploss lift {_f(r['lift']['p_loss'])} "
+            f"(size-matched {_f(r.get('lift_matched', {}).get('p_loss'))})  "
             f"10x recall {_f(r['recall10'], True)}  perm p {_f(r.get('perm_p5'), nd=3)}  "
             f"med excess {_f(t['excess'][50], True)}  KM5x {_f(r['km_p5']['top'], True)}  "
             f"[bad_data excluded: {t.get('bad_data', 0)} top / {u.get('bad_data', 0)} univ]")

@@ -153,6 +153,12 @@ def load_stoplist(path: str | None) -> frozenset[str]:
     return frozenset(ln.strip().upper() for ln in lines if ln.strip() and not ln.startswith("#"))
 
 
+def tickers_fingerprint(tickers) -> str:
+    """Identifies the ticker list a corpus was filtered with (part of the manifest key, so a
+    new list re-filters finished subreddits)."""
+    return hashlib.sha1("\n".join(sorted(tickers)).encode()).hexdigest()[:10]
+
+
 def stoplist_fingerprint(extra: frozenset[str]) -> str:
     return hashlib.sha1(",".join(sorted(extra)).encode()).hexdigest()[:8] if extra else ""
 

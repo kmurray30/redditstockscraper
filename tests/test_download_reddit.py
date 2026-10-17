@@ -916,3 +916,19 @@ def test_report_survives_case_folding_lookalikes(tmp_path, capsys):
 def test_report_needs_sub_or_all(tmp_path, capsys):
     assert dr.main(["report", "--out", str(tmp_path)]) == 1
     assert "--sub NAME or --all" in capsys.readouterr().out
+
+
+def test_manifest_records_the_ticker_list_and_a_new_list_reruns_the_subreddit(pipeline_env):
+    tmp, args, fetched = pipeline_env
+    assert dr.main(args + ["--keep-raw"]) == 0
+    out = tmp / "corpus" / "stocks"
+    m = json.loads((out / "manifest.json").read_text())
+    assert m["tickers"] and m["tickers_source"].endswith("tickers.txt")
+    fetched.clear()
+    assert dr.main(args) == 0 and fetched == []          # same list: skipped
+    bigger = tmp / "tickers2.txt"
+    bigger.write_text("NET\nAAPL\nTSLA\nRSH\n")            # a delisted name added
+    args2 = [a if a != str(tmp / "tickers.txt") else str(bigger) for a in args]
+    assert dr.main(args2) == 0
+    m2 = json.loads((out / "manifest.json").read_text())
+    assert m2["tickers"] != m["tickers"] and m2["tickers_source"].endswith("tickers2.txt")

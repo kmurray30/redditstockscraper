@@ -91,3 +91,30 @@ def test_illiquid_and_penny_stocks_are_ineligible(world):
                        "SPY": series("SPY", "2020-01-01", [100.0] * 700)}, px.to_day("2021-12-31"))
     uni, _ = un.build(master, store, ["2020-06-01"], horizons=(1,), log=lambda m: None)
     assert [r["eligible"] for r in uni.to_pylist() if r["cik"] == "1"] == [False]
+
+
+def test_companies_without_a_usable_series_are_reported_not_silently_lost(world):
+    master, store = world
+    # DEAD was listed in 2020, gone in 2021, and its code was taken over by another company
+    # in 2022 (so EODHD's DEAD series is the new holder's history); no DEADQ/_old exists
+    snaps = [snap("2020-01-04", "AAA", "1"), snap("2020-01-04", "DEAD", "9"),
+             snap("2021-01-04", "AAA", "1"),
+             snap("2022-01-04", "AAA", "1"), snap("2022-01-04", "DEAD", "10")]
+    idx = {"AAA": ("2020-01-01", "2021-12-31"), "DEAD": ("2022-01-01", "2023-12-31"),
+           "SPY": ("2020-01-01", "2021-12-31")}
+    master = sm.SecurityMaster(snaps, idx)
+    dropped = []
+    logs = []
+    uni, _ = un.build(master, store, ["2020-02-01", "2020-03-01"], horizons=(1,),
+                      log=logs.append, dropped=dropped)
+    assert {r["cik"] for r in uni.to_pylist()} == {"1"}
+    assert dropped == [{"cik": "9", "ticker": "DEAD", "reason": "code_reused_after_delisting",
+                        "months": 2}]
+    assert any("code_reused_after_delisting=1" in line for line in logs)
+
+
+def test_drop_reason_buckets():
+    assert un.drop_reason("unknown_cik") == "unknown_cik"
+    assert un.drop_reason("no_valid_series (X reused by another company)") == "code_reused_after_delisting"
+    assert un.drop_reason("no_valid_series (X is a different company (Foo))") == "code_name_mismatch"
+    assert un.drop_reason("no_valid_series") == "no_price_series"

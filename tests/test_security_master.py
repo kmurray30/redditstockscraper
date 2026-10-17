@@ -262,3 +262,44 @@ def test_previous_holder_of_a_reused_code_is_found_under_old_suffix():
     m = sm.SecurityMaster(snaps, idx, names)
     assert m.price_code("5", "2008-01-01")[0] == "DCP_old"
     assert m.price_code("6", "2019-01-01")[0] == "DCP"
+
+
+# --------------------------------------------------------------------------- #
+# export-tickers: the download filter's list must include delisted names
+# --------------------------------------------------------------------------- #
+
+
+def test_ticker_base_strips_share_classes_and_rejects_non_tickers():
+    assert sm.ticker_base("BRK.A") == "BRK" and sm.ticker_base("brk-b") == "BRK"
+    assert sm.ticker_base("GOOGL") == "GOOGL"
+    assert sm.ticker_base("TOOLONG") is None and sm.ticker_base("AB12") is None
+    assert sm.ticker_base("") is None and sm.ticker_base(None) is None
+
+
+def test_all_tickers_unions_every_snapshot_date_and_eodhd_stock_codes():
+    snaps = [rec("RSH", "1", as_of="2012-01-04", active=False),   # delisted long ago
+             rec("AAPL", "2", as_of="2012-01-04"), rec("AAPL", "2", as_of="2026-01-04"),
+             rec("BRK.B", "3", as_of="2026-01-04")]
+    symbols = [{"code": "WLT", "type": "Common Stock"}, {"code": "SPY", "type": "ETF"},
+               {"code": "XYZ-P", "type": "Preferred Stock"}]
+    got = sm.all_tickers(snaps, symbols)
+    assert got == {"RSH", "AAPL", "BRK", "WLT", "SPY"}  # preferred excluded, classes stripped
+
+
+def test_export_tickers_command_writes_a_filter_list(tmp_path, capsys):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    root = tmp_path / "massive"
+    (root / "snapshots").mkdir(parents=True)
+    for d, rows in (("2012-01-04", [rec("RSH", "1"), rec("AAPL", "2")]),
+                    ("2026-01-04", [rec("AAPL", "2")])):
+        pq.write_table(pa.Table.from_pylist([{**r, "as_of": d} for r in rows]),
+                       root / "snapshots" / f"{d}.parquet")
+    sym = tmp_path / "symbols.parquet"
+    pq.write_table(pa.Table.from_pylist([{"code": "WLT", "type": "Common Stock"}]), sym)
+    dest = tmp_path / "ref" / "tickers_all.txt"
+    assert sm.main(["--out", str(root), "export-tickers", "--symbols", str(sym),
+                    "--dest", str(dest)]) == 0
+    lines = dest.read_text().splitlines()
+    assert lines[0].startswith("# 3 tickers") and lines[1:] == ["AAPL", "RSH", "WLT"]
+    assert "3 tickers" in capsys.readouterr().out

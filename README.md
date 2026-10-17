@@ -39,6 +39,22 @@ python scripts/download_reddit.py pipeline --subs stocks investing ValueInvestin
 python scripts/download_reddit.py arctic --subs stocks investing --after 2025-01-01 --before 2026-10-01
 ```
 
+### Use a ticker list that includes delisted companies
+
+The filter's bare-ticker rule defaults to the SEC's current ticker list, which drops old posts
+about companies that have since been delisted and tilts the corpus toward survivors. Once the
+market data exists, export the full list and re-filter (raw files are kept, so this takes minutes):
+
+```bash
+python scripts/security_master.py export-tickers
+```
+
+```bash
+python scripts/download_reddit.py pipeline --subs stocks investing --keep-raw --tickers data/ref/tickers_all.txt --stoplist data/ref/stoplist.txt
+```
+
+The manifest records which ticker list was used, so a new list re-runs finished subreddits.
+
 ### Checking the result
 
 ```bash

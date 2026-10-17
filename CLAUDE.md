@@ -97,7 +97,7 @@ read it before designing the scorer, backtest or validation):
 
 ## What exists in the repo
 
-Tests: `python -m pytest -q` (224 tests, ~3 s, no network). `requirements.txt`: zstandard,
+Tests: `python -m pytest -q` (233 tests, ~3 s, no network). `requirements.txt`: zstandard,
 orjson, pytest, pyarrow, duckdb. `data/` and `.env` are gitignored.
 
 **Reddit side** (`scripts/download_reddit.py`, `reddit_filter.py`): commands `check`, `list`,
@@ -107,11 +107,17 @@ NET, DOW get flagged too), `clean-raw`. The filter (`FILTER_VERSION = "posts-v4"
 below. All 5 subreddits are filtered with `data/ref/stoplist.txt` (67 hand-picked words) and the
 raw files are kept in `data/raw/reddit/reddit/subreddits24/` (re-filtering costs minutes, not a
 download). Not downloaded: wallstreetbets (7.6 GB, ~2 h, mostly memes): a decision for the user.
+**The filter's bare-ticker rule defaults to the SEC's *current* ticker list**, which is a
+survivorship bias in the corpus (see "Sanity check" below); pass
+`--tickers data/ref/tickers_all.txt`. The manifest now records a fingerprint of the ticker list
+(`tickers`) and its source, so a new list re-runs finished subreddits automatically.
 
 **Research pipeline** (each module has a docstring with the rules; run in this order):
 
 | Step | Command | Output |
 |---|---|---|
+| Ticker list for the filter (after snapshots + symbols exist) | `python scripts/security_master.py export-tickers` | `data/ref/tickers_all.txt` |
+| Re-filter with it (minutes; raw files are kept) | `python scripts/download_reddit.py pipeline --subs stocks investing StockMarket ValueInvesting SecurityAnalysis --keep-raw --tickers data/ref/tickers_all.txt --stoplist data/ref/stoplist.txt` | `data/corpus/reddit/<sub>/` |
 | Parquet corpus | `python scripts/corpus.py` | `data/corpus/parquet/{posts,comments}/<sub>.parquet` |
 | EODHD symbol lists | `python scripts/market_data.py symbols` | `data/market/eodhd/symbols.parquet` |
 | Daily prices (resumable) | `python scripts/market_data.py prices --workers 16` | `eod/<CODE>.parquet`, ~60k files |
@@ -241,6 +247,60 @@ bar to beat; sentiment and DD flair add nothing; the crowding penalty hurts. (3)
 "fewer permanent losses" in dev (0.65) **reverses** in 2019-2020 (1.60): a regime change, as the
 report warned. (4) Nothing here has touched the sealed holdout (2021-2022): it is unconsulted.
 
+## Sanity check of the data layer (2026-10-17, before any LLM spend)
+
+A second session read `pit.py`, `universe.py`, `prices.py`, `backtest.py`, `baselines.py`,
+`stats.py`, `ledger.py`, `security_master.py` against the validation rules. Verified sound:
+the point-in-time view (maturation window, comments inside it, edited-after-maturation
+excluded, `edited_utc = -1` treated as edited after, no final scores), entry at the open after
+the cutoff plus slippage, censored and `bad_data` rows excluded rather than counted as failures,
+the Kaplan-Meier touch probabilities, the permutation test (it shuffles outcomes among the
+*scored candidates* within month x size bucket, so it measures ranking skill among mentioned
+companies, not "mentioned vs universe"), the sealed-holdout guard, and the ticker-reuse logic.
+
+Findings, most important first. 1-2 change numbers in the ladder and must be done before
+building the evaluator:
+
+1. **Corpus survivorship bias (fixed in code, needs a re-run).** The download filter kept a
+   post for a bare ALL-CAPS ticker only if the ticker is on the SEC's *current* list. A 2014
+   post saying "RSH?" (RadioShack, dead) was dropped; the same post about AAPL was kept, unless
+   it used a cashtag, a DD flair, was long, or was a discussed link. So mentions of companies
+   that later died are undercounted, which tilts every Reddit scorer toward survivors: inflated
+   5x lift, deflated permanent-loss lift. Mention count's dev loss-lift of 0.65 is the number to
+   distrust most. Fix: `security_master.py export-tickers` (every ticker in any Massive snapshot
+   plus EODHD's active + delisted stock/ETF codes), re-filter with `--tickers`, rebuild corpus,
+   mentions, post features, and re-run the ladder. Expect lift5 to fall and loss-lift to rise;
+   record the before/after in this file.
+2. **Companies without a usable price series were dropped silently.** `price_code` rejects a
+   code another company took over after this one's lifetime (correct: EODHD's series under
+   that code is the new holder's), and if no `CODEQ`/`CODE_old` series exists the company
+   vanished from the universe *and* from every candidate set. Those are mostly dead companies,
+   so permanent losses are understated on both sides of the lift. `universe.py` now logs the
+   counts by reason and writes `data/features/universe_dropped.parquet`; look at the
+   `code_reused_after_delisting` count and state it next to any loss-lift number. With yearly
+   snapshots, a ticker reassigned within the same year looks like a *successor* (Google ->
+   Alphabet); only the EODHD-name check (`name_matches`) stops the new holder's prices being
+   used, so that check must stay.
+3. **Plain lift conflates picking well with picking a kind of stock.** The denominator is every
+   eligible stock, and Reddit talks about volatile growth and small names, which 5x (and die)
+   more often, so a random pick among mentioned companies already has lift about 1.4 with a
+   loss-lift above 1. `backtest.py` now also reports a **size-matched lift** (universe
+   re-weighted to the picks' liquidity-bucket mix; `lift_matched` in the report and ledger).
+   Read the ladder as: plain lift answers "better than a dart at the market?", matched lift
+   answers "better than a dart at the same kind of stock?", and the random-among-mentioned row
+   answers "does the ranking add anything to the fact of being mentioned?". All three matter.
+   The S&P 500 is the right benchmark for the *portfolio* diagnostic (CAGR vs SPY, information
+   ratio, deflated Sharpe), which `run` already computes; the ladder table above omitted it.
+   Print the portfolio line for every baseline next time.
+4. `universe.py` now prints the price data end date. Validate-period 5y labels are complete
+   only for cohorts up to five years before that date; later cohorts are censored (excluded
+   from fixed-horizon rates, included in the KM estimate).
+5. Left as known imperfections: `blind_text` hides tickers and names but not products, CEOs
+   or cities, so the blinded run understates, not eliminates, hindsight; the validate split has
+   now been seen by eight baselines (compare finalists there, do not iterate on it); the
+   `discussed_link` filter rule uses a post's *final* comment count to decide what to store
+   (storage only; those posts reach the baselines only via name matches, which they exclude).
+
 ## Handoff: evaluation work (what is deliberately not built)
 
 Not built, by design: the OpenAI thesis scorer and prompts, comment adjudication, causal author
@@ -281,6 +341,13 @@ cohort date, plus 25 bps slippage, with no market-impact model.
 
 ## Next steps
 
+0. **Re-run the data layer without the survivorship bias (do this first):**
+   `security_master.py export-tickers`, then the re-filter `pipeline` command from the table
+   above, then `corpus.py`, `entity_resolver.py wordstats`, `entity_resolver.py mentions`,
+   `universe.py` (note the dropped-company counts and the data end date it prints),
+   `baselines.py`, then `backtest.py ladder --split dev` and `--split validate`. Put the new
+   ladder (plain lift, size-matched lift, loss-lift, perm p, portfolio CAGR vs SPY) in this
+   file next to the old one, and say how many companies `universe_dropped.parquet` lists.
 1. **User actions:** set `SEC_USER_AGENT="Your Name your@email"` in `.env`, then run
    `python scripts/edgar.py` (SIC sectors for sector-matched permutation strata); add
    `OPENAI_API_KEY` when the scorer is built; the EODHD subscription can be cancelled once no

@@ -261,3 +261,37 @@ def test_permutation_strata_include_sector_when_available():
     del cand["division"]
     p_plain = ev._permute(cand, 0.1, 100, 0, 10)
     assert 0 < p_sector <= 1 and 0 < p_plain <= 1
+
+
+def test_matched_lift_removes_a_pure_size_composition_effect():
+    # universe: bucket 1 never 5x's, bucket 5 does so half the time; overall rate 25%
+    n = 200
+    uni = {"status": np.array(["complete"] * n),
+           "size_q": np.array([1] * 100 + [5] * 100),
+           "max_mult": np.array([1.0] * 100 + [6.0, 1.0] * 50),
+           "perm_loss": np.array([False] * n)}
+    # the "scorer" simply picks bucket-5 names at random: 50% 5x, i.e. plain lift 2.0
+    sel = {"status": np.array(["complete"] * 20), "size_q": np.array([5] * 20),
+           "max_mult": np.array([6.0, 1.0] * 10), "perm_loss": np.array([False] * 20)}
+    plain = bt._lift(float((sel["max_mult"] >= 5).mean()), float((uni["max_mult"] >= 5).mean()))
+    matched = bt.matched_lift(sel, uni)
+    assert plain == pytest.approx(2.0)
+    assert matched["p5"] == pytest.approx(1.0)      # no skill beyond picking that kind of stock
+    assert np.isnan(matched["p_loss"])              # no losses anywhere: undefined, not 0 or inf
+
+
+def test_matched_lift_ignores_censored_and_bad_data_rows():
+    uni = {"status": np.array(["complete", "complete", "censored"]), "size_q": np.array([1, 1, 1]),
+           "max_mult": np.array([6.0, 1.0, 6.0]), "perm_loss": np.array([False, True, False])}
+    sel = {"status": np.array(["complete", "bad_data"]), "size_q": np.array([1, 1]),
+           "max_mult": np.array([6.0, 1.0]), "perm_loss": np.array([False, False])}
+    m = bt.matched_lift(sel, uni)
+    assert m["p5"] == pytest.approx(1.0 / 0.5) and m["p_loss"] == pytest.approx(0.0)
+
+
+def test_report_carries_the_matched_lift(tmp_path):
+    rep, led = run_scorer(tmp_path, Fn("oracle", ORACLE))
+    h = rep["horizons"][1]
+    assert "p5" in h["lift_matched"] and h["lift_matched"]["p5"] > 3
+    assert "size-matched" in bt.format_report(rep)
+    assert "lift_p5_matched_1y" in led.entries()[-1]["summary"]

@@ -80,20 +80,44 @@ def memberships(master: SecurityMaster, months: list[str]) -> dict[str, dict[str
     return out
 
 
+DROPPED_SCHEMA = pa.schema([("cik", pa.string()), ("ticker", pa.string()),
+                            ("reason", pa.string()), ("months", pa.int32())])
+
+
+def drop_reason(detail: str) -> str:
+    """Collapse price_code's explanation into a few buckets for the summary."""
+    if detail == "unknown_cik":
+        return "unknown_cik"
+    if "reused by another company" in detail:
+        return "code_reused_after_delisting"
+    if "is a different company" in detail:
+        return "code_name_mismatch"
+    return "no_price_series"
+
+
 def build(master: SecurityMaster, store: px.PriceStore, months: list[str], *, horizons=HORIZONS,
-          slippage_bps: float = 25.0, log=print) -> tuple[pa.Table, pa.Table]:
+          slippage_bps: float = 25.0, log=print,
+          dropped: list[dict] | None = None) -> tuple[pa.Table, pa.Table]:
+    """``dropped``, if given, receives one row per (company, reason) for members that were
+    listed at a cohort date but have no usable price series, with the number of cohort
+    months affected. These companies are absent from the universe *and* from every scorer's
+    candidate set, so a large count (especially ``code_reused_after_delisting``, which is
+    mostly dead companies) understates permanent losses on both sides of the lift."""
     bench = store.get(BENCH)
     data_end = store.data_end
     uni, labels = [], []
     members = memberships(master, months)
+    drops: dict[tuple[str, str, str], int] = {}
     for n, (cik, by_month) in enumerate(members.items(), 1):
         if n % 2000 == 0:
             log(f"  {n:,}/{len(members):,} companies, {len(uni):,} universe rows")
         for c, (ticker, typ) in by_month.items():
             cday = px.to_day(c)
-            code, _ = master.price_code(cik, c)
+            code, why = master.price_code(cik, c)
             s = store.get(code)
             if s is None:
+                key = (cik, ticker, drop_reason(why) if code is None else "no_price_file")
+                drops[key] = drops.get(key, 0) + 1
                 continue
             prev = s.index_on_or_before(cday - 1)
             if prev is None or cday - s.days[prev] > px.MAX_ENTRY_GAP:
@@ -116,6 +140,16 @@ def build(master: SecurityMaster, store: px.PriceStore, months: list[str], *, ho
                                "perm_loss": o.perm_loss, "entry_day": o.entry_day,
                                "end_day": o.end_day})
     assign_size_quintiles(uni)
+    if drops:
+        by_reason: dict[str, set] = {}
+        for (cik, _, reason) in drops:
+            by_reason.setdefault(reason, set()).add(cik)
+        log("  companies listed at a cohort date but without a usable price series "
+            "(absent from universe and candidates): " +
+            ", ".join(f"{r}={len(cs):,}" for r, cs in sorted(by_reason.items())))
+        if dropped is not None:
+            dropped.extend({"cik": k[0], "ticker": k[1], "reason": k[2], "months": m}
+                           for k, m in sorted(drops.items()))
     missing = sorted({r["code"] for r in uni} - {c for c in {r["code"] for r in uni}
                                                   if getattr(store, "has_splits", lambda c: True)(c)})
     if missing:
@@ -151,12 +185,17 @@ def main(argv=None) -> int:
                                 symbols=Path(a.eodhd) / "symbols.parquet")
     store = px.PriceStore(Path(a.eodhd))
     months = month_starts(a.first, a.last)
-    uni, labels = build(master, store, months)
+    dropped: list[dict] = []
+    uni, labels = build(master, store, months, dropped=dropped)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     pq.write_table(uni, out / "universe.parquet", compression="zstd")
     pq.write_table(labels, out / "labels.parquet", compression="zstd")
-    print(f"{uni.num_rows:,} universe rows, {labels.num_rows:,} labels -> {out}")
+    pq.write_table(pa.Table.from_pylist(dropped, schema=DROPPED_SCHEMA),
+                   out / "universe_dropped.parquet", compression="zstd")
+    print(f"{uni.num_rows:,} universe rows, {labels.num_rows:,} labels -> {out}; "
+          f"{len({d['cik'] for d in dropped}):,} companies without a price series listed in "
+          f"universe_dropped.parquet; price data ends {px.to_iso(store.data_end)}")
     return 0
 
 

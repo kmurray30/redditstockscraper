@@ -59,6 +59,7 @@ from reddit_filter import (  # noqa: E402
     load_tickers,
     slim,
     stoplist_fingerprint,
+    tickers_fingerprint,
 )
 
 try:  # ~3-5x faster JSON parsing on big comment files, if installed
@@ -598,11 +599,13 @@ def _print_stats(label: str, stats: Counter) -> None:
 
 def run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, years,
                      keep_raw=False, comments=True,
-                     min_link_comments=DISCUSSED_LINK_MIN_COMMENTS, stoplist_id="") -> dict:
+                     min_link_comments=DISCUSSED_LINK_MIN_COMMENTS, stoplist_id="",
+                     tickers_id="", tickers_source="sec_current") -> dict:
     sub_dir = corpus_dir / sub
     sub_dir.mkdir(parents=True, exist_ok=True)
     stamp = {"filter_version": FILTER_VERSION, "years": list(years),
-             "min_link_comments": min_link_comments, "stoplist": stoplist_id}
+             "min_link_comments": min_link_comments, "stoplist": stoplist_id,
+             "tickers": tickers_id}
     manifest_path = sub_dir / "manifest.json"
     manifest = _read_json(manifest_path)
     if manifest and all(manifest.get(k) == v for k, v in stamp.items()):
@@ -645,6 +648,7 @@ def run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, yea
 
     manifest = {
         **stamp,
+        "tickers_source": tickers_source,
         "subreddit": sub,
         "source": "academictorrents subreddits 2005-06..2024-12",
         "torrent": str(torrent_path),
@@ -671,7 +675,9 @@ def cmd_pipeline(args) -> int:
         run_sub_pipeline(sub, files, torrent_path, raw_dir, corpus_dir, matcher, years,
                          keep_raw=args.keep_raw, comments=not args.posts_only,
                          min_link_comments=args.min_link_comments,
-                         stoplist_id=stoplist_fingerprint(load_stoplist(args.stoplist)))
+                         stoplist_id=stoplist_fingerprint(load_stoplist(args.stoplist)),
+                         tickers_id=tickers_fingerprint(matcher.tickers),
+                         tickers_source=args.tickers or "sec_current")
     return 0
 
 
