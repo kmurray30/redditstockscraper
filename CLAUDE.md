@@ -1,7 +1,8 @@
 # Reddit long-horizon stock scout: project context for Claude
 
-Read this first. It is a handoff from an earlier cloud session (which could not reach the
-user's data or the torrent network), so everything the new session needs is here.
+Read this first. It is the handoff between sessions. The data layer, point-in-time machinery
+and backtest engine are built and tested; what remains is the **evaluation logic** (LLM thesis
+scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: evaluation work").
 
 ## How to work with this user
 
@@ -10,9 +11,10 @@ user's data or the torrent network), so everything the new session needs is here
 - When you *do* give the user commands, give **one command per code block**; combine only if
   there is almost no risk of error. No walls of commands.
 - macOS, Homebrew, pyenv Python 3.11. Repo at `~/Repos/redditstockscraper`.
-- Work on branch `claude/confident-gates-n5noak` (already pushed). **Do not open a PR** unless
-  asked. Commit message trailers used in this repo:
-  `Co-Authored-By: Claude <noreply@anthropic.com>` is fine.
+- Work on branch `claude/confident-gates-n5noak`. **Do not open a PR** unless asked. Commit
+  messages end with the `Co-Authored-By: Claude ...` trailer the harness specifies.
+- Never print or commit API keys; they live in the gitignored `.env`. Do not send the user's
+  email or any contact string to a service unless they ask (the SEC wants one: see Next steps).
 - Explain results plainly, say when something is unverified, and own mistakes. The earlier
   session made several wrong guesses about aria2c that the user paid for in retries.
 
@@ -67,11 +69,12 @@ read it before designing the scorer, backtest or validation):
 
 - LLM: **OpenAI** (structured outputs, versioned prompts, cache by hash of text+prompt+model,
   spend cap). Not built yet.
-- Market data: **Massive (formerly Polygon.io)** for prices, delisted tickers, ticker-change
-  events, splits/dividends; **SEC EDGAR** (free) for CIK mapping and XBRL fundamentals (~2009+).
-  Check which Massive tier includes financials and how many years of history before buying
-  (reportedly ~10y on the mid tier, 20+ on the top tier). Keys via env: `MASSIVE_API_KEY`,
-  `OPENAI_API_KEY`. Never commit keys.
+- Market data (changed from the original plan on cost): **EODHD** (one month of the ~$20 plan,
+  bulk-pulled, then cancel) for daily prices of ~60k active + delisted US symbols, and
+  **Massive's free tier** only for point-in-time ticker snapshots (`/v3/reference/tickers?date=`),
+  which carry CIK/FIGI. Massive prices cost $199/mo for 2012-era history, so we did not buy
+  them. **SEC EDGAR** (free) for SIC sectors and later XBRL fundamentals. Keys in `.env`:
+  `EODHD_API_KEY`, `MASSIVE_API_KEY`, later `OPENAI_API_KEY` and `SEC_USER_AGENT`.
 - Phase 1 = **research core only**. Phase 2 later: fundamental-resilience gate, forward data from
   non-Reddit sources (Hacker News Algolia, Bluesky Jetstream, Substack RSS), Postgres/pgvector,
   alerts, dashboard. Railway is a possible later home for scheduled jobs; not needed now.
@@ -94,17 +97,46 @@ read it before designing the scorer, backtest or validation):
 
 ## What exists in the repo
 
-`scripts/download_reddit.py` (CLI) and `scripts/reddit_filter.py`; `tests/` (66 tests, run
-`python -m pytest -q`); `README.md` documents usage. `requirements.txt`: zstandard, orjson, pytest.
-`data/` is gitignored.
+Tests: `python -m pytest -q` (224 tests, ~3 s, no network). `requirements.txt`: zstandard,
+orjson, pytest, pyarrow, duckdb. `data/` and `.env` are gitignored.
 
-Commands (`python scripts/download_reddit.py <cmd>`):
-`check` (test each external service), `list` (file sizes from torrent metadata), `preview`
-(sample the filter on one month from Arctic Shift), `pipeline` (download one file at a time,
-filter, delete raw), `arctic` (2025+ filtered fetch), `torrent` (plain download), `stats`
-(per-year counts of a .zst), `report` (`--sub NAME` or `--all`; keep rates, top tickers with
-"probably ordinary word" flags, sample titles, comments per post by year; `--write-stoplist FILE`),
-`clean-raw` (remove scratch/unverified raw files; `--force` discards an interrupted download).
+**Reddit side** (`scripts/download_reddit.py`, `reddit_filter.py`): commands `check`, `list`,
+`preview`, `pipeline`, `arctic`, `torrent`, `stats`, `report` (`--sub NAME` / `--all`,
+`--write-stoplist` merges *every* flagged word, so review it: real companies such as COST, META,
+NET, DOW get flagged too), `clean-raw`. The filter (`FILTER_VERSION = "posts-v4"`) is described
+below. All 5 subreddits are filtered with `data/ref/stoplist.txt` (67 hand-picked words) and the
+raw files are kept in `data/raw/reddit/reddit/subreddits24/` (re-filtering costs minutes, not a
+download). Not downloaded: wallstreetbets (7.6 GB, ~2 h, mostly memes): a decision for the user.
+
+**Research pipeline** (each module has a docstring with the rules; run in this order):
+
+| Step | Command | Output |
+|---|---|---|
+| Parquet corpus | `python scripts/corpus.py` | `data/corpus/parquet/{posts,comments}/<sub>.parquet` |
+| EODHD symbol lists | `python scripts/market_data.py symbols` | `data/market/eodhd/symbols.parquet` |
+| Daily prices (resumable) | `python scripts/market_data.py prices --workers 16` | `eod/<CODE>.parquet`, ~60k files |
+| Price index | `python scripts/market_data.py index` | `eod_index.parquet` |
+| Splits (universe only) | `python scripts/market_data.py splits --universe data/features/universe.parquet` | `splits/<CODE>.parquet` |
+| Ticker snapshots (free key, ~12 s/page) | `python scripts/security_master.py snapshots` | `data/market/massive/snapshots/<date>.parquet`, yearly 2010-2026 |
+| Word lists | `python scripts/entity_resolver.py wordstats` | `data/ref/word_like.txt`, `common_words.txt` |
+| Mentions | `python scripts/entity_resolver.py mentions` | `data/features/mentions.parquet` |
+| Universe + labels | `python scripts/universe.py` | `data/features/{universe,labels}.parquet` |
+| Post text features | `python scripts/baselines.py` | `data/features/post_features.parquet` |
+| SIC sectors (needs `SEC_USER_AGENT`) | `python scripts/edgar.py` | `data/ref/sic.parquet` |
+| Backtest | `python scripts/backtest.py run --baseline mentions --split dev` / `ladder` / `run --scorer file.py:factory` | report + `data/ledger/experiments.jsonl` |
+
+Order matters, and one step is two-pass: `universe.py` runs once to produce the list of codes the
+splits pull needs, then `splits --universe ...`, then `universe.py` again (it warns when any
+code lacks split data, because the price-adjustment consistency check is skipped for it).
+`mentions` needs the snapshots + `symbols.parquet`; `backtest.py` needs mentions, universe,
+labels, `post_features.parquet`.
+
+Modules: `security_master.py` (point-in-time `resolve(ticker, date)` -> CIK and `price_code(cik,
+date)` -> the right EODHD series), `entity_resolver.py` (cashtag > bare ticker > name; dated;
+`blind_text()` for the ticker-blinded LLM test), `names.py`, `prices.py` (adjusted series,
+cleaning, `outcome()` labels), `universe.py`, `pit.py` (the point-in-time corpus view),
+`scorer.py` (interface), `baselines.py`, `backtest.py` (engine), `stats.py` (KM, block bootstrap,
+permutation, deflated Sharpe), `ledger.py` (experiment ledger, sealed holdout, embargo).
 
 ### The filter (`FILTER_VERSION = "posts-v4"`, recall-first, cheap, run while downloading)
 - Keep a post if: a ticker appears (cashtag `$NET`, or a bare ALL-CAPS token that is on the SEC
@@ -127,6 +159,32 @@ filter, delete raw), `arctic` (2025+ filtered fetch), `torrent` (plain download)
   fingerprint, counts by reason). A subreddit is skipped if its manifest matches the current
   settings, so changing the filter version / threshold / stoplist re-runs it.
 
+### Data-quality traps found in this build (all fixed; do not regress)
+
+These each produced fake results before they were caught. The tests encode them.
+- **Ticker reuse and renames.** EODHD files a code's history under its *current* holder: `BBBY`
+  is Overstock's history, the real Bed Bath & Beyond is `BBBYQ`; DCP Midstream held `DPM` in
+  2017 but its prices are under `DCP`. A code is accepted for a company only if (a) no other
+  company takes the code over after this one's lifetime, (b) EODHD's name for the code resembles a
+  name the company has had (`SecurityMaster.price_code`), and successors (Google -> Alphabet) are
+  recognised by the ticker sitting in consecutive snapshots.
+- **Bad prices.** EODHD bars contain absurd prints (298,098 for a $5 stock), zero prices,
+  unadjusted reverse splits, and whole series with corrupt adjustment (`EE_old`). `prices.py`
+  drops isolated spikes, repairs unadjusted splits (needs the splits pull), and marks a window
+  `bad_data` if it holds an unexplained >6x one-day move or `adjusted_close/close` is
+  inconsistent with splits+dividends. `bad_data` rows are *excluded* from every statistic. Without
+  this a 279,691x "multibagger" dominated every mean and a random portfolio showed 115% CAGR.
+- **Missing security types.** Massive left `type` empty on a third of 2010-2016 rows and never
+  typed 1,280 dead companies; `fill_types` infers them (same ticker elsewhere, then EODHD's type).
+  Without it the development period silently lost its dead companies.
+- **Look-ahead in ticker resolution.** A ticker found only in the *next* snapshot is accepted
+  only if the company did not already exist under another ticker (IPO yes; FB -> META no).
+- **Bot / list posts.** 1,674 posts naming 31+ companies were 20% of all post mentions;
+  baselines ignore posts naming more than 10 companies (`n_companies` in the view).
+- **Name matching is the weakest evidence** (`Azure` matched Azure Power). Only full registered
+  names are used, single words need capitalisation + finance context + not a corpus-common word,
+  and the baselines use only cashtag / bare-ticker mentions by default.
+
 ### aria2c / torrent lessons (hard-won; do not undo)
 - A torrent's files are contiguous and aria2c downloads whole ~16 MiB pieces, so fetching one file
   also writes the edges of its neighbours (sparse files that can have their *full length* while
@@ -146,43 +204,91 @@ filter, delete raw), `arctic` (2025+ filtered fetch), `torrent` (plain download)
 - Arctic Shift reports query timeouts as HTTP 422 "Timeout. Maybe slow down a bit"; the code
   retries with backoff and shrinks the page size. Dates are sent as ISO strings.
 
-## Results so far (filter versions differ; re-run everything under v4)
+## Results so far
 
-Sizes (compressed): investing 0.96 GB, stocks 0.91 GB, StockMarket 0.28 GB,
-wallstreetbets 7.6 GB (postponed: ~2 h and mostly memes), SecurityAnalysis and ValueInvesting small.
+**Corpus (filter v4, 67-word stoplist):** 245k posts / 5.0M comments over 5 subs.
 
 | Subreddit | Posts kept | Comments kept | Notes |
 |---|---|---|---|
-| SecurityAnalysis | ~7.5k of 28.4k (26%) | ~71k of 137k | mostly link posts; 77% of kept posts are pre-2021; comments per post collapse after 2021 (specific to this sub, not the dump) |
-| ValueInvesting | 18.1k of 31.8k (57%) | 448k of 589k | 96% of kept posts are 2021+, so it serves the recent test periods, not the 5y backtest |
-| investing | 68.3k of 399k (17%) | 1.45M of 6.1M | the deep history we need: ~32k kept posts 2012-2018; 13-26 comments/post throughout; 2022 volume dips |
-| stocks, StockMarket | downloaded/filtered under an older version; reports not reviewed yet | | |
+| stocks | 106,091 of 376k (28%) | 2.28M | 54k posts 2021+, 24k <=2018 |
+| investing | 59,179 of 399k (15%) | 1.24M | the deep history: 28.6k kept posts <=2018 |
+| StockMarket | 54,635 of 179k (31%) | 1.01M | 75% is 2021+ |
+| ValueInvesting | 17,965 of 31.8k (57%) | 446k | 96% is 2021+, serves recent test periods only |
+| SecurityAnalysis | 7,102 of 28.4k (25%) | 69k | mostly link posts, small |
 
-False tickers found in `investing` and fixed in v4 (needs a re-run): CD, TD, LOT, YOU, LINK,
-NOTE, IEX, plus a "Moronic Monday" advice thread being kept.
+**Market data:** 59,916 price series (2.3 GB), 17 yearly Massive snapshots, 11.3k split files.
+Universe: ~3.1-3.6k eligible companies per month in 2012-2020 (price >= $1, 60-day median dollar
+volume >= $200k; size buckets are liquidity quintiles because we have no shares outstanding),
+835k company-month rows, 4.2M labels at 1/3/5/7/10 years. 1.47M resolved mention rows.
+
+**Baseline ladder** (top decile of scored companies per month, equal weight; lift = P(event |
+selected) / P(event | eligible universe); `perm p` shuffles scores within month x size bucket):
+
+| Scorer | dev 5y lift of P(5x) | dev perm p | dev loss-lift | validate 5y lift | validate loss-lift |
+|---|---|---|---|---|---|
+| mention count | 2.44 | 0.003 | 0.65 | 1.53 | 1.60 |
+| mentions incl. comments | 2.32 | 0.003 | 0.57 | 1.36 | 1.30 |
+| sentiment (lexicon) | 0.92 | 1.0 | 1.11 | 1.06 | 0.93 |
+| DD flair count | 1.33 | 0.99 | 1.22 | 1.21 | 1.27 |
+| structure proxy (DD/long/links) | 1.88 | 0.003 | 0.68 | 1.20 | 1.14 |
+| crowd-penalised structure | 0.90 | 1.0 | 1.11 | 0.96 | 1.31 |
+| 12-1 momentum | 1.65 | 0.003 | 1.55 | 1.29 | 1.89 |
+| random among mentioned | 1.41 | 0.2 | 1.05 | 1.23 | 1.23 |
+
+Read this carefully: (1) a *random* pick among Reddit-mentioned companies already has lift ~1.4
+vs the whole universe, so compare scorers with the random row, not 1.0. (2) Mention count is the
+bar to beat; sentiment and DD flair add nothing; the crowding penalty hurts. (3) Mention count's
+"fewer permanent losses" in dev (0.65) **reverses** in 2019-2020 (1.60): a regime change, as the
+report warned. (4) Nothing here has touched the sealed holdout (2021-2022): it is unconsulted.
+
+## Handoff: evaluation work (what is deliberately not built)
+
+Not built, by design: the OpenAI thesis scorer and prompts, comment adjudication, causal author
+credibility, embedding novelty, information-event de-duplication/clustering, the quality formula
+`Q`, the fundamental-resilience gate. Everything below is ready for them.
+
+**The contract** (`scripts/scorer.py`): a scorer has `name`, `version`, `lookback_days`,
+`maturation_hours`, `params()` and `score(cohort) -> {cik: {"score": float, ...}}`. `Cohort` gives
+`month`, `cutoff_utc`, `universe` (eligible companies that month: ticker, code, price, adv60, mom,
+size_q) and `view` (`pit.CohortView`). Run it with
+`python scripts/backtest.py run --scorer path/to/file.py:factory --split dev`.
+
+**What the view guarantees** (`scripts/pit.py`, tested): only posts whose maturation window has
+closed by the cutoff, comments only inside each post's window, nothing edited after maturation
+(`edited_policy="keep"` relaxes it), and *no* `score` / `num_comments` / `upvote_ratio` anywhere
+(the dumps hold end-of-life values). The view is a separate in-memory database, so even raw SQL
+through `view.query(...)` cannot reach later data. Tables: `post_mentions` (one row per post x
+company: text, flair, url, method, `n_companies`, text features), `comment_mentions`,
+`thread_comments`. For LLM calls: `view.posts(cik)`, `view.comments_for(post_ids)`,
+`entity_resolver.blind_text()` for the ticker-blinded run.
+
+**Rules to keep** (also in "Validation rules"): run identified *and* blinded; keep every
+configuration in the ledger (it is automatic); the holdout allows one look (`SealedHoldoutError`
+after that; never pass `--accept-contaminated` without telling the user); labels look 1-10 years
+ahead, so when tuning on dev and testing later use `ledger.embargo()`; report lift against the
+random-among-mentioned row, not only against 1.0; never use Reddit's final scores as features;
+posts naming many companies are bots, not theses. Read `docs/Reddit_Long_Horizon_Stock_Scouting_Full_Report.md`
+before designing the scorer.
+
+**Known limits to be honest about:** size is a liquidity proxy (no shares outstanding, so no true
+market cap); sector matching needs `sic.parquet` (permutation strata use it automatically once
+present); delisted holdings are valued at the last close (generous for bankruptcies); removed or
+deleted posts are invisible, so taken-down pump content never reaches any scorer; ~4% of
+mentions resolve from a later ticker snapshot (flagged `from_later_snapshot`; bare tokens in that
+state are dropped); snapshots are yearly, so a ticker that changes hands twice inside one year is
+not detected (tighten with `snapshots --per-year 2`); entry is the open of the first bar after the
+cohort date, plus 25 bps slippage, with no market-impact model.
 
 ## Next steps
 
-1. `git pull`; re-run `pipeline --subs investing stocks StockMarket --keep-raw` (raw files are
-   kept, so no download), also SecurityAnalysis and ValueInvesting (their manifests are old
-   versions and re-run automatically), then `report --all`. Inspect the top tickers, add
-   false ones with `report --all --write-stoplist data/ref/stoplist.txt` and
-   `pipeline ... --stoplist data/ref/stoplist.txt`; repeat until the lists look clean.
-2. Decide whether to add more subreddits (wallstreetbets last; maybe sector subs after quality
-   review) and whether to backfill 2025+ via `arctic`.
-3. Build, in order (all with look-ahead tests):
-   - **Security master**: Massive client with Parquet cache (active + inactive tickers, ticker
-     change events, splits, dividends, daily aggregates), EDGAR CIK map, point-in-time
-     `resolve(ticker, date) -> security_id`, delisting returns. Replace the SEC ticker list used
-     by the filter with Massive's active + inactive list so delisted names match bare too.
-   - **Entity resolver**: cashtag > ticker + financial context > company-name aliases > reject
-     English words; point-in-time (FB to META).
-   - **Deterministic baselines** (mention counts, lexicon sentiment, saturation percentile,
-     URL features) and the **causal backtest engine** (monthly cohorts, entry after the
-     information cutoff, 1/3/5y excess return, 2x/5x/10x touch, drawdown, delisting, censoring,
-     lift metrics, experiment ledger, sealed-holdout guard). Run the dumb baselines first, before
-     spending any LLM money.
-   - **OpenAI thesis scorer** (blinded vs identified, prefilter to the top ~5-15% of content,
-     cost guard), then comment adjudication, causal author stats, embedding novelty, info-event
-     clustering, ticker aggregation, and the ablation ladder from the report.
-4. Needs from the user when reached: `MASSIVE_API_KEY` (check the tier first), `OPENAI_API_KEY`.
+1. **User actions:** set `SEC_USER_AGENT="Your Name your@email"` in `.env`, then run
+   `python scripts/edgar.py` (SIC sectors for sector-matched permutation strata); add
+   `OPENAI_API_KEY` when the scorer is built; the EODHD subscription can be cancelled once no
+   more symbols are needed (everything is cached; 2025+ bars were not needed).
+2. **Decisions for the user:** add wallstreetbets (last, postponed); backfill 2025+ via
+   `arctic` (the corpus ends 2024-12, so cohorts end there too); the sealed holdout (2021-2022)
+   is untouched: decide who consults it and when.
+3. **Build the evaluation scorer** against the contract above, then run it on `dev`, compare to
+   the ladder, check `validate`, run blinded vs identified, and only then (once) the holdout.
+4. Phase 2 (later): fundamental-resilience gate (SEC XBRL), forward data from non-Reddit
+   sources, Postgres/pgvector, alerts, dashboard.

@@ -163,3 +163,14 @@ default (`--from-year`/`--to-year`).
   | 2019–2020 | Tune it |
   | 2021–2022 | Sealed holdout, used once |
   | 2023–2025 | LLM hindsight check and early forward test |
+
+## Research pipeline (after the Reddit data is filtered)
+
+Corpus to Parquet, market data, a point-in-time security master, an entity resolver, a causal
+backtest engine and deterministic baselines are built and tested. The command order, the data-
+quality traps found along the way, the baseline results and the interface for plugging in a
+real scorer are in [CLAUDE.md](CLAUDE.md). Quick start once the data exists:
+
+```
+python scripts/backtest.py ladder --split dev
+```
