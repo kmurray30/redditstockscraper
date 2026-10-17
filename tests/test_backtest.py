@@ -295,3 +295,32 @@ def test_report_carries_the_matched_lift(tmp_path):
     assert "p5" in h["lift_matched"] and h["lift_matched"]["p5"] > 3
     assert "size-matched" in bt.format_report(rep)
     assert "lift_p5_matched_1y" in led.entries()[-1]["summary"]
+
+
+def test_cached_scores_are_invalidated_when_the_input_data_changes(tmp_path):
+    f = write_world(tmp_path)
+    ev = bt.Evaluator(f)
+    sc = Fn("stamped", ORACLE)
+    bt.build_scores(sc, MONTHS[:2], FakeCorpus(), ev.con, tmp_path / "cache", log=lambda m: None, stamp="v1")
+    first = sc.calls
+    bt.build_scores(sc, MONTHS[:2], FakeCorpus(), ev.con, tmp_path / "cache", log=lambda m: None, stamp="v1")
+    assert sc.calls == first                      # same data: reused
+    bt.build_scores(sc, MONTHS[:2], FakeCorpus(), ev.con, tmp_path / "cache", log=lambda m: None, stamp="v2")
+    assert sc.calls == first + 2                  # new data: recomputed, never stale
+
+
+def test_data_stamp_changes_with_file_contents_and_ignores_missing(tmp_path):
+    a = tmp_path / "a.parquet"
+    a.write_bytes(b"1")
+    s1 = bt.data_stamp(a, tmp_path / "missing", None)
+    a.write_bytes(b"22")
+    assert bt.data_stamp(a) != s1 and bt.data_stamp(tmp_path / "nope") == bt.data_stamp(None)
+
+
+def test_deflated_sharpe_tests_excess_returns_not_raw_returns():
+    up = flat_series("UP", np.linspace(100, 200, 400))
+    spy = flat_series("SPY", np.linspace(100, 200, 400))      # the "market" rises just as much
+    st = Store({"UP": up, "SPY": spy})
+    rep = bt.simulate_portfolio([("2012-01-01", "1", "UP")], st, 6, slippage_bps=0)
+    assert rep["sharpe_monthly"] > 0.5                       # raw Sharpe looks great in a bull market
+    assert abs(rep["excess_sharpe_monthly"]) < 0.5           # but it earned nothing over the index

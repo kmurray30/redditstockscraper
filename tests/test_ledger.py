@@ -29,9 +29,9 @@ def make(tmp_path):
 
 def test_records_and_counts_distinct_configs(tmp_path):
     L = make(tmp_path)
-    L.record("dev", "a", {"name": "x"}, {}, {"sharpe_monthly": 0.1})
-    L.record("dev", "a", {"name": "x"}, {}, {"sharpe_monthly": 0.2})   # re-run of the same config
-    L.record("validate", "b", {"name": "y"}, {}, {"sharpe_monthly": 0.05})
+    L.record("dev", "a", {"name": "x"}, {}, {"excess_sharpe_monthly": 0.1})
+    L.record("dev", "a", {"name": "x"}, {}, {"excess_sharpe_monthly": 0.2})   # re-run of the same config
+    L.record("validate", "b", {"name": "y"}, {}, {"excess_sharpe_monthly": 0.05})
     assert L.n_trials() == 2 and sorted(L.trial_sharpes()) == [0.05, 0.2]
     assert L.entries()[0]["trial_no"] == 1
 

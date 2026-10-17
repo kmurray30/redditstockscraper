@@ -84,10 +84,11 @@ class Ledger:
                     if include_holdout or e["split"] != SEALED})
 
     def trial_sharpes(self) -> list[float]:
-        """Per-period Sharpe of every distinct configuration (best entry per config)."""
+        """Per-period Sharpe of excess returns over the benchmark for every distinct configuration
+        (best entry per config); the spread of these is what the deflated Sharpe corrects for."""
         best: dict[str, float] = {}
         for e in self.entries():
-            sr = (e.get("summary") or {}).get("sharpe_monthly")
+            sr = (e.get("summary") or {}).get("excess_sharpe_monthly")
             if sr is not None and e["split"] != SEALED:
                 best[e["config_id"]] = max(sr, best.get(e["config_id"], -1e9))
         return list(best.values())

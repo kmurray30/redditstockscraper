@@ -71,10 +71,21 @@ def universe_by_month(con, months: list[str]) -> dict[str, dict[str, dict]]:
     return out
 
 
+def data_stamp(*paths) -> str:
+    """Fingerprint of the input data files (size + mtime), so cached scores die with the data
+    they were computed from. Missing paths are ignored."""
+    parts = []
+    for p in paths:
+        if p and Path(p).exists():
+            st = Path(p).stat()
+            parts.append(f"{Path(p).name}:{st.st_size}:{st.st_mtime_ns}")
+    return hashlib.sha1("|".join(parts).encode()).hexdigest()[:8]
+
+
 def build_scores(scorer: Scorer, months: list[str], corpus, con, cache_dir: Path | None = None,
-                 log=print) -> pa.Table:
-    """Score every cohort month (cached per scorer configuration)."""
-    cid = config_hash(scorer)
+                 log=print, stamp: str = "") -> pa.Table:
+    """Score every cohort month (cached per scorer configuration and data fingerprint)."""
+    cid = config_hash(scorer, {"data": stamp} if stamp else None)
     cache = (Path(cache_dir) / cid / "scores.parquet") if cache_dir else None
     have = pq.read_table(cache).to_pylist() if cache and cache.exists() else []
     done = {r["month"] for r in have}
@@ -440,6 +451,7 @@ def simulate_portfolio(picks: list[tuple[str, str, str]], store: px.PriceStore, 
     dd = float(np.min(nav / np.maximum.accumulate(nav) - 1))
     ex = r - br
     sr, skew, kurt, n = stats.sharpe_moments(r)
+    esr, eskew, ekurt, en = stats.sharpe_moments(ex)   # the deflated Sharpe tests this one
     down = r[r < 0]
     best = np.sort(np.array(finals))[::-1]
     gains = np.clip(best, 0, None)
@@ -453,7 +465,8 @@ def simulate_portfolio(picks: list[tuple[str, str, str]], store: px.PriceStore, 
         "name_hit_rate": float((np.array(finals) > 0).mean()),
         "top5_share_of_gains": float(gains[:5].sum() / gains.sum()) if gains.sum() > 0 else float("nan"),
         "positions": len(finals), "unique_names": len({c for _, c, _ in picks}),
-        "n_obs": n,
+        "n_obs": n, "excess_sharpe_monthly": esr, "excess_skew": eskew, "excess_kurt": ekurt,
+        "excess_n": en,
     }
 
 
@@ -471,7 +484,9 @@ def run(scorer: Scorer, evaluator: Evaluator, corpus, split: str, *, ledger: lg.
     cid = config_hash(scorer, engine)
     ledger.check(split, cid, accept_contaminated=accept_contaminated)   # before any work
     months = lg.split_months(split, evaluator.months())
-    scores = build_scores(scorer, months, corpus, evaluator.con, cache_dir, log)
+    stamp = data_stamp(getattr(corpus, "mentions_path", None), getattr(corpus, "post_features", None),
+                       evaluator.dir / "universe.parquet")
+    scores = build_scores(scorer, months, corpus, evaluator.con, cache_dir, log, stamp)
     report = {"config_id": cid, "split": split, "scorer": scorer.name, "months": len(months),
               "horizons": {}}
     for h in horizons:
@@ -488,10 +503,13 @@ def run(scorer: Scorer, evaluator: Evaluator, corpus, split: str, *, ledger: lg.
         pr = report["portfolio"]
         if pr:
             n_tr = max(ledger.n_trials() + 1, 1)
-            srs = ledger.trial_sharpes() + [pr["sharpe_monthly"]]
+            # Sharpe of returns *in excess of SPY*: a long-only equity portfolio has a positive raw
+            # Sharpe in any bull market, so testing that would flatter everything, even random picks
+            srs = ledger.trial_sharpes() + [pr["excess_sharpe_monthly"]]
             var = float(np.var(srs, ddof=1)) if len(srs) > 1 else 0.01
             pr["deflated_sharpe"] = stats.deflated_sharpe(
-                pr["sharpe_monthly"], pr["n_obs"], pr["skew"], pr["kurt"], n_tr, var)
+                pr["excess_sharpe_monthly"], pr["excess_n"], pr["excess_skew"], pr["excess_kurt"],
+                n_tr, var)
             pr["n_trials"] = n_tr
     summary = headline(report)
     ledger.record(split, cid, {"name": scorer.name, "version": scorer.version,
@@ -513,6 +531,7 @@ def headline(report: dict) -> dict:
             out[f"perm_p5_{h}y"] = r.get("perm_p5")
     if report.get("portfolio"):
         out["sharpe_monthly"] = report["portfolio"].get("sharpe_monthly")
+        out["excess_sharpe_monthly"] = report["portfolio"].get("excess_sharpe_monthly")
         out["dsr"] = report["portfolio"].get("deflated_sharpe")
     return out
 

@@ -212,42 +212,66 @@ These each produced fake results before they were caught. The tests encode them.
 
 ## Results so far
 
-**Corpus (filter v4, 67-word stoplist):** 245k posts / 5.0M comments over 5 subs.
+**Corpus (filter v4, 67-word stoplist, all-time ticker list `data/ref/tickers_all.txt`):** 331k
+posts / 6.2M comments over 5 subs. Re-filtering with every ticker ever listed (instead of the SEC's
+*current* list) added 35% more posts, 62% more in `investing`: the earlier corpus had dropped posts
+about companies that later died unless they used a cashtag.
 
-| Subreddit | Posts kept | Comments kept | Notes |
+| Subreddit | Posts kept | Comments kept | Kept posts <=2018 / 2019-20 / 2021+ |
 |---|---|---|---|
-| stocks | 106,091 of 376k (28%) | 2.28M | 54k posts 2021+, 24k <=2018 |
-| investing | 59,179 of 399k (15%) | 1.24M | the deep history: 28.6k kept posts <=2018 |
-| StockMarket | 54,635 of 179k (31%) | 1.01M | 75% is 2021+ |
-| ValueInvesting | 17,965 of 31.8k (57%) | 446k | 96% is 2021+, serves recent test periods only |
-| SecurityAnalysis | 7,102 of 28.4k (25%) | 69k | mostly link posts, small |
+| stocks | 141,253 of 376k (38%) | 2.76M | 33.2k / 37.6k / 70.5k |
+| investing | 95,697 of 399k (24%) | 1.82M | 43.9k / 19.1k / 32.7k (the deep history) |
+| StockMarket | 66,613 of 179k (37%) | 1.07M | 10.2k / 8.7k / 47.7k |
+| ValueInvesting | 18,999 of 31.8k (60%) | 456k | 0.2k / 0.6k / 18.2k (recent periods only) |
+| SecurityAnalysis | 8,531 of 28.4k (30%) | 74k | 4.6k / 2.1k / 1.8k (mostly link posts) |
 
 **Market data:** 59,916 price series (2.3 GB), 17 yearly Massive snapshots, 11.3k split files.
 Universe: ~3.1-3.6k eligible companies per month in 2012-2020 (price >= $1, 60-day median dollar
 volume >= $200k; size buckets are liquidity quintiles because we have no shares outstanding),
-835k company-month rows, 4.2M labels at 1/3/5/7/10 years. 1.47M resolved mention rows.
+835k company-month rows, 4.2M labels at 1/3/5/7/10 years. 1.72M resolved mention rows.
+**Companies listed at a cohort date with no usable price series: 6,986** (5,601 not in EODHD at
+all, 842 where EODHD's name for the code is a different company, 543 whose code was taken over
+after delisting); they carry 3.3% of 2012-2018 stock mentions (96.7% land on priced companies),
+so permanent losses are still slightly understated. State this next to any loss-lift number.
 
-**Baseline ladder** (top decile of scored companies per month, equal weight; lift = P(event |
-selected) / P(event | eligible universe); `perm p` shuffles scores within month x size bucket x SIC division; sector data
-(9,464 of 9,828 companies) was added after the first run and moved only the weak scorers' p-values,
-not any lift):
+**Baseline ladder, after the survivorship fix** (top decile of scored companies per month, equal
+weight, 5y horizon; `lift` = P(5x | selected) / P(5x | eligible universe), `size-m` = the same with
+the universe re-weighted to the picks' liquidity mix, `loss` = the permanent-loss ratio, plain and
+size-matched; `perm p` shuffles scores within month x size bucket x SIC division; CAGR is the
+overlapping-lots portfolio vs SPY, which returned 16.1% in dev and 14.8% in validate):
 
-| Scorer | dev 5y lift of P(5x) | dev perm p | dev loss-lift | validate 5y lift | validate loss-lift |
-|---|---|---|---|---|---|
-| mention count | 2.44 | 0.003 | 0.65 | 1.53 | 1.60 |
-| mentions incl. comments | 2.32 | 0.003 | 0.57 | 1.36 | 1.30 |
-| sentiment (lexicon) | 0.92 | 1.0 | 1.11 | 1.06 | 0.93 |
-| DD flair count | 1.33 | 0.65 | 1.22 | 1.21 | 1.27 |
-| structure proxy (DD/long/links) | 1.88 | 0.003 | 0.68 | 1.20 | 1.14 |
-| crowd-penalised structure | 0.90 | 1.0 | 1.11 | 0.96 | 1.31 |
-| 12-1 momentum | 1.65 | 0.003 | 1.55 | 1.29 | 1.89 |
-| random among mentioned | 1.41 | 0.45 | 1.05 | 1.23 | 1.23 |
+| Scorer | dev lift | dev size-m | dev loss (size-m) | dev perm p | dev CAGR | val lift | val size-m | val loss | val CAGR |
+|---|---|---|---|---|---|---|---|---|---|
+| mention count | 2.25 | 2.92 | 1.05 (1.84) | 0.003 | 18.3% | 1.49 | 1.91 | 1.69 | 14.3% |
+| mentions incl. comments | 2.20 | 2.92 | 0.82 (1.51) | 0.003 | 18.7% | 1.32 | 1.73 | 1.35 | 16.7% |
+| sentiment (lexicon) | 0.90 | 1.00 | 1.05 (1.29) | 1.0 | 13.0% | 1.03 | 1.14 | 0.84 | 13.9% |
+| sentiment x volume | 1.95 | 2.50 | 0.85 (1.43) | 0.003 | 16.4% | 1.14 | 1.47 | 1.27 | 13.3% |
+| DD flair count | 1.28 | 1.45 | 1.38 (1.78) | 0.60 | 12.6% | 1.16 | 1.31 | 1.36 | 15.4% |
+| evidence links | 1.69 | 2.06 | 0.90 (1.35) | 0.003 | 16.0% | 1.13 | 1.37 | 1.26 | 13.1% |
+| structure proxy | 1.80 | 2.23 | 0.84 (1.31) | 0.003 | 16.0% | 1.15 | 1.42 | 1.12 | 15.0% |
+| crowd-penalised structure | 0.91 | 0.99 | 1.09 (1.29) | 1.0 | 12.0% | 0.90 | 0.96 | 1.22 | 10.5% |
+| 12-1 momentum | 1.65 | 1.65 | 1.55 (1.56) | 0.003 | 13.9% | 1.29 | 1.33 | 1.89 | 8.6% |
+| random among mentioned | 1.37 | 1.56 | 1.25 (1.59) | 0.38 | 14.3% | 1.25 | 1.41 | 1.30 | 13.6% |
 
-Read this carefully: (1) a *random* pick among Reddit-mentioned companies already has lift ~1.4
-vs the whole universe, so compare scorers with the random row, not 1.0. (2) Mention count is the
-bar to beat; sentiment and DD flair add nothing; the crowding penalty hurts. (3) Mention count's
-"fewer permanent losses" in dev (0.65) **reverses** in 2019-2020 (1.60): a regime change, as the
-report warned. (4) Nothing here has touched the sealed holdout (2021-2022): it is unconsulted.
+**Before vs after the survivorship fix** (mention count, dev, 5y): plain lift 2.44 -> 2.25;
+loss-lift **0.65 -> 1.05**. The old "popular companies suffer fewer permanent losses" result was
+mostly the bias; with the dead companies back it is gone. The size-matched loss-lift of 1.84 says
+the opposite of the old story: mention-count picks lose permanently *more* often than
+liquidity-matched peers (they look average in the plain number only because they are large and
+liquid). The old table is kept in `data/features/ladder_before_survivorship_fix.log` (not in git).
+
+Read this carefully: (1) a random pick among mentioned companies already has lift 1.4 / loss 1.6
+size-matched: being mentioned at all means more upside *and* more ruin, so compare scorers with the
+random row. (2) Mention count is still the bar to beat on upside (vs mentioned: 1.98); sentiment and
+DD flair add nothing; the crowding penalty hurts. (3) Only the mention-based scorers beat SPY in dev (information ratio 0.28 and 0.34), and
+none clearly does in validate (0.10 and 0.22). The deflated Sharpe is computed on returns *in excess
+of SPY* with every configuration tried counted (10 baselines): mention count 0.82 dev / 0.26
+validate, mentions incl. comments 0.86 / 0.34, random 0.06 / 0.30, everything else below 0.35. So
+in dev mention count is probably real, and in validate it is not distinguishable from luck. (An
+earlier version computed it on raw returns and gave 0.95 to random picks: any long-equity portfolio
+in a bull market has a positive raw Sharpe. Do not reintroduce that.) (4) Validate
+has now been seen by every baseline; compare finalists there, do not tune on it. (5) Nothing here
+has touched the sealed holdout (2021-2022): it is unconsulted.
 
 ## Sanity check of the data layer (2026-10-17, before any LLM spend)
 
@@ -263,7 +287,7 @@ companies, not "mentioned vs universe"), the sealed-holdout guard, and the ticke
 Findings, most important first. 1-2 change numbers in the ladder and must be done before
 building the evaluator:
 
-1. **Corpus survivorship bias (fixed in code, needs a re-run).** The download filter kept a
+1. **Corpus survivorship bias (FIXED and re-run on 2026-10-17; results in the ladder above).** The download filter kept a
    post for a bare ALL-CAPS ticker only if the ticker is on the SEC's *current* list. A 2014
    post saying "RSH?" (RadioShack, dead) was dropped; the same post about AAPL was kept, unless
    it used a cashtag, a DD flair, was long, or was a discussed link. So mentions of companies
@@ -271,8 +295,8 @@ building the evaluator:
    5x lift, deflated permanent-loss lift. Mention count's dev loss-lift of 0.65 is the number to
    distrust most. Fix: `security_master.py export-tickers` (every ticker in any Massive snapshot
    plus EODHD's active + delisted stock/ETF codes), re-filter with `--tickers`, rebuild corpus,
-   mentions, post features, and re-run the ladder. Expect lift5 to fall and loss-lift to rise;
-   record the before/after in this file.
+   mentions, post features, and re-run the ladder. Result: lift5 fell (2.44 -> 2.25) and mention
+   count's loss-lift rose (0.65 -> 1.05); the before/after is recorded in "Results so far".
 2. **Companies without a usable price series were dropped silently.** `price_code` rejects a
    code another company took over after this one's lifetime (correct: EODHD's series under
    that code is the new holder's), and if no `CODEQ`/`CODE_old` series exists the company
@@ -342,13 +366,11 @@ cohort date, plus 25 bps slippage, with no market-impact model.
 
 ## Next steps
 
-0. **Re-run the data layer without the survivorship bias (do this first):**
-   `security_master.py export-tickers`, then the re-filter `pipeline` command from the table
-   above, then `corpus.py`, `entity_resolver.py wordstats`, `entity_resolver.py mentions`,
-   `universe.py` (note the dropped-company counts and the data end date it prints),
-   `baselines.py`, then `backtest.py ladder --split dev` and `--split validate`. Put the new
-   ladder (plain lift, size-matched lift, loss-lift, perm p, portfolio CAGR vs SPY) in this
-   file next to the old one, and say how many companies `universe_dropped.parquet` lists.
+0. ~~Re-run the data layer without the survivorship bias~~ **Done 2026-10-17** (see "Results so far").
+   If the filter, ticker list, resolver, price cleaning or universe change again, repeat the chain:
+   `export-tickers`, re-filter `pipeline`, `corpus.py`, `entity_resolver.py wordstats` and `mentions`,
+   `universe.py` (twice, splits pull in between), `baselines.py`, then the ladders. Cached scores are
+   keyed on the data files, so they cannot go stale.
 1. **User actions:** add `OPENAI_API_KEY` to `.env` when the scorer is built; the EODHD
    subscription can be cancelled once no more symbols are needed (everything is cached; 2025+
    bars were not needed). SIC sectors are done (`data/ref/sic.parquet`, needs `SEC_USER_AGENT`
