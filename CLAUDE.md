@@ -228,18 +228,20 @@ volume >= $200k; size buckets are liquidity quintiles because we have no shares 
 835k company-month rows, 4.2M labels at 1/3/5/7/10 years. 1.47M resolved mention rows.
 
 **Baseline ladder** (top decile of scored companies per month, equal weight; lift = P(event |
-selected) / P(event | eligible universe); `perm p` shuffles scores within month x size bucket):
+selected) / P(event | eligible universe); `perm p` shuffles scores within month x size bucket x SIC division; sector data
+(9,464 of 9,828 companies) was added after the first run and moved only the weak scorers' p-values,
+not any lift):
 
 | Scorer | dev 5y lift of P(5x) | dev perm p | dev loss-lift | validate 5y lift | validate loss-lift |
 |---|---|---|---|---|---|
 | mention count | 2.44 | 0.003 | 0.65 | 1.53 | 1.60 |
 | mentions incl. comments | 2.32 | 0.003 | 0.57 | 1.36 | 1.30 |
 | sentiment (lexicon) | 0.92 | 1.0 | 1.11 | 1.06 | 0.93 |
-| DD flair count | 1.33 | 0.99 | 1.22 | 1.21 | 1.27 |
+| DD flair count | 1.33 | 0.65 | 1.22 | 1.21 | 1.27 |
 | structure proxy (DD/long/links) | 1.88 | 0.003 | 0.68 | 1.20 | 1.14 |
 | crowd-penalised structure | 0.90 | 1.0 | 1.11 | 0.96 | 1.31 |
 | 12-1 momentum | 1.65 | 0.003 | 1.55 | 1.29 | 1.89 |
-| random among mentioned | 1.41 | 0.2 | 1.05 | 1.23 | 1.23 |
+| random among mentioned | 1.41 | 0.45 | 1.05 | 1.23 | 1.23 |
 
 Read this carefully: (1) a *random* pick among Reddit-mentioned companies already has lift ~1.4
 vs the whole universe, so compare scorers with the random row, not 1.0. (2) Mention count is the
@@ -331,8 +333,7 @@ posts naming many companies are bots, not theses. Read `docs/Reddit_Long_Horizon
 before designing the scorer.
 
 **Known limits to be honest about:** size is a liquidity proxy (no shares outstanding, so no true
-market cap); sector matching needs `sic.parquet` (permutation strata use it automatically once
-present); delisted holdings are valued at the last close (generous for bankruptcies); removed or
+market cap); sector matching uses SIC divisions (coarse: 10 groups, 3.7% of companies have no code); delisted holdings are valued at the last close (generous for bankruptcies); removed or
 deleted posts are invisible, so taken-down pump content never reaches any scorer; ~4% of
 mentions resolve from a later ticker snapshot (flagged `from_later_snapshot`; bare tokens in that
 state are dropped); snapshots are yearly, so a ticker that changes hands twice inside one year is
@@ -348,10 +349,10 @@ cohort date, plus 25 bps slippage, with no market-impact model.
    `baselines.py`, then `backtest.py ladder --split dev` and `--split validate`. Put the new
    ladder (plain lift, size-matched lift, loss-lift, perm p, portfolio CAGR vs SPY) in this
    file next to the old one, and say how many companies `universe_dropped.parquet` lists.
-1. **User actions:** set `SEC_USER_AGENT="Your Name your@email"` in `.env`, then run
-   `python scripts/edgar.py` (SIC sectors for sector-matched permutation strata); add
-   `OPENAI_API_KEY` when the scorer is built; the EODHD subscription can be cancelled once no
-   more symbols are needed (everything is cached; 2025+ bars were not needed).
+1. **User actions:** add `OPENAI_API_KEY` to `.env` when the scorer is built; the EODHD
+   subscription can be cancelled once no more symbols are needed (everything is cached; 2025+
+   bars were not needed). SIC sectors are done (`data/ref/sic.parquet`, needs `SEC_USER_AGENT`
+   only if it is ever re-pulled).
 2. **Decisions for the user:** add wallstreetbets (last, postponed); backfill 2025+ via
    `arctic` (the corpus ends 2024-12, so cohorts end there too); the sealed holdout (2021-2022)
    is untouched: decide who consults it and when.
