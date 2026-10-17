@@ -190,3 +190,45 @@ real scorer are in [CLAUDE.md](CLAUDE.md). Quick start once the data exists:
 ```
 python scripts/backtest.py ladder --split dev
 ```
+
+## Hosted worker (Railway)
+
+The data lives on a Railway volume, and jobs run on a private worker service. `scripts/jobs.py`
+is the start command. Set the service variables `JOB` (a preset such as `ladder-dev`, or
+`script:<name>`), optional `JOB_ARGS`, and a new `JOB_ID`. The service redeploys, runs the job
+once, logs to the deploy log and `data/logs/`, then idles. The details are in
+[CLAUDE.md](CLAUDE.md).
+
+### One-time data upload from the Mac
+
+Install and log in to the Railway CLI.
+
+```
+brew install railway
+```
+
+```
+railway login
+```
+
+Link the repo folder to the project. Pick `redditstockscraper`, then the `worker` service.
+
+```
+cd ~/Repos/redditstockscraper && railway link
+```
+
+Register an SSH key with Railway.
+
+```
+railway ssh keys add
+```
+
+Stream `data/` onto the volume. The files are already compressed, so there is no gzip. It
+skips the torrent scratch folder. If the connection drops, rerun it, because it overwrites.
+
+```
+tar -C ~/Repos/redditstockscraper --exclude data/raw/reddit/.work -cf - data | railway ssh -s worker -- tar -xf - -C /app
+```
+
+Secrets go in the dashboard. Open the service, then Variables, then the Raw Editor, and paste
+the lines from `.env`. They are not set from the command line.

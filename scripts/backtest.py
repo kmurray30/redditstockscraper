@@ -31,6 +31,7 @@ from pathlib import Path
 import duckdb
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute  # noqa: F401  (used as pa.compute; not loaded by "import pyarrow" alone)
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

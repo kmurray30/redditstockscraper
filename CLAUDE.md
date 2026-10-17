@@ -6,17 +6,47 @@ scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: eval
 
 ## How to work with this user
 
-- **Run things yourself.** This session runs on the user's Mac, so run commands, read the output,
-  fix problems, rerun. Do not ask the user to paste output. Ask only for real decisions.
+- **Run things yourself.** The data now lives on Railway (see "Hosted worker" below), not on the
+  user's Mac. The user does not want to run things locally any more. Start jobs on the worker and
+  read their logs yourself. Do not ask the user to paste output. Ask only for real decisions.
 - When you *do* give the user commands, give **one command per code block**; combine only if
   there is almost no risk of error. No walls of commands.
-- macOS, Homebrew, pyenv Python 3.11. Repo at `~/Repos/redditstockscraper`.
+- The user's machine is macOS, Homebrew, pyenv Python 3.11, repo at `~/Repos/redditstockscraper`.
+  It may still hold an old copy of `data/`; the Railway volume is the source of truth.
 - Work on branch `claude/confident-gates-n5noak`. **Do not open a PR** unless asked. Commit
   messages end with the `Co-Authored-By: Claude ...` trailer the harness specifies.
 - Never print or commit API keys; they live in the gitignored `.env`. Do not send the user's
   email or any contact string to a service unless they ask (the SEC wants one: see Next steps).
 - Explain results plainly, say when something is unverified, and own mistakes. The earlier
   session made several wrong guesses about aria2c that the user paid for in retries.
+
+## Hosted worker (Railway)
+
+- Railway project `redditstockscraper`, service `worker`, built from this repo and branch with
+  the `Dockerfile` (Python 3.11). One volume is mounted at `/app/data`, so every script's
+  default `data/...` path lands on it. The service has **no public domain and no TCP proxy**.
+  Keep it that way: the Reddit data must never be on a public endpoint.
+- The start command is `scripts/jobs.py`. Request a job by setting service variables (this
+  redeploys): `JOB` = a preset (`tests`, `du`, `df`, `export-tickers`, `refilter`, `corpus`,
+  `wordstats`, `mentions`, `universe`, `splits`, `baselines`, `edgar`, `ladder-dev`,
+  `ladder-validate`, `run`, `rebuild` = the whole chain) or `script:<name>`; `JOB_ARGS` = extra
+  arguments (`run` needs `--baseline X` or `--scorer scripts/file.py:factory`); and `JOB_ID` =
+  a new string. Then read the result with the Railway `get-logs` tool. Logs also persist on the
+  volume in `data/logs/`, with a run index in `data/logs/jobs.jsonl`.
+- A `JOB_ID` runs once. A redeploy, for example a push to the branch, does not repeat a finished
+  job, but it **kills a running one**, which then re-runs from the start. Do not push while a
+  long job is running.
+- Anything touching the holdout split or `--accept-contaminated` is refused unless the user sets
+  `ALLOW_HOLDOUT=1` themselves.
+- Secrets (`EODHD_API_KEY`, `MASSIVE_API_KEY`, `SEC_USER_AGENT`, later `OPENAI_API_KEY`) are
+  service variables set by the user in the dashboard. **Never call `list-variables`**, because
+  it prints them. Set non-secret variables with `set-variables` only.
+- No torrent client in the image. Downloading wallstreetbets or Arctic Shift from Railway has
+  not been checked against Railway's terms; ask the user first.
+- The user moves files with the Railway CLI from their Mac: `railway ssh` and `scp` to the
+  service, and `tar ... | railway ssh -s worker -- tar -xf - -C /app` for whole folders.
+- Cost: the volume is $0.15/GB-month. The idle container costs cents. A job is billed only for
+  the RAM and CPU it uses while it runs.
 
 ## What we are building
 
@@ -97,8 +127,8 @@ read it before designing the scorer, backtest or validation):
 
 ## What exists in the repo
 
-Tests: `python -m pytest -q` (233 tests, ~3 s, no network). `requirements.txt`: zstandard,
-orjson, pytest, pyarrow, duckdb. `data/` and `.env` are gitignored.
+Tests: `python -m pytest -q` (244 tests, ~3 s, no network). `requirements.txt`: zstandard,
+orjson, pytest, pyarrow, duckdb, numpy. `data/` and `.env` are gitignored.
 
 **Reddit side** (`scripts/download_reddit.py`, `reddit_filter.py`): commands `check`, `list`,
 `preview`, `pipeline`, `arctic`, `torrent`, `stats`, `report` (`--sub NAME` / `--all`,

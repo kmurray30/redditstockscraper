@@ -22,6 +22,7 @@ caller explicitly accepts that the holdout is now contaminated, which is recorde
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,9 @@ def embargo(train_months: list[str], test_start: str, horizon_years: float) -> l
 
 
 def _git_commit() -> str | None:
+    sha = os.environ.get("RAILWAY_GIT_COMMIT_SHA")  # the hosted worker has no .git folder
+    if sha:
+        return sha[:7]
     try:
         out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                              text=True, timeout=5, cwd=Path(__file__).resolve().parent)

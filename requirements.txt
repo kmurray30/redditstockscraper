@@ -3,3 +3,4 @@ orjson>=3.9      # optional; ~3x faster parsing of big comment files
 pytest>=8
 pyarrow>=15
 duckdb>=1.0
+numpy>=1.26

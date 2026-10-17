@@ -1,0 +1,228 @@
+"""Job runner for the hosted worker (Railway). It is the service's start command.
+
+The worker is one container with the data volume mounted at ``/app/data``. A job is requested
+by setting two service variables, which redeploys the service:
+
+    JOB      a preset name (see ``PRESETS``) or ``script:<name>`` to run ``scripts/<name>.py``
+    JOB_ARGS extra arguments, appended to a ``script:`` job (and to ``ladder``/``run`` presets)
+    JOB_ID   any new string; a job runs once per JOB_ID
+
+Each run streams its output to the deploy log and to ``data/logs/<utc>_<job>.log``. It also
+appends ``started`` / ``finished`` records to ``data/logs/jobs.jsonl``. A JOB_ID that already
+finished is not run again (whatever its exit code), so a code push that redeploys the service
+does not repeat finished work. A run killed half-way (redeploy) has no ``finished`` record
+and runs again. After the job, or when nothing is requested, the process idles so the
+container stays up for ``railway ssh`` / ``scp``.
+
+The sealed holdout is guarded twice: any job whose arguments name the ``holdout`` split or
+``--accept-contaminated`` is refused unless the service variable ``ALLOW_HOLDOUT=1`` is set.
+Only the user sets that (the ledger's own one-look guard still applies on top).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PY = sys.executable
+SUBS = ["stocks", "investing", "StockMarket", "ValueInvesting", "SecurityAnalysis"]
+
+
+def _py(script: str, *args: str) -> list[str]:
+    return [PY, f"scripts/{script}", *args]
+
+
+PRESETS: dict[str, list[list[str]]] = {
+    "tests": [[PY, "-m", "pytest", "-q"]],
+    "du": [["du", "-sh", "data"], ["sh", "-c", "du -sh data/* data/*/* 2>/dev/null | sort -h"]],
+    "df": [["df", "-h", "data"]],
+    "export-tickers": [_py("security_master.py", "export-tickers")],
+    "refilter": [_py("download_reddit.py", "pipeline", "--subs", *SUBS, "--keep-raw",
+                     "--tickers", "data/ref/tickers_all.txt",
+                     "--stoplist", "data/ref/stoplist.txt")],
+    "corpus": [_py("corpus.py")],
+    "wordstats": [_py("entity_resolver.py", "wordstats")],
+    "mentions": [_py("entity_resolver.py", "mentions")],
+    "universe": [_py("universe.py")],
+    "splits": [_py("market_data.py", "splits", "--universe", "data/features/universe.parquet")],
+    "baselines": [_py("baselines.py")],
+    "edgar": [_py("edgar.py")],
+    "ladder-dev": [_py("backtest.py", "ladder", "--split", "dev")],
+    "ladder-validate": [_py("backtest.py", "ladder", "--split", "validate")],
+    "run": [_py("backtest.py", "run")],
+}
+# The full rebuild after a filter / ticker-list / resolver / price-cleaning change (CLAUDE.md).
+PRESETS["rebuild"] = [c for name in ("export-tickers", "refilter", "corpus", "wordstats",
+                                     "mentions", "universe", "splits", "universe", "baselines",
+                                     "ladder-dev", "ladder-validate") for c in PRESETS[name]]
+# Presets that accept JOB_ARGS (appended to their single command).
+TAKES_ARGS = {"run", "ladder-dev", "ladder-validate"}
+
+
+class JobError(ValueError):
+    pass
+
+
+def resolve(job: str, args: str = "", env: dict | None = None,
+            scripts_dir: Path = ROOT / "scripts") -> list[list[str]]:
+    """The commands for a job request, or JobError if it is not allowed."""
+    env = env or {}
+    extra = shlex.split(args or "")
+    if job.startswith("script:"):
+        name = job.split(":", 1)[1]
+        path = scripts_dir / f"{name}.py"
+        if not name or "/" in name or name.startswith(".") or name == "jobs" or not path.is_file():
+            raise JobError(f"no such script: scripts/{name}.py")
+        cmds = [_py(f"{name}.py", *extra)]
+    elif job in PRESETS:
+        if extra and job not in TAKES_ARGS:
+            raise JobError(f"job {job!r} takes no JOB_ARGS")
+        cmds = [list(c) for c in PRESETS[job]]
+        if extra:
+            cmds[-1] += extra
+    else:
+        raise JobError(f"unknown job {job!r}; presets: {', '.join(sorted(PRESETS))}, "
+                       "or script:<name>")
+    if job == "run" and not any(a in extra for a in ("--baseline", "--scorer")):
+        raise JobError("job 'run' needs JOB_ARGS with --baseline NAME or --scorer FILE:FACTORY")
+    flat = [a for c in cmds for a in c]
+    touches_holdout = "holdout" in flat or "--accept-contaminated" in flat
+    if touches_holdout and env.get("ALLOW_HOLDOUT") != "1":
+        raise JobError("this job touches the sealed holdout; the user must set ALLOW_HOLDOUT=1")
+    return cmds
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def finished_ids(ledger: Path) -> set[str]:
+    if not ledger.exists():
+        return set()
+    out = set()
+    for line in ledger.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("event") == "finished":
+            out.add(rec.get("job_id"))
+    return out
+
+
+def _append(ledger: Path, rec: dict) -> None:
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def _git_commit() -> str | None:
+    sha = os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+    if sha:
+        return sha[:7]
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                             text=True, timeout=5, cwd=ROOT)
+        return out.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+_child: subprocess.Popen | None = None
+
+
+def _on_term(signum, frame):  # forward a redeploy's SIGTERM to the running step, then stop
+    if _child and _child.poll() is None:
+        _child.terminate()
+    raise SystemExit(128 + signum)
+
+
+def run_commands(cmds: list[list[str]], log_path: Path, cwd: Path = ROOT) -> int:
+    """Run the steps in order, stopping at the first failure. Output goes to stdout and the log."""
+    global _child
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    with log_path.open("a") as log:
+        def emit(line: str) -> None:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            log.write(line)
+            log.flush()
+
+        for i, cmd in enumerate(cmds, 1):
+            emit(f"[jobs] step {i}/{len(cmds)}: {shlex.join(cmd)}\n")
+            t0 = time.time()
+            try:
+                _child = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT, text=True, bufsize=1)
+            except OSError as e:
+                emit(f"[jobs] could not start: {e}\n")
+                return 127
+            assert _child.stdout is not None
+            for line in _child.stdout:
+                emit(line)
+            code = _child.wait()
+            _child = None
+            emit(f"[jobs] step {i} exit {code} after {time.time() - t0:.0f}s\n")
+            if code != 0:
+                return code
+    return 0
+
+
+def handle(env: dict, data: Path = ROOT / "data", scripts_dir: Path = ROOT / "scripts") -> int | None:
+    """Run the requested job if there is one. Returns its exit code, or None if nothing ran."""
+    job = (env.get("JOB") or "").strip()
+    job_id = (env.get("JOB_ID") or "").strip()
+    ledger = data / "logs" / "jobs.jsonl"
+    if not job:
+        print("[jobs] no job requested (JOB is empty)", flush=True)
+        return None
+    if not job_id:
+        print(f"[jobs] JOB={job} but JOB_ID is empty; set a new JOB_ID to run it", flush=True)
+        return None
+    if job_id in finished_ids(ledger):
+        print(f"[jobs] JOB_ID {job_id} already finished; set a new JOB_ID to run again", flush=True)
+        return None
+    try:
+        cmds = resolve(job, env.get("JOB_ARGS", ""), env, scripts_dir)
+    except JobError as e:
+        print(f"[jobs] refused: {e}", flush=True)
+        _append(ledger, {"event": "finished", "job_id": job_id, "job": job, "ts": _now(),
+                         "exit": None, "refused": str(e)})
+        return 2
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe = job.replace(":", "_").replace("/", "_")
+    log_path = data / "logs" / f"{stamp}_{safe}.log"
+    base = {"job_id": job_id, "job": job, "args": env.get("JOB_ARGS", ""), "git": _git_commit(),
+            "log": str(log_path.relative_to(data.parent)) if data.parent in log_path.parents
+            else str(log_path)}
+    _append(ledger, {"event": "started", "ts": _now(), **base})
+    t0 = time.time()
+    code = run_commands(cmds, log_path)
+    _append(ledger, {"event": "finished", "ts": _now(), "exit": code,
+                     "seconds": round(time.time() - t0), **base})
+    print(f"[jobs] JOB_ID {job_id} ({job}) finished with exit {code}; log {base['log']}", flush=True)
+    return code
+
+
+def main() -> None:
+    signal.signal(signal.SIGTERM, _on_term)
+    os.chdir(ROOT)
+    handle(dict(os.environ))
+    if os.environ.get("JOBS_NO_IDLE") == "1":
+        return
+    print("[jobs] idle", flush=True)
+    while True:
+        time.sleep(3600)
+
+
+if __name__ == "__main__":
+    main()

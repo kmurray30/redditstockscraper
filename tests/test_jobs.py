@@ -1,0 +1,93 @@
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+import jobs  # noqa: E402
+
+
+def _records(data: Path) -> list[dict]:
+    return [json.loads(x) for x in (data / "logs" / "jobs.jsonl").read_text().splitlines()]
+
+
+def test_presets_and_args():
+    assert jobs.resolve("corpus") == [[jobs.PY, "scripts/corpus.py"]]
+    cmds = jobs.resolve("ladder-dev", "--top 0.05")
+    assert cmds[-1][-2:] == ["--top", "0.05"]
+    with pytest.raises(jobs.JobError):
+        jobs.resolve("corpus", "--subs stocks")       # presets without args refuse extras
+    with pytest.raises(jobs.JobError):
+        jobs.resolve("rm -rf data")
+    with pytest.raises(jobs.JobError):
+        jobs.resolve("run")                           # run needs a baseline or scorer
+    assert jobs.resolve("run", "--baseline mentions")[0][-2:] == ["--baseline", "mentions"]
+
+
+def test_rebuild_chain_order():
+    steps = [" ".join(c[1:3]) for c in jobs.PRESETS["rebuild"]]
+    assert steps[0] == "scripts/security_master.py export-tickers"
+    assert steps.count("scripts/universe.py") == 2    # universe, splits pull, universe again
+    i = steps.index("scripts/market_data.py splits")
+    assert steps[i - 1] == steps[i + 1] == "scripts/universe.py"
+    assert steps[-1] == "scripts/backtest.py ladder"
+
+
+def test_script_jobs_only_reach_existing_scripts(tmp_path):
+    (tmp_path / "thesis.py").write_text("")
+    assert jobs.resolve("script:thesis", "--x 1", scripts_dir=tmp_path)[0][1:] == \
+        ["scripts/thesis.py", "--x", "1"]
+    for bad in ("script:", "script:../x", "script:missing", "script:jobs"):
+        with pytest.raises(jobs.JobError):
+            jobs.resolve(bad, scripts_dir=tmp_path)
+
+
+def test_holdout_needs_explicit_permission():
+    for args in ("--baseline mentions --split holdout",
+                 "--baseline mentions --split dev --accept-contaminated"):
+        with pytest.raises(jobs.JobError, match="holdout"):
+            jobs.resolve("run", args)
+        assert jobs.resolve("run", args, {"ALLOW_HOLDOUT": "1"})
+
+
+def test_runs_once_per_job_id_and_logs(tmp_path, monkeypatch, capsys):
+    monkeypatch.setitem(jobs.PRESETS, "hello", [[sys.executable, "-c", "print('hi there')"]])
+    env = {"JOB": "hello", "JOB_ID": "a1"}
+    assert jobs.handle(env, data=tmp_path) == 0
+    assert "hi there" in capsys.readouterr().out
+    recs = _records(tmp_path)
+    assert [r["event"] for r in recs] == ["started", "finished"] and recs[1]["exit"] == 0
+    log = tmp_path.parent / recs[1]["log"] if not Path(recs[1]["log"]).is_absolute() else Path(recs[1]["log"])
+    assert "hi there" in log.read_text()
+    # a redeploy with the same JOB_ID does nothing; a new JOB_ID runs again
+    assert jobs.handle(env, data=tmp_path) is None
+    assert jobs.handle({**env, "JOB_ID": "a2"}, data=tmp_path) == 0
+
+
+def test_chain_stops_at_first_failure_and_failed_id_is_not_retried(tmp_path, monkeypatch, capsys):
+    monkeypatch.setitem(jobs.PRESETS, "chain", [
+        [sys.executable, "-c", "print('one')"],
+        [sys.executable, "-c", "import sys; sys.exit(3)"],
+        [sys.executable, "-c", "print('never')"]])
+    env = {"JOB": "chain", "JOB_ID": "c1"}
+    assert jobs.handle(env, data=tmp_path) == 3
+    out = capsys.readouterr().out
+    assert "one" in out and "never" not in out
+    assert jobs.handle(env, data=tmp_path) is None
+
+
+def test_interrupted_run_is_retried(tmp_path, monkeypatch):
+    monkeypatch.setitem(jobs.PRESETS, "ok", [[sys.executable, "-c", "pass"]])
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "jobs.jsonl").write_text(
+        json.dumps({"event": "started", "job_id": "k1", "job": "ok"}) + "\n")
+    assert jobs.handle({"JOB": "ok", "JOB_ID": "k1"}, data=tmp_path) == 0
+
+
+def test_nothing_requested_or_refused(tmp_path, capsys):
+    assert jobs.handle({}, data=tmp_path) is None
+    assert jobs.handle({"JOB": "corpus"}, data=tmp_path) is None      # no JOB_ID
+    assert jobs.handle({"JOB": "nope", "JOB_ID": "r1"}, data=tmp_path) == 2
+    assert "refused" in capsys.readouterr().out
+    assert jobs.handle({"JOB": "nope", "JOB_ID": "r1"}, data=tmp_path) is None

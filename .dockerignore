@@ -1,0 +1,10 @@
+data/
+.env
+.env.*
+.venv/
+.git/
+**/__pycache__/
+.pytest_cache/
+*.zst
+*.zst.part
+*.torrent
