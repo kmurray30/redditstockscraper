@@ -162,3 +162,14 @@ def test_credentials_from_env_file_and_never_printed(tmp_path, capsys):
         bs.load_creds(env={"S3_ENDPOINT": "x"}, env_path=tmp_path / "none")
     assert "S3_BUCKET" in str(e.value) and "sekret" not in str(e.value)
     assert "sekret" not in capsys.readouterr().out
+
+
+def test_interleave_alternates_largest_and_smallest():
+    assert bs.interleave(["a", "b", "c", "d", "e"]) == ["e", "a", "d", "b", "c"]
+    assert bs.interleave([]) == [] and bs.interleave(["x"]) == ["x"]
+
+
+def test_table_shows_folders_that_exist_only_on_the_other_side():
+    t = bs.table({"a/1": 1}, {"a/1": 1, "b/2": 5}, "local", "bucket")
+    row = [line.split() for line in t.splitlines() if line.startswith("b ")][0]
+    assert row[3] == "1" and row[-1] == "OK"     # nothing to copy from local, but visible

@@ -77,6 +77,22 @@ def diff(src: dict[str, int], dst: dict[str, int]) -> list[str]:
     return sorted((k for k, n in src.items() if dst.get(k) != n), key=lambda k: (src[k], k))
 
 
+def interleave(todo: list[str]) -> list[str]:
+    """Alternate the largest and smallest remaining files (``todo`` is sorted small to large).
+
+    Big files keep the connection's bandwidth busy while the many small ones, which are bound
+    by per-request latency, go through alongside them. Sending small files first instead made
+    the early speed and ETA look many times worse than the real total time."""
+    out, lo, hi = [], 0, len(todo) - 1
+    while lo <= hi:
+        out.append(todo[hi])
+        hi -= 1
+        if lo <= hi:
+            out.append(todo[lo])
+            lo += 1
+    return out
+
+
 def table(src: dict[str, int], dst: dict[str, int], src_name: str, dst_name: str) -> str:
     rows = defaultdict(lambda: [0, 0, 0, 0, 0])  # src files, src bytes, dst files, dst bytes, todo
     for k, n in src.items():
@@ -86,10 +102,9 @@ def table(src: dict[str, int], dst: dict[str, int], src_name: str, dst_name: str
         if dst.get(k) != n:
             r[4] += 1
     for k, n in dst.items():
-        if k in src:
-            r = rows[group_of(k)]
-            r[2] += 1
-            r[3] += n
+        r = rows[group_of(k)]
+        r[2] += 1
+        r[3] += n
     head = ["folder", f"{src_name} files", f"{src_name} size", f"{dst_name} files",
             f"{dst_name} size", "to copy", "state"]
     body = []
@@ -211,7 +226,7 @@ def load_creds(env: dict | None = None, env_path: Path | None = None) -> dict[st
 class Bucket:
     """The few S3 calls this tool needs, so tests can pass a fake."""
 
-    def __init__(self, creds: dict[str, str], workers: int = 16):
+    def __init__(self, creds: dict[str, str], workers: int = 32):
         try:
             import boto3
             from boto3.s3.transfer import TransferConfig
@@ -260,7 +275,7 @@ def copy(todo: list[str], sizes: dict[str, int], one, workers: int, out=None) ->
     failures: list[tuple[str, str]] = []
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
-        futs = {pool.submit(one, rel, prog.add): rel for rel in todo}
+        futs = {pool.submit(one, rel, prog.add): rel for rel in interleave(todo)}
         for f in as_completed(futs):
             err = f.exception()
             if err is not None:
@@ -280,7 +295,7 @@ def copy(todo: list[str], sizes: dict[str, int], one, workers: int, out=None) ->
     return len(failures)
 
 
-def push(data: Path, bucket, only=None, workers=16, dry_run=False, out=None) -> int:
+def push(data: Path, bucket, only=None, workers=32, dry_run=False, out=None) -> int:
     out = out or sys.stdout
     src, dst = local_files(data, only), remote_files(bucket, only)
     print(table(src, dst, "local", "bucket"), file=out)
@@ -293,7 +308,7 @@ def push(data: Path, bucket, only=None, workers=16, dry_run=False, out=None) -> 
     return verify(data, bucket, "push", only, out) or (1 if fails else 0)
 
 
-def pull(data: Path, bucket, only=None, workers=16, dry_run=False, out=None) -> int:
+def pull(data: Path, bucket, only=None, workers=32, dry_run=False, out=None) -> int:
     out = out or sys.stdout
     src, dst = remote_files(bucket, only), local_files(data, only)
     print(table(src, dst, "bucket", "local"), file=out)
@@ -338,7 +353,7 @@ def main(argv=None) -> None:
     p.add_argument("--data", default=str(ROOT / "data"))
     p.add_argument("--only", metavar="FOLDER", help="limit to one folder under data/, "
                    "e.g. market/eodhd")
-    p.add_argument("--workers", type=int, default=16)
+    p.add_argument("--workers", type=int, default=32)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--direction", choices=["push", "pull"], default="push",
                    help="for verify: push checks local files are in the bucket (the Mac), "
