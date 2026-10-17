@@ -173,3 +173,27 @@ def test_table_shows_folders_that_exist_only_on_the_other_side():
     t = bs.table({"a/1": 1}, {"a/1": 1, "b/2": 5}, "local", "bucket")
     row = [line.split() for line in t.splitlines() if line.startswith("b ")][0]
     assert row[1:5] == ["0", "0", "B", "1"] and row[-1] == "OK"   # visible, nothing to copy
+
+
+class FakeTTY(io.StringIO):
+    def isatty(self):
+        return True
+
+
+@pytest.mark.parametrize("cols", [40, 60, 80, 200])
+def test_terminal_line_never_wraps_and_clears_the_row(cols):
+    t = [0.0]
+    out = FakeTTY()
+    p = bs.Progress(total_bytes=6 * 2**30, total_files=71_638, out=out, clock=lambda: t[0],
+                    width=lambda: cols)
+    for _ in range(20):
+        t[0] += 1
+        p.add(3 * 2**20)
+        p.file_done()
+    draws = [d for d in out.getvalue().split("\r\x1b[2K") if d]
+    assert draws, "nothing drawn"
+    for d in draws:
+        assert len(d.rstrip("\n").split("\n")[0]) <= cols - 1
+        assert "%" in d and "ETA" in d
+    if cols >= 200:
+        assert "[" in draws[-1] and "files" in draws[-1]

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 import threading
 import time
@@ -141,13 +142,14 @@ class Progress:
     ``log_every`` seconds instead."""
 
     def __init__(self, total_bytes: int, total_files: int, out=None, interval: float = 0.5,
-                 log_every: float = 15.0, clock=time.monotonic):
+                 log_every: float = 15.0, clock=time.monotonic, width=None):
         self.total_bytes, self.total_files = total_bytes, total_files
         self.done_bytes = self.done_files = self.failed = 0
         self.out = out or sys.stderr
         self.tty = hasattr(self.out, "isatty") and self.out.isatty()
         self.interval = interval if self.tty else log_every
         self.clock = clock
+        self.width = width or (lambda: shutil.get_terminal_size(fallback=(80, 24)).columns)
         self.t0 = self._last = clock()
         self._window: deque[tuple[float, int]] = deque([(self.t0, 0)])
         self._lock = threading.Lock()
@@ -171,22 +173,43 @@ class Progress:
         t, b = self._window[0]
         return (self.done_bytes - b) / (now - t) if now > t else 0.0
 
-    def line(self) -> str:
+    def line(self, width: int | None = None) -> str:
+        """The status line, fitted to ``width`` characters when given (a terminal).
+
+        Wider than the terminal, a line wraps and a carriage return only goes back to the start
+        of its last row, so every redraw piled up after the previous one. Fields are therefore
+        dropped in order of importance: the bar shrinks, then goes, then the file count."""
         pct = 100 * self.done_bytes / self.total_bytes if self.total_bytes else 100.0
-        bar = "#" * int(pct / 4) + "-" * (25 - int(pct / 4))
         spd = self.speed()
         left = self.total_bytes - self.done_bytes
         eta = _dur(left / spd) if spd > 0 else "?"
         fail = f"  {self.failed} failed" if self.failed else ""
-        return (f"[{bar}] {pct:5.1f}%  {human(self.done_bytes)} / {human(self.total_bytes)}  "
-                f"{self.done_files:,}/{self.total_files:,} files  {human(spd)}/s  ETA {eta}{fail}")
+        core = (f"{pct:5.1f}%  {human(self.done_bytes)} / {human(self.total_bytes)}  "
+                f"{human(spd)}/s  ETA {eta}{fail}")
+        files = f"  {self.done_files:,}/{self.total_files:,} files"
+
+        def bar(n: int) -> str:
+            k = int(pct / 100 * n)
+            return "[" + "#" * k + "-" * (n - k) + "] "
+
+        full = bar(25) + core + files
+        if width is None:
+            return full
+        room = max(width - 1, 10)
+        for n in range(25, 9, -5):
+            if len(bar(n) + core + files) <= room:
+                return bar(n) + core + files
+        for candidate in (core + files, core):
+            if len(candidate) <= room:
+                return candidate
+        return core[:room]
 
     def _maybe_draw(self, force: bool = False) -> None:
         now = self.clock()
         if force or now - self._last >= self.interval:
             self._last = now
             if self.tty:
-                self.out.write("\r" + self.line().ljust(110))
+                self.out.write("\r\x1b[2K" + self.line(self.width()))
             else:
                 self.out.write(self.line() + "\n")
             self.out.flush()
