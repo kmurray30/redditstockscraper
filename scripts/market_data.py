@@ -315,6 +315,9 @@ def cmd_pull(args) -> int:
                        include_otc=not args.no_otc)
     if args.only:
         codes = [c for c in args.only]
+    elif args.universe:  # just the codes the backtest universe actually uses
+        used = {r for r in pq.read_table(args.universe, columns=["code"]).column("code").to_pylist()}
+        codes = [c for c in codes if c in used]
     if args.limit:
         codes = codes[:args.limit]
     print(f"{args.cmd}: {len(codes):,} symbols, {args.workers} workers")
@@ -336,6 +339,8 @@ def main(argv=None) -> int:
         s.add_argument("--workers", type=int, default=8)
         s.add_argument("--limit", type=int, help="only the first N symbols in work order")
         s.add_argument("--only", nargs="+", metavar="CODE", help="just these codes")
+        s.add_argument("--universe", metavar="PARQUET",
+                       help="only codes that appear in this universe file (features/universe.parquet)")
         s.add_argument("--no-otc", action="store_true", help="skip OTC / pink-sheet symbols")
     args = p.parse_args(argv)
     if args.cmd == "symbols":
