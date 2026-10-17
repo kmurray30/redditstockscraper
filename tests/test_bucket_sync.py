@@ -172,4 +172,4 @@ def test_interleave_alternates_largest_and_smallest():
 def test_table_shows_folders_that_exist_only_on_the_other_side():
     t = bs.table({"a/1": 1}, {"a/1": 1, "b/2": 5}, "local", "bucket")
     row = [line.split() for line in t.splitlines() if line.startswith("b ")][0]
-    assert row[3] == "1" and row[-1] == "OK"     # nothing to copy from local, but visible
+    assert row[1:5] == ["0", "0", "B", "1"] and row[-1] == "OK"   # visible, nothing to copy
