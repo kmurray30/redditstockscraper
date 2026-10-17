@@ -58,13 +58,16 @@ PRESETS: dict[str, list[list[str]]] = {
     "ladder-dev": [_py("backtest.py", "ladder", "--split", "dev")],
     "ladder-validate": [_py("backtest.py", "ladder", "--split", "validate")],
     "run": [_py("backtest.py", "run")],
+    "pull-data": [_py("bucket_sync.py", "pull")],
+    "bucket-status": [_py("bucket_sync.py", "status")],
+    "verify-data": [_py("bucket_sync.py", "verify", "--direction", "pull")],
 }
 # The full rebuild after a filter / ticker-list / resolver / price-cleaning change (CLAUDE.md).
 PRESETS["rebuild"] = [c for name in ("export-tickers", "refilter", "corpus", "wordstats",
                                      "mentions", "universe", "splits", "universe", "baselines",
                                      "ladder-dev", "ladder-validate") for c in PRESETS[name]]
 # Presets that accept JOB_ARGS (appended to their single command).
-TAKES_ARGS = {"run", "ladder-dev", "ladder-validate"}
+TAKES_ARGS = {"run", "ladder-dev", "ladder-validate", "pull-data"}
 
 
 class JobError(ValueError):

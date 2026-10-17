@@ -201,34 +201,41 @@ once, logs to the deploy log and `data/logs/`, then idles. The details are in
 
 ### One-time data upload from the Mac
 
-Install and log in to the Railway CLI.
+The data goes through a private Railway storage bucket, which is fast because uploads run in
+parallel. The bucket also stays as a cheap backup. `scripts/bucket_sync.py` prints a table
+per folder, a live progress bar with speed and ETA, and a final file-by-file check. If it
+stops, rerun the same command: finished files are skipped.
+
+Install boto3 for your Python.
 
 ```
-brew install railway
+pip install boto3
 ```
 
-```
-railway login
-```
-
-Link the repo folder to the project. Pick `redditstockscraper`, then the `worker` service.
+In the Railway dashboard, open the `data-backup` bucket, then its Credentials tab. Add these
+five lines to `.env` in the repo folder, with the values from that tab:
 
 ```
-cd ~/Repos/redditstockscraper && railway link
+S3_ENDPOINT=...
+S3_BUCKET=...
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+S3_REGION=...
 ```
 
-Register an SSH key with Railway.
+See what would be sent. This prints the table and uploads nothing.
 
 ```
-railway ssh keys add
+cd ~/Repos/redditstockscraper && python scripts/bucket_sync.py push --dry-run
 ```
 
-Stream `data/` onto the volume. The files are already compressed, so there is no gzip. It
-skips the torrent scratch folder. If the connection drops, rerun it, because it overwrites.
+Upload. Watch the speed on the progress line. Ctrl-C is safe at any point.
 
 ```
-tar -C ~/Repos/redditstockscraper --exclude data/raw/reddit/.work -cf - data | railway ssh -s worker -- tar -xf - -C /app
+python scripts/bucket_sync.py push
 ```
 
-Secrets go in the dashboard. Open the service, then Variables, then the Raw Editor, and paste
-the lines from `.env`. They are not set from the command line.
+The worker then copies the bucket onto its volume with the `pull-data` job.
+
+Secrets for the worker go in the dashboard. Open the service, then Variables, then the Raw
+Editor, and paste the API key lines from `.env`. They are not set from the command line.

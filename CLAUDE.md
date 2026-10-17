@@ -29,7 +29,8 @@ scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: eval
 - The start command is `scripts/jobs.py`. Request a job by setting service variables (this
   redeploys): `JOB` = a preset (`tests`, `du`, `df`, `export-tickers`, `refilter`, `corpus`,
   `wordstats`, `mentions`, `universe`, `splits`, `baselines`, `edgar`, `ladder-dev`,
-  `ladder-validate`, `run`, `rebuild` = the whole chain) or `script:<name>`; `JOB_ARGS` = extra
+  `ladder-validate`, `run`, `rebuild` = the whole chain, `pull-data`, `verify-data`,
+  `bucket-status`) or `script:<name>`; `JOB_ARGS` = extra
   arguments (`run` needs `--baseline X` or `--scorer scripts/file.py:factory`); and `JOB_ID` =
   a new string. Then read the result with the Railway `get-logs` tool. Logs also persist on the
   volume in `data/logs/`, with a run index in `data/logs/jobs.jsonl`.
@@ -43,8 +44,16 @@ scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: eval
   it prints them. Set non-secret variables with `set-variables` only.
 - No torrent client in the image. Downloading wallstreetbets or Arctic Shift from Railway has
   not been checked against Railway's terms; ask the user first.
-- The user moves files with the Railway CLI from their Mac: `railway ssh` and `scp` to the
-  service, and `tar ... | railway ssh -s worker -- tar -xf - -C /app` for whole folders.
+- **Moving data: the private bucket `data-backup`** (S3-compatible, $0.015/GB-month, free
+  transfer, no public access). Use `scripts/bucket_sync.py`, with `status`, `push`, `pull`
+  and `verify`, `--only FOLDER`, and `--dry-run`. It resumes by skipping same-size files and
+  ends with a size check of every file. The Mac pushes `data/` up with keys in its `.env`. The
+  worker pulls with `JOB=pull-data`, and `JOB=verify-data` / `bucket-status` show the state.
+  The worker's `S3_*` variables are references to the bucket's own variables, so no key passes
+  through a session. The bucket doubles as the volume's backup. To back up new results, push
+  from the worker with `JOB=script:bucket_sync JOB_ARGS="push --only features"` or similar.
+- `tar | railway ssh` works but is silent and was measured at about 0.1 MB/s. Do not suggest it
+  for bulk data.
 - Cost: the volume is $0.15/GB-month. The idle container costs cents. A job is billed only for
   the RAM and CPU it uses while it runs.
 
@@ -127,8 +136,8 @@ read it before designing the scorer, backtest or validation):
 
 ## What exists in the repo
 
-Tests: `python -m pytest -q` (244 tests, ~3 s, no network). `requirements.txt`: zstandard,
-orjson, pytest, pyarrow, duckdb, numpy. `data/` and `.env` are gitignored.
+Tests: `python -m pytest -q` (254 tests, ~5 s, no network). `requirements.txt`: zstandard,
+orjson, pytest, pyarrow, duckdb, numpy, boto3. `data/` and `.env` are gitignored.
 
 **Reddit side** (`scripts/download_reddit.py`, `reddit_filter.py`): commands `check`, `list`,
 `preview`, `pipeline`, `arctic`, `torrent`, `stats`, `report` (`--sub NAME` / `--all`,

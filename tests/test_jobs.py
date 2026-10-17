@@ -91,3 +91,9 @@ def test_nothing_requested_or_refused(tmp_path, capsys):
     assert jobs.handle({"JOB": "nope", "JOB_ID": "r1"}, data=tmp_path) == 2
     assert "refused" in capsys.readouterr().out
     assert jobs.handle({"JOB": "nope", "JOB_ID": "r1"}, data=tmp_path) is None
+
+
+def test_bucket_presets():
+    assert jobs.resolve("pull-data")[0][1:] == ["scripts/bucket_sync.py", "pull"]
+    assert jobs.resolve("pull-data", "--only ref")[0][-2:] == ["--only", "ref"]
+    assert jobs.resolve("verify-data")[0][-2:] == ["--direction", "pull"]
