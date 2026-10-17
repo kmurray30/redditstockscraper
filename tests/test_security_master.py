@@ -133,11 +133,11 @@ def test_rename_keeps_the_same_company(master):
     assert master.resolve("FB", "2021-06-01").confidence == "stable"
 
 
-def test_identity_never_comes_from_the_future_when_a_past_snapshot_has_the_ticker(master):
-    # BBBY at the 2025 mid-year date: the 2025-01-04 snapshot has no BBBY and the 2026 one
-    # is Overstock; the answer must not be backfilled from 2026 as if it were certain.
+def test_identity_never_comes_from_the_future(master):
+    # BBBY at mid-2025: the 2026 snapshot gives it to Overstock's successor, a company that
+    # already existed (as BYON). That is a later rename, not a listing, so it must not leak.
     r = master.resolve("BBBY", "2025-06-01")
-    assert r.confidence == "from_later_snapshot" and r.snapshot == "2026-01-04"
+    assert r.cik is None and r.confidence == "unknown"
 
 
 def test_unknown_ticker(master):
@@ -201,3 +201,64 @@ def test_code_taken_over_by_a_new_company_is_rejected_even_without_overhang():
     m = sm.SecurityMaster(snaps, {"SPWR": ("2005-01-01", "2023-06-01")})
     assert m.price_code("1", "2021-06-01") == (None, "no_valid_series (SPWR reused by another company)")
     assert m.price_code("2", "2023-02-01")[0] == "SPWR"
+
+
+def test_new_listing_between_snapshots_is_accepted_but_a_later_rename_is_not():
+    snaps = [snap("2020-01-04", "FB", "8"), snap("2022-01-04", "META", "8"),
+             snap("2022-01-04", "PLTR", "2")]
+    m = sm.SecurityMaster(snaps)
+    ipo = m.resolve("PLTR", "2020-06-01")
+    assert ipo.cik == "2" and ipo.confidence == "from_later_snapshot"
+    assert m.resolve("META", "2020-06-01").confidence == "unknown"  # FB existed: renamed later
+
+
+def test_fill_types_uses_other_snapshots_then_eodhd():
+    rows = [
+        {"as_of": "2012-01-04", "ticker": "AAA", "cik": "1", "type": None},     # typed later
+        {"as_of": "2018-01-04", "ticker": "AAA", "cik": "1", "type": "CS"},
+        {"as_of": "2012-01-04", "ticker": "DEAD", "cik": "2", "type": None},    # never typed
+        {"as_of": "2012-01-04", "ticker": "FUNDX", "cik": "3", "type": None},   # not in EODHD
+        {"as_of": "2012-01-04", "ticker": "SPY", "cik": "4", "type": None},
+    ]
+    out = {r["ticker"]: r["type"] for r in sm.fill_types(
+        rows, {"DEAD": "Common Stock", "SPY": "ETF"})}
+    assert out == {"AAA": "CS", "DEAD": "CS", "FUNDX": None, "SPY": "ETF"}
+
+
+# ---------------------------------------------------------------- name check on price series
+
+def test_a_held_ticker_whose_series_is_another_company_is_rejected():
+    # DCP Midstream held "DPM" in 2017; EODHD's DPM is a different, tiny company, and the real
+    # history sits under today's code DCP
+    snaps = [snap("2017-01-04", "DPM", "9", "DCP Midstream Partners, LP"),
+             snap("2018-01-04", "DCP", "9", "DCP Midstream LP"),
+             snap("2019-01-04", "DCP", "9", "DCP Midstream LP")]
+    idx = {"DPM": ("2008-01-01", "2024-01-01"), "DCP": ("2005-12-02", "2019-06-01")}
+    names = {"DPM": "Dundee Precious Metals Inc", "DCP": "DCP Midstream LP"}
+    m = sm.SecurityMaster(snaps, idx, names)
+    code, why = m.price_code("9", "2017-06-01")
+    assert code == "DCP" and why == "ok"
+
+
+def test_without_symbol_names_the_check_is_skipped():
+    snaps = [snap("2017-01-04", "DPM", "9", "DCP Midstream Partners, LP"),
+             snap("2018-01-04", "DPM", "9", "DCP Midstream LP")]
+    m = sm.SecurityMaster(snaps, {"DPM": ("2008-01-01", "2024-01-01")})
+    assert m.price_code("9", "2017-06-01")[0] == "DPM"
+
+
+def test_if_every_candidate_is_the_wrong_company_there_is_no_series():
+    snaps = [snap("2017-01-04", "ZZZ", "9", "Acme Widgets Inc"), snap("2018-01-04", "ZZZ", "9", "Acme Widgets Inc")]
+    m = sm.SecurityMaster(snaps, {"ZZZ": ("2008-01-01", "2024-01-01")}, {"ZZZ": "Totally Different Corp"})
+    code, why = m.price_code("9", "2017-06-01")
+    assert code is None and "different company" in why
+
+
+def test_previous_holder_of_a_reused_code_is_found_under_old_suffix():
+    snaps = [snap("2010-01-04", "DCP", "5", "DynCorp International Inc"),
+             snap("2018-01-04", "DCP", "6", "DCP Midstream LP")]
+    idx = {"DCP": ("2005-12-02", "2023-06-16"), "DCP_old": ("2006-05-04", "2010-07-07")}
+    names = {"DCP": "DCP Midstream LP", "DCP_old": "Dyncorp International Inc"}
+    m = sm.SecurityMaster(snaps, idx, names)
+    assert m.price_code("5", "2008-01-01")[0] == "DCP_old"
+    assert m.price_code("6", "2019-01-01")[0] == "DCP"

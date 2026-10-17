@@ -49,6 +49,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import names as _names  # noqa: E402
+
 API = "https://api.massive.com"
 PAGE = 1000
 MIN_INTERVAL = 12.5  # seconds between calls: the free plan allows 5 a minute
@@ -171,6 +174,32 @@ def snapshot_path(root: Path, as_of: str) -> Path:
     return root / "snapshots" / f"{as_of}.parquet"
 
 
+EODHD_TYPES = {"Common Stock": "CS", "ETF": "ETF", "Preferred Stock": "PFD", "Warrant": "WARRANT",
+               "Unit": "UNIT", "FUND": "FUND", "Mutual Fund": "FUND", "Notes": "NOTE",
+               "BOND": "NOTE"}
+
+
+def fill_types(rows: list[dict], eodhd_types: dict[str, str] | None = None) -> list[dict]:
+    """Massive left ``type`` empty on about a third of the 2010-2016 rows (and never typed
+    1,280 delisted companies), which would silently drop them from the universe. Fill from the
+    same (ticker, company) in any other snapshot, else from EODHD's symbol type. Rows that
+    stay untyped remain None and are excluded from the stock universe."""
+    known: dict[tuple, str] = {}
+    for r in rows:
+        if r.get("type"):
+            known.setdefault((r["ticker"], r.get("cik")), r["type"])
+    out = []
+    for r in rows:
+        if not r.get("type"):
+            t = known.get((r["ticker"], r.get("cik")))
+            if t is None and eodhd_types:
+                t = EODHD_TYPES.get(eodhd_types.get(r["ticker"]))
+            if t:
+                r = {**r, "type": t}
+        out.append(r)
+    return out
+
+
 @dataclass(frozen=True)
 class Resolution:
     cik: str | None
@@ -178,9 +207,11 @@ class Resolution:
     ticker: str
     confidence: str  # exact | stable | changed_between | from_later_snapshot | unknown
     snapshot: str | None  # as_of of the snapshot the answer came from
+    sec_type: str | None = None  # CS, ADRC, ETF, ... as Massive labels it
 
 
-BANKRUPT_SUFFIXES = ("Q",)  # BBBY -> BBBYQ after a Chapter 11 filing
+BANKRUPT_SUFFIXES = ("Q", "_old")  # BBBY -> BBBYQ after Chapter 11; EODHD's name for a code's previous holder
+NAME_MIN = 0.5  # EODHD's name for a code must resemble one of the company's registered names
 
 
 class SecurityMaster:
@@ -190,7 +221,8 @@ class SecurityMaster:
     ``price_index`` maps an EODHD code to ``(first_date, last_date)`` of its price series.
     """
 
-    def __init__(self, snapshots: list[dict], price_index: dict[str, tuple[str, str]] | None = None):
+    def __init__(self, snapshots: list[dict], price_index: dict[str, tuple[str, str]] | None = None,
+                 code_names: dict[str, str] | None = None):
         self.dates = sorted({r["as_of"] for r in snapshots})
         self._by_date: dict[str, dict[str, dict]] = {d: {} for d in self.dates}
         self._ciks: dict[str, dict] = {}
@@ -208,13 +240,25 @@ class SecurityMaster:
                 info["name"] = r.get("name") or info["name"]
                 info["tickers"].setdefault(r["ticker"], []).append(r["as_of"])
         self.price_index = price_index or {}
+        self.code_names = code_names or {}
+        self._cik_names: dict[str, set] = {}
+        for r in snapshots:
+            if r.get("cik") and r.get("name"):
+                self._cik_names.setdefault(r["cik"], set()).add(r["name"])
 
     @classmethod
-    def load(cls, massive_root: Path, price_index: dict | None = None) -> "SecurityMaster":
+    def load(cls, massive_root: Path, price_index: dict | None = None,
+             symbols: Path | None = None) -> "SecurityMaster":
         rows: list[dict] = []
         for f in sorted((Path(massive_root) / "snapshots").glob("*.parquet")):
             rows += pq.read_table(f).to_pylist()
-        return cls(rows, price_index)
+        fallback, code_names = None, {}
+        if symbols is not None and Path(symbols).exists():
+            sym = pq.read_table(symbols).to_pylist()
+            fallback = {r["code"]: r["type"] for r in sym}
+            for r in sym:
+                code_names.setdefault(r["code"], r.get("name"))
+        return cls(fill_types(rows, fallback), price_index, code_names)
 
     # ------------------------------------------------------------ identity
 
@@ -234,11 +278,22 @@ class SecurityMaster:
                 conf = "stable"  # same company on both sides of `on`
             else:
                 conf = "changed_between"  # delisted or reassigned before the next snapshot
-            return Resolution(before.get("cik"), before.get("name"), ticker, conf, prev)
-        if after is not None:  # listed between the two snapshots
+            return Resolution(before.get("cik"), before.get("name"), ticker, conf, prev,
+                              before.get("type"))
+        if after is not None:
+            known = self._ciks.get(after.get("cik"))
+            if prev is not None and known and known["first"] <= prev:
+                # the company already existed under another ticker: this is a rename
+                # that happened after `on` (FB -> META), not a new listing
+                return Resolution(None, None, ticker, "unknown", prev)
+            # a genuinely new listing between the two snapshots (an IPO)
             return Resolution(after.get("cik"), after.get("name"), ticker,
-                              "from_later_snapshot", nxt)
+                              "from_later_snapshot", nxt, after.get("type"))
         return Resolution(None, None, ticker, "unknown", prev)
+
+    def snapshot_index(self, on: date | str) -> int:
+        """Which gap between snapshots ``on`` falls in (a cache key for per-date lookups)."""
+        return bisect_right(self.dates, str(on))
 
     def lifetime_end(self, cik: str, _seen: frozenset = frozenset()) -> str | None:
         """None while the company (or its successor) is still in the newest snapshot;
@@ -261,6 +316,11 @@ class SecurityMaster:
         return nxt
 
     # ------------------------------------------------------------ prices
+
+    def name_matches(self, cik: str, code: str) -> bool:
+        """Does EODHD's name for ``code`` resemble any name this company has had?"""
+        en = self.code_names.get(code)
+        return any(_names.name_similarity(en, n) >= NAME_MIN for n in self._cik_names.get(cik, ()))
 
     def reused_after(self, code: str, cik: str, after: str) -> bool:
         """Does a *different* company hold ``code`` in a snapshot at or after ``after``?"""
@@ -286,6 +346,9 @@ class SecurityMaster:
                 continue
             if end is not None and self.reused_after(c, cik, end):
                 why.append(f"{c} reused by another company")
+                continue
+            if self.code_names.get(c) and not self.name_matches(cik, c):
+                why.append(f"{c} is a different company ({self.code_names[c]})")
                 continue
             if span[0] <= on <= span[1]:
                 ok.append(c)
