@@ -56,6 +56,9 @@ scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: eval
   for bulk data.
 - Cost: the volume is $0.15/GB-month. The idle container costs cents. A job is billed only for
   the RAM and CPU it uses while it runs.
+- **Data verified on the volume 2026-10-18:** 71,638 files pulled from the bucket with matching
+  sizes, and `ladder-dev` on the worker reproduced the dev ladder below to the last digit in
+  548 s. `LLM_MODEL=gpt-5-nano` and `LLM_SPEND_CAP_USD=5` are set; the user sets the keys.
 
 ## What we are building
 
