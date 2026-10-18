@@ -107,3 +107,14 @@ def test_thesis_presets_and_holdout_guard():
         jobs.resolve("thesis-run", "--split holdout")
     with pytest.raises(jobs.JobError, match="holdout"):
         jobs.resolve("calibrate", "--split holdout")
+
+
+def test_dump_file_round_trip():
+    import dump_file as df
+    data = ("hello\n" * 500).encode()
+    lines = df.chunks("a.md", data, chunk=100) + df.chunks("b.csv", b"x,y\n1,2\n", chunk=100)
+    assert df.reassemble(["noise"] + lines[::-1]) == {"a.md": data, "b.csv": b"x,y\n1,2\n"}
+    with pytest.raises(ValueError, match="missing"):
+        df.reassemble(lines[1:])
+    with pytest.raises(ValueError, match="checksum"):
+        df.reassemble([lines[0].replace("DUMP a.md 1/", "DUMP a.md 1/")[:-4] + "AAAA"] + lines[1:])
