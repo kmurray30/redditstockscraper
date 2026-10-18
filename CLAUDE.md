@@ -415,7 +415,7 @@ Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstrin
 | Job | What | Spends? |
 |---|---|---|
 | `census` (`thesis_funnel.py`) | selects threads, writes `data/features/threads.parquet`, prints the funnel, the cost estimate and 10+10 samples | no |
-| `gold-build` (`goldset.py build`) | 30 single-company dev threads to `data/gold/{threads.md,ratings.csv}`, pushed to the bucket | no |
+| `gold-build` (`goldset.py build [--dump]`) | 30 single-company dev threads (company in the title preferred) to `data/gold/{threads.md,ratings.csv}`, pushed to the bucket; `--dump` prints both files through the log so `gold_page.py` can build the phone rating page | no |
 | `gold-eval` (`goldset.py evaluate`) | grades the rated threads with `why`, prints your rating vs the model's Q and the rank correlation | cents |
 | `llm-run` (`thesis_llm.py run --variant identified|blinded [--years ...] [--limit N] [--dry-run]`) | grades the planned threads, cached per thread under `data/llm/cache/<model>/<prompt>/<variant>/` | yes, capped |
 | `llm-collect` (`--variant`) | cache -> `data/features/thesis_threads_<variant>.parquet` | no |
@@ -432,9 +432,11 @@ model needs `LLM_PRICE_IN`/`LLM_PRICE_OUT`. Every call's real cost goes to `data
 a run is refused up front if its estimate would cross the cap and stops mid-run if real spend does.
 
 **The funnel** (`thesis_funnel.py`): a (post, company) row is a candidate if the mention is a
-cashtag or clean/contextual bare ticker, the post names <= 2 companies, the author is not
-deleted, the post has substance (self post >= 400 chars, or a link post with >= 200 chars or a
-primary-source link), and the company is in the eligible universe that month. At every monthly
+cashtag or clean/contextual bare ticker and the company is a subject of the post (cashtag, in
+the title, or mentioned twice), the post names <= 2 companies (or <= 6 with this company in the
+title or the most mentioned), the author is not deleted, the post has substance (self post >=
+400 chars, a link post with >= 200 chars or a primary-source link, or a thin post with >= 15
+comments in the window and >= 10 votes), and the company is in the eligible universe that month. At every monthly
 cutoff the top 3 per company in the 90-day view by a pre-score (percentile ranks of length,
 primary/news links, DD flair, log votes) are selected; the scored set is the union over cutoffs.
 Point-in-time by construction.
@@ -465,13 +467,23 @@ stated horizon (days 14, weeks 30, months 90, years 180, unclear 60). Params (al
 Bear theses push the score down. Expected value is reported as calibrated bucket rates
 (`calibrate`), not as one number.
 
-**Census of dev (2026-10-18, funnel v2):** 12,854 unique threads over 84 cohorts (938 in 2012
-rising to 2,478 in 2018), 16.6M estimated input tokens; at GPT-5 nano $1.75 per variant, $3.51
-for identified + blinded. Rejects per cohort row: many_companies 120k, not_in_universe 64k,
-thin_self_post 61k, unreliable_mention 35k, deleted_author 19k, over_cap 15k, bare_link 12k.
-The first funnel (<= 2 companies, no discussion rule) gave 10,172 threads and rejected a
-10k-char Valeant DD for naming competitors; the focus and discussion rules fixed that.
+**Census of dev (2026-10-18, funnel v3):** 9,429 unique threads over 84 cohorts (662 in 2012
+rising to 1,929 in 2018), 12.1M estimated input tokens; at GPT-5 nano $1.28 per variant, $2.57
+for identified + blinded. Rejects per cohort row: passing_mention 85k, not_in_universe 64k,
+many_companies 62k, thin_self_post 52k, unreliable_mention 35k, deleted_author 17k, bare_link
+12k, over_cap 10k. History: funnel v1 (<= 2 companies, no discussion rule) gave 10,172 threads
+and rejected a 10k-char Valeant DD for naming competitors; v2 (focus + discussion rules) gave
+12,854 but its gold sample held threads where the ticker was a false or passing mention ("ATR"
+in a volatility post, "END" in a portfolio update); v3 requires a cashtag, the ticker in the
+title, or two mentions.
 The census job peaks at about 8.7 GB RAM (the 90-day views); keep that in mind on Hobby.
+
+**Gold set rating page:** `scripts/gold_page.py` builds a private claude.ai artifact page from
+the dumped `threads.md` + `ratings.csv` (one thread per card, 1-5 buttons, reason box; ratings
+saved through the artifact `db` capability, collection `ratings`, one doc per post id). Published
+2026-10-18 at https://claude.ai/artifact/S1GTrszHG1kJtAjtxd682y (private to the user). Read the
+ratings back with the ArtifactData tool, write them to `gold/ratings.csv` in the repo (ids and
+ratings only, no Reddit text) and run `gold-eval --ratings gold/ratings.csv`.
 
 **Budget and order** ($5 total, user decision): census first (no spend) -> gold set rated by
 the user -> `gold-eval` on nano and on Jev, pick by correlation -> pilot `llm-run --years 2014 2017`
