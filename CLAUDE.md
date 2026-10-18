@@ -478,12 +478,18 @@ in a volatility post, "END" in a portfolio update); v3 requires a cashtag, the t
 title, or two mentions.
 The census job peaks at about 8.7 GB RAM (the 90-day views); keep that in mind on Hobby.
 
-**Gold set rating page:** `scripts/gold_page.py` builds a private claude.ai artifact page from
-the dumped `threads.md` + `ratings.csv` (one thread per card, 1-5 buttons, reason box; ratings
-saved through the artifact `db` capability, collection `ratings`, one doc per post id). Published
-2026-10-18 at https://claude.ai/artifact/S1GTrszHG1kJtAjtxd682y (private to the user). Read the
-ratings back with the ArtifactData tool, write them to `gold/ratings.csv` in the repo (ids and
-ratings only, no Reddit text) and run `gold-eval --ratings gold/ratings.csv`.
+**Gold set rating page (`gold-ui`, a second Railway service):** `scripts/gold_server.py`
+serves the page built by `scripts/gold_page.py` (one thread per card, 1-5 buttons, reason box)
+behind HTTP Basic auth (`GOLD_PASSWORD`, chosen by the user) at
+https://gold-ui-production-98fb.up.railway.app. It reads `gold/threads.md` and `gold/ratings.csv`
+from the bucket at start and rewrites `gold/ratings.csv` in the bucket after every rating, so
+the worker reads the same file: `pull-data --only gold`, then `gold-eval`. **This is the one
+deliberate exception to "no public endpoint"**: the user asked for a phone page with just a
+password; the service holds only the 30 gold threads (about 110 KB), never the dataset, and it
+is separate from the worker so the worker keeps no domain. Tear it down with `delete-service`
+once the gold set is rated. (An earlier claude.ai artifact version of the page,
+https://claude.ai/artifact/S1GTrszHG1kJtAjtxd682y, only saves when its owner is signed in and is
+no longer the path.)
 
 **Budget and order** ($5 total, user decision): census first (no spend) -> gold set rated by
 the user -> `gold-eval` on nano and on Jev, pick by correlation -> pilot `llm-run --years 2014 2017`
