@@ -57,7 +57,7 @@ def test_reject_reasons():
     assert tf.reject_reason({**base, "in_title": False, "n": 2}) is None
     assert tf.reject_reason({**base, "in_title": False, "method": "cashtag"}) is None
     assert tf.reject_reason({**base, "method": "name"}) == "unreliable_mention"
-    assert tf.reject_reason({**base, "n_companies": 3}) == "many_companies"
+    assert tf.reject_reason({**base, "n_companies": 3, "in_title": False, "n": 2}, post_max_n=5) == "many_companies"
     assert tf.reject_reason({**base, "author": "[deleted]"}) == "deleted_author"
     assert tf.reject_reason({**base, "f_chars": 100}) == "thin_self_post"
     assert tf.reject_reason({**base, "is_self": False, "f_chars": 10}) == "bare_link"
