@@ -58,6 +58,18 @@ def test_reject_reasons():
     assert tf.reject_reason({**base, "is_self": False, "f_chars": 10}) == "bare_link"
     assert tf.reject_reason({**base, "is_self": False, "f_chars": 10, "f_primary_links": 1}) is None
     assert tf.reject_reason({**base, "is_self": False, "f_chars": 300}) is None
+    # focus rule: a long DD naming 4 companies is kept when this one is in the title or dominant
+    many = {**base, "n_companies": 4, "n": 1, "in_title": False}
+    assert tf.reject_reason(many, post_max_n=3) == "many_companies"
+    assert tf.reject_reason({**many, "in_title": True}, post_max_n=3) is None
+    assert tf.reject_reason({**many, "n": 3}, post_max_n=3) is None
+    assert tf.reject_reason({**many, "n": 1}, post_max_n=1) == "many_companies"   # once each: a list
+    assert tf.reject_reason({**many, "in_title": True, "n_companies": 9}, post_max_n=3) == "many_companies"
+    # discussion rule: a thin post with a real comment thread and votes is kept
+    thin = {**base, "f_chars": 100, "votes": 50}
+    assert tf.reject_reason(thin, n_comments=5) == "thin_self_post"
+    assert tf.reject_reason(thin, n_comments=20) is None
+    assert tf.reject_reason({**thin, "votes": 2}, n_comments=20) == "thin_self_post"
 
 
 def test_selection_is_point_in_time_and_capped(tmp_path):
@@ -66,25 +78,32 @@ def test_selection_is_point_in_time_and_capped(tmp_path):
              post("small", t + 2 * DAY, 500, score=1), post("tiny", t + 3 * DAY, 500, score=0),
              post("thin", t, 100), post("other", t, 3000, score=20),
              post("late", T1 + 10 * DAY, 4000, score=999),         # only visible at M2
-             post("deleted", t, 3000, author="[deleted]")]
+             post("deleted", t, 3000, author="[deleted]"),
+             post("talk", t, 50, score=40)]                         # thin, but 20 comments
     mentions = [mention(p["id"], p["created_utc"]) for p in posts if p["id"] != "other"]
     mentions.append(mention("other", t, cik="2"))
-    corpus = build(tmp_path, posts, mentions, [feat(p) for p in posts])
+    comments = [{"id": f"c{i}", "post_id": "talk", "parent_id": "t3_talk", "created_utc": t + 60 * i,
+                 "author": "z", "body": "a substantive comment", "score": 1, "edited_utc": 0}
+                for i in range(20)]
+    corpus = build(tmp_path, posts, mentions, [feat(p) for p in posts], comments)
     uni = {M1: {"1": {}, "2": {}}, M2: {"1": {}}}           # company 2 drops out of the universe at M2
     threads, census = tf.plan(corpus, [M1, M2], uni, lookback=90, top_k=3, log=lambda *_: None)
     by = {t["post_id"]: t for t in threads}
-    # M1: company 1 has big, mid, small, tiny (thin rejected, deleted rejected) -> top 3 by pre-score
-    assert {"big", "mid", "small"} <= set(by) and "tiny" not in by
+    # M1: company 1 has big, mid, small, tiny, talk (thin and deleted rejected) -> top 3 by
+    # pre-score: big (votes, length), mid (DD flair), talk (votes, comments); small and tiny out
+    assert {"big", "mid", "talk"} <= set(by) and "small" not in by and "tiny" not in by
     assert "thin" not in by and "deleted" not in by
+    assert by["talk"]["n_comments"] == 20                               # the discussion rule
     assert "other" in by and by["other"]["first_month"] == M1           # in universe at M1
-    # M2: "late" is visible, pushes "small" out of the top 3 but "small" stays scored (selected at M1)
+    # M2: "late" is visible and selected; "big" is selected again (two cutoffs, scored once)
     assert "late" in by and by["late"]["first_month"] == M2
-    assert by["big"]["n_months"] == 2 and by["small"]["n_months"] == 1
+    assert by["big"]["n_months"] == 2 and by["late"]["n_months"] == 1
     assert census["rejects"]["thin_self_post"] == 2 and census["rejects"]["deleted_author"] == 2
     assert census["rejects"]["not_in_universe"] == 1                     # "other" at M2
+    assert census["rejects"]["over_cap"] >= 2                            # small and tiny at M1
     assert census["n_threads"] == len(threads) == 5
     assert all(t["matured_utc"] == t["created_utc"] + 24 * 3600 for t in threads)
-    assert by["big"]["votes"] == 300 and by["big"]["est_tokens"] > by["small"]["est_tokens"]
+    assert by["big"]["votes"] == 300 and by["big"]["est_tokens"] > by["talk"]["est_tokens"]
 
 
 def test_dedupe_prefers_the_most_reliable_method():

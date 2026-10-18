@@ -4,11 +4,15 @@ Most kept posts are not theses: questions, news links, memes, lists. Scoring the
 spend the budget on noise, so the funnel is strict and point-in-time:
 
 1. A thread candidate is one (post, company) row of the view where the company was resolved
-   by a reliable method (cashtag, clean or context bare ticker), the post names at most
-   ``MAX_COMPANIES`` companies, the author is not deleted or a bot, and the post has
-   substance: a self post with >= ``MIN_SELF_CHARS`` of body, or a link post with some
-   written text or a primary-source link. The company must be in the eligible universe that
-   month (same rule as the baselines).
+   by a reliable method (cashtag, clean or context bare ticker); the post names at most
+   ``MAX_COMPANIES`` companies, or up to ``MAX_FOCUS_COMPANIES`` when this company is the
+   focus (in the title, or the most-mentioned company of the post, at least twice: a long
+   DD naturally names competitors, a portfolio list has no focus); the author is not deleted
+   or a bot; and the post has substance: a self post with >= ``MIN_SELF_CHARS`` of body, a
+   link post with some written text or a primary-source link, or a thin post that drew a
+   real discussion (>= ``MIN_DISCUSSION_COMMENTS`` comments inside the maturation window and
+   >= ``MIN_DISCUSSION_VOTES`` votes; the analysis is then in the comments). The company must
+   be in the eligible universe that month (same rule as the baselines).
 2. At every monthly cutoff, for every company, the top ``TOP_K`` candidates in the view
    (``LOOKBACK`` days) by a cheap pre-score are selected. The pre-score is the mean
    percentile rank of body length, links to primary and news sources, DD flair, and
@@ -44,8 +48,11 @@ from thesis_prompt import PRUNE  # noqa: E402
 CANDIDATE_METHODS = ("cashtag", "bare_clean", "bare_context")
 METHOD_RANK = {m: i for i, m in enumerate(CANDIDATE_METHODS + ("name",))}
 MAX_COMPANIES = 2
+MAX_FOCUS_COMPANIES = 6
 MIN_SELF_CHARS = 400
 MIN_LINK_CHARS = 200
+MIN_DISCUSSION_COMMENTS = 15
+MIN_DISCUSSION_VOTES = 10
 TOP_K = 3
 LOOKBACK = 90
 BAD_AUTHORS = frozenset({"[deleted]", "AutoModerator", "None", ""})
@@ -63,20 +70,40 @@ THREAD_SCHEMA = pa.schema([
 ])
 
 
-def reject_reason(row: dict, max_companies: int = MAX_COMPANIES) -> str | None:
+def reject_reason(row: dict, max_companies: int = MAX_COMPANIES, *, post_max_n: int | None = None,
+                  n_comments: int = 0) -> str | None:
+    """None if the row is a candidate, else why not. ``post_max_n`` is the largest mention
+    count any company has in this post (for the focus rule); ``n_comments`` the comments
+    inside the maturation window (for the discussion rule)."""
     if row["method"] not in CANDIDATE_METHODS:
         return "unreliable_mention"
-    if (row.get("n_companies") or 1) > max_companies:
-        return "many_companies"
+    nc = row.get("n_companies") or 1
+    if nc > max_companies:
+        n = row.get("n") or 0
+        focus = bool(row.get("in_title")) or (post_max_n is not None and n >= post_max_n and n >= 2)
+        if nc > MAX_FOCUS_COMPANIES or not focus:
+            return "many_companies"
     if (row.get("author") or "") in BAD_AUTHORS:
         return "deleted_author"
     chars = row["f_chars"] if row.get("f_chars") is not None else len(row.get("selftext") or "")
-    if row.get("is_self"):
-        if chars < MIN_SELF_CHARS:
-            return "thin_self_post"
-    elif chars < MIN_LINK_CHARS and not (row.get("f_primary_links") or 0):
-        return "bare_link"
-    return None
+    substantive = (chars >= MIN_SELF_CHARS if row.get("is_self")
+                   else chars >= MIN_LINK_CHARS or bool(row.get("f_primary_links") or 0))
+    if substantive:
+        return None
+    if n_comments >= MIN_DISCUSSION_COMMENTS and (row.get("votes") or 0) >= MIN_DISCUSSION_VOTES:
+        return None   # a thin post whose discussion is the content
+    return "thin_self_post" if row.get("is_self") else "bare_link"
+
+
+def post_context(view, rows: list[dict]) -> tuple[dict[str, int], dict[str, int]]:
+    """Per post: the largest mention count of any company, and the comment count in the
+    view (comments inside the maturation window)."""
+    max_n: dict[str, int] = {}
+    for r in rows:
+        max_n[r["post_id"]] = max(max_n.get(r["post_id"], 0), int(r.get("n") or 0))
+    n_comments = {r["post_id"]: int(r["n"]) for r in view.query(
+        "select post_id, count(*) n from thread_comments group by post_id")}
+    return max_n, n_comments
 
 
 def dedupe(rows: list[dict]) -> list[dict]:
@@ -104,13 +131,15 @@ def select(view, universe: dict | None, top_k: int = TOP_K,
            max_companies: int = MAX_COMPANIES) -> tuple[list[dict], Counter]:
     """Selected rows (with ``pre_score``) at this cutoff, and reject counts by reason."""
     rows = dedupe(view.posts())
+    max_n, n_comments = post_context(view, rows)
     rejects: Counter = Counter()
     cands = []
     for r in rows:
         if universe is not None and r["cik"] not in universe:
             rejects["not_in_universe"] += 1
             continue
-        why = reject_reason(r, max_companies)
+        why = reject_reason(r, max_companies, post_max_n=max_n.get(r["post_id"]),
+                            n_comments=n_comments.get(r["post_id"], 0))
         if why:
             rejects[why] += 1
         else:
@@ -220,9 +249,12 @@ def rejected_sample(corpus, months, universe_by_month, lookback, max_companies, 
     for m in rng.sample(months, min(6, len(months))):
         view = corpus.at(month_utc(m), lookback)
         uni = universe_by_month.get(m) if universe_by_month is not None else None
-        for r in dedupe(view.posts()):
+        rows = dedupe(view.posts())
+        max_n, n_comments = post_context(view, rows)
+        for r in rows:
             why = ("not_in_universe" if uni is not None and r["cik"] not in uni
-                   else reject_reason(r, max_companies))
+                   else reject_reason(r, max_companies, post_max_n=max_n.get(r["post_id"]),
+                                      n_comments=n_comments.get(r["post_id"], 0)))
             if why:
                 out.append(dict(r, reason=why))
     return rng.sample(out, min(n, len(out)))
