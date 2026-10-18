@@ -597,7 +597,9 @@ def load_scorer(spec: str) -> Scorer:
 
 def make_corpus(scorer, parquet: Path, mentions: Path, post_features: Path):
     from pit import PITConfig, PITCorpus
-    return PITCorpus(parquet, mentions, PITConfig(maturation_hours=scorer.maturation_hours),
+    return PITCorpus(parquet, mentions,
+                     PITConfig(maturation_hours=scorer.maturation_hours,
+                               votes=getattr(scorer, "votes", "none")),
                      post_features=post_features)
 
 

@@ -403,6 +403,74 @@ state are dropped); snapshots are yearly, so a ticker that changes hands twice i
 not detected (tighten with `snapshots --per-year 2`); entry is the open of the first bar after the
 cohort date, plus 25 bps slippage, with no market-impact model.
 
+## Thesis scorer (built 2026-10-18; the LLM evaluation layer)
+
+Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstring for the maths.
+
+**Pipeline, all worker jobs** (`JOB=...`, `JOB_ARGS` passthrough):
+
+| Job | What | Spends? |
+|---|---|---|
+| `census` (`thesis_funnel.py`) | selects threads, writes `data/features/threads.parquet`, prints the funnel, the cost estimate and 10+10 samples | no |
+| `gold-build` (`goldset.py build`) | 30 single-company dev threads to `data/gold/{threads.md,ratings.csv}`, pushed to the bucket | no |
+| `gold-eval` (`goldset.py evaluate`) | grades the rated threads with `why`, prints your rating vs the model's Q and the rank correlation | cents |
+| `llm-run` (`thesis_llm.py run --variant identified|blinded [--years ...] [--limit N] [--dry-run]`) | grades the planned threads, cached per thread under `data/llm/cache/<model>/<prompt>/<variant>/` | yes, capped |
+| `llm-collect` (`--variant`) | cache -> `data/features/thesis_threads_<variant>.parquet` | no |
+| `check-blind` | greps the blinded texts for the company's ticker or name; must report 0 | no |
+| `thesis-run` (`backtest.py run --scorer scripts/thesis_scorer.py:factory --split dev`) | the backtest; `THESIS_VARIANT`, `THESIS_PARAMS` (JSON), `THESIS_VOTES` select the configuration | no |
+| `thesis-timeline` | per-company score series after every thread event, `thesis_series_<variant>.parquet`, for graphs | no |
+| `calibrate --split dev` | P(5x), P(10x), P(permanent loss) and CAGR quartiles per score decile | no |
+
+**Variables the user sets on the worker:** `LLM_MODEL` (e.g. `gpt-5-nano`; `fake` is a free
+deterministic backend for dry runs), `OPENAI_API_KEY` (or `OPENROUTER_API_KEY` +
+`LLM_BASE_URL=https://openrouter.ai/api/v1` for Jev as `typesafe/jev-1.13`), `LLM_SPEND_CAP_USD`
+(default 5). Prices are a table in `llm.py` from third-party trackers (Oct 2026); an unknown
+model needs `LLM_PRICE_IN`/`LLM_PRICE_OUT`. Every call's real cost goes to `data/llm/spend.jsonl`;
+a run is refused up front if its estimate would cross the cap and stops mid-run if real spend does.
+
+**The funnel** (`thesis_funnel.py`): a (post, company) row is a candidate if the mention is a
+cashtag or clean/contextual bare ticker, the post names <= 2 companies, the author is not
+deleted, the post has substance (self post >= 400 chars, or a link post with >= 200 chars or a
+primary-source link), and the company is in the eligible universe that month. At every monthly
+cutoff the top 3 per company in the 90-day view by a pre-score (percentile ranks of length,
+primary/news links, DD flair, log votes) are selected; the scored set is the union over cutoffs.
+Point-in-time by construction.
+
+**Votes are used** (user decision): the view has `votes="final"` (`pit.PITConfig`), exposing the
+dumps' final post and comment scores as `votes`. Reddit archived posts after six months until
+2021-09-29 (confirmed from the r/modnews announcement), so for dev and validate a final score is
+a six-month score; the leak is the window between maturation (24h) and archive. **For 2021+
+(holdout, forward) votes may include much later ones**, subreddit by subreddit: say so next to
+any holdout number. Votes enter in three places: comment pruning/weighting inside a thread, the
+funnel pre-score, and the thread weight `(1 + log(1 + votes))^gamma` (gamma 0.5 base, 0 and 1
+as ablations). `votes` is in every ledger entry.
+
+**The prompt** (`prompts/thesis_v1.md`, built by `thesis_prompt.py`): grades reasoning, sourcing
+and tone only; numbers-only JSON (`is_thesis`, `stance`, `horizon`, argument, evidence,
+specificity, tone_stability, falsifiability, balance, hype_risk, comment corroboration, confidence).
+Usernames are never sent (u1, u2, OP). Body capped at 8k chars (head+tail), comments at 3.6k chars,
+best-voted first, two levels deep. Blinded = `entity_resolver.blind_text` on everything. The prompt
+version is a hash of the prompt text plus a builder version; it is in the cache path and the ledger.
+**Prompt changes are tuned on the gold set only, never on backtest numbers.**
+
+**Scoring** (`thesis_scorer.py`): `Q = 100*(.28 argument(+specificity) + .22 evidence + .12 tone +
+.10 falsifiability + .10 balance + .18 corroboration) - 20*hype`; `x = stance*(Q/100)^2*confidence*
+vote_weight`; company score at a cutoff = sum of visible threads' `x` decayed by half-life per
+stated horizon (days 14, weeks 30, months 90, years 180, unclear 60). Params (all in the ledger):
+`gamma`, `beta` (price-since-thesis discount `(P_thesis/P_now)^beta`, capped at 1, base 0),
+`use_author` (causal shrunk author prior, base off), `min_evidence` gate (base 0), `use_comments`.
+Bear theses push the score down. Expected value is reported as calibrated bucket rates
+(`calibrate`), not as one number.
+
+**Budget and order** ($5 total, user decision): census first (no spend) -> gold set rated by
+the user -> `gold-eval` on nano and on Jev, pick by correlation -> pilot `llm-run --years 2014 2017`
+identified and blinded (< $1) -> `thesis-run` next to the ladder -> full dev both variants (< $4)
+-> free ablations (gamma, beta, use_author, min_evidence, no comments; `gamma=0` is the
+no-votes ablation of the aggregation, though the prompt still showed vote counts) -> validate
+for the one finalist. Holdout untouched. Model choice: GPT-5 nano (about $0.05/M in, $0.40/M out,
+reasoning_effort minimal) and Jev 1.13 ($0.042/M in, output free, early access) cost about the
+same for this workload; the gold set decides.
+
 ## Next steps
 
 0. ~~Re-run the data layer without the survivorship bias~~ **Done 2026-10-17** (see "Results so far").
@@ -410,14 +478,16 @@ cohort date, plus 25 bps slippage, with no market-impact model.
    `export-tickers`, re-filter `pipeline`, `corpus.py`, `entity_resolver.py wordstats` and `mentions`,
    `universe.py` (twice, splits pull in between), `baselines.py`, then the ladders. Cached scores are
    keyed on the data files, so they cannot go stale.
-1. **User actions:** add `OPENAI_API_KEY` to `.env` when the scorer is built; the EODHD
+1. **User actions:** set `LLM_MODEL`, `OPENAI_API_KEY` and `LLM_SPEND_CAP_USD` on the worker
+   (Railway Variables) before `gold-eval`; rate `data/gold/ratings.csv`; the EODHD
    subscription can be cancelled once no more symbols are needed (everything is cached; 2025+
    bars were not needed). SIC sectors are done (`data/ref/sic.parquet`, needs `SEC_USER_AGENT`
    only if it is ever re-pulled).
 2. **Decisions for the user:** add wallstreetbets (last, postponed); backfill 2025+ via
    `arctic` (the corpus ends 2024-12, so cohorts end there too); the sealed holdout (2021-2022)
    is untouched: decide who consults it and when.
-3. **Build the evaluation scorer** against the contract above, then run it on `dev`, compare to
-   the ladder, check `validate`, run blinded vs identified, and only then (once) the holdout.
+3. **Run the thesis scorer** (built; see "Thesis scorer"): `census` -> user rates the gold set ->
+   `gold-eval` -> pilot -> full dev -> ablations -> validate once. Record the ladder rows,
+   calibration table, blinded-vs-identified gap and spend here.
 4. Phase 2 (later): fundamental-resilience gate (SEC XBRL), forward data from non-Reddit
    sources, Postgres/pgvector, alerts, dashboard.

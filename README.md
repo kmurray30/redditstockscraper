@@ -239,3 +239,12 @@ The worker then copies the bucket onto its volume with the `pull-data` job.
 
 Secrets for the worker go in the dashboard. Open the service, then Variables, then the Raw
 Editor, and paste the API key lines from `.env`. They are not set from the command line.
+
+## Thesis scorer
+
+The evaluation layer grades each substantive thread once with a small model (numbers only:
+argument, evidence, tone, falsifiability, balance, comment corroboration), caches the grade,
+and folds the grades into a per-company score over time with horizon-dependent decay. It runs
+as worker jobs (`census`, `gold-build`, `gold-eval`, `llm-run`, `llm-collect`, `thesis-run`,
+`calibrate`) under a hard spend cap. Design, parameters and the budget rules are in
+[CLAUDE.md](CLAUDE.md) under "Thesis scorer".

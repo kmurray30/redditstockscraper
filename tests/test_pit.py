@@ -125,3 +125,15 @@ def test_each_visible_post_reports_how_many_companies_it_names(tmp_path):
     v = pit.PITCorpus(tmp_path, tmp_path / "mentions.parquet").at(T0, 30)
     got = {r["post_id"]: r["n_companies"] for r in v.posts()}
     assert got == {"list": 12, "single": 1}
+
+
+def test_votes_are_hidden_unless_asked_for(tmp_path, corpus):
+    view = corpus.at(T0, 30)
+    assert "votes" not in view.posts()[0] and "score" not in view.posts()[0]
+    assert "votes" not in view.comments_for(["ok"])[0]
+    with_votes = pit.PITCorpus(tmp_path, tmp_path / "mentions.parquet",
+                               pit.PITConfig(votes="final")).at(T0, 30)
+    assert with_votes.posts(cik="1")[0]["votes"] == 999
+    assert with_votes.comments_for(["ok"])[0]["votes"] == 77
+    with pytest.raises(ValueError):
+        pit.PITConfig(votes="live")

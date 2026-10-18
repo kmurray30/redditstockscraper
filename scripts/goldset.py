@@ -1,0 +1,193 @@
+"""The gold set: 30 single-company threads the user rates by hand, and the model comparison.
+
+    python scripts/goldset.py build [--n 30] [--seed 0]
+    python scripts/goldset.py evaluate [--ratings data/gold/ratings.csv]
+
+``build`` samples single-company threads from the planned set (``threads.parquet``),
+spread across years, subreddits, lengths and vote levels, and writes:
+
+    data/gold/threads.md    the threads as the model would see them (identified), to read
+    data/gold/ratings.csv   one row per thread: fill ``rating`` (1-5) and ``reason``
+
+and pushes ``data/gold/`` to the bucket when bucket credentials are present, so the user
+can download both from the bucket's file browser and upload the filled CSV the same way.
+
+``evaluate`` grades the rated threads with the configured model (identified, with a one-line
+``why``), prints the user's rating next to the model's quality score and reason for every
+thread, and the rank correlation. It is how a model and a prompt version are chosen; it
+costs cents, and it never touches backtest numbers.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import random
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import llm  # noqa: E402
+import thesis_llm as tl  # noqa: E402
+from thesis_prompt import build_request, prompt_version, user_message  # noqa: E402
+from thesis_scorer import Params, thread_quality  # noqa: E402
+
+
+def strata_key(r: dict, votes_median: float) -> tuple:
+    y = int(r["first_month"][:4])
+    return (("early" if y <= 2014 else "mid" if y <= 2016 else "late"), r["subreddit"],
+            "long" if r["chars"] >= 2000 else "short",
+            "hot" if (r.get("votes") or 0) >= votes_median else "cold")
+
+
+def sample(rows: list[dict], n: int, seed: int) -> list[dict]:
+    """Round-robin over strata so every (era, subreddit, length, votes) cell is represented."""
+    rows = [r for r in rows if (r.get("n_companies") or 1) == 1]
+    if not rows:
+        return []
+    rng = random.Random(seed)
+    med = float(np.median([r.get("votes") or 0 for r in rows]))
+    cells: dict[tuple, list[dict]] = defaultdict(list)
+    for r in rows:
+        cells[strata_key(r, med)].append(r)
+    for c in cells.values():
+        rng.shuffle(c)
+    keys = sorted(cells)
+    rng.shuffle(keys)
+    out = []
+    while len(out) < n and any(cells[k] for k in keys):
+        for k in keys:
+            if cells[k] and len(out) < n:
+                out.append(cells[k].pop())
+    return out
+
+
+def cmd_build(a) -> int:
+    rows = tl.load_threads(Path(a.threads), a.years)
+    picked = sample(rows, a.n, a.seed)
+    if not picked:
+        print("no single-company threads in threads.parquet; run the funnel first")
+        return 1
+    corpus = tl.open_corpus(a)
+    gold = Path(a.gold)
+    gold.mkdir(parents=True, exist_ok=True)
+    md, csv_rows = [], []
+    k = 0
+    for r, t in tl.threads_from_views(corpus, picked, a.lookback):
+        k += 1
+        md.append(f"\n\n---\n\n## {k}. [{t.ticker}] {t.title.strip()[:120]}\n\n"
+                  f"post_id: `{t.post_id}`   company: {t.name or t.ticker}\n\n```text\n"
+                  f"{user_message(t, blinded=False)}\n```\n")
+        csv_rows.append({"n": k, "post_id": t.post_id, "cik": t.cik, "ticker": t.ticker,
+                         "title": t.title.strip()[:80], "rating": "", "reason": ""})
+    (gold / "threads.md").write_text(
+        "# Gold set\n\nRate each thread 1 (worthless) to 5 (I would act on this research) in "
+        "`ratings.csv`, with a few words of reason. Judge the reasoning and sourcing, not whether "
+        "you remember how the stock did.\n" + "".join(md))
+    with (gold / "ratings.csv").open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(csv_rows[0]))
+        w.writeheader()
+        w.writerows(csv_rows)
+    print(f"[gold] wrote {k} threads to {gold}/threads.md and {gold}/ratings.csv")
+    try:
+        import bucket_sync as bs
+        creds = bs.load_creds()
+        bs.push(Path(a.gold).parent, bs.Bucket(creds), only="gold", workers=4)
+        print("[gold] pushed data/gold to the bucket: download threads.md and ratings.csv from the "
+              "bucket's Files tab, fill the CSV, upload it back")
+    except SystemExit as e:
+        print(f"[gold] not pushed to the bucket ({e}); copy data/gold/ by hand")
+    return 0
+
+
+def read_ratings(path: Path) -> dict[tuple, dict]:
+    out = {}
+    with Path(path).open() as f:
+        for row in csv.DictReader(f):
+            if (row.get("rating") or "").strip():
+                out[(row["post_id"], row["cik"])] = dict(row, rating=float(row["rating"]))
+    return out
+
+
+def spearman(x, y) -> float:
+    def ranks(v):
+        v = np.asarray(v, dtype=float)
+        order = v.argsort()
+        r = np.empty(len(v))
+        r[order] = np.arange(len(v))
+        # average ties
+        for val in np.unique(v):
+            idx = np.nonzero(v == val)[0]
+            r[idx] = r[idx].mean()
+        return r
+    if len(x) < 3:
+        return float("nan")
+    return float(np.corrcoef(ranks(x), ranks(y))[0, 1])
+
+
+def cmd_evaluate(a) -> int:
+    ratings = read_ratings(Path(a.ratings))
+    if not ratings:
+        print("no ratings filled in yet")
+        return 1
+    rows = [r for r in tl.load_threads(Path(a.threads)) if (r["post_id"], r["cik"]) in ratings]
+    cfg = llm.Config.from_env()
+    corpus = tl.open_corpus(a)
+    requests, meta = [], {}
+    for r, t in tl.threads_from_views(corpus, rows, a.lookback):
+        req = build_request(t, blinded=False, why=True)
+        requests.append(req)
+        meta[req.key] = (r, t)
+    cache = llm.Cache(llm.cache_dir(Path(a.llm_dir), cfg.model, prompt_version(), "gold-why"))
+    spend = llm.Spend(Path(a.llm_dir) / "spend.jsonl")
+    results = llm.run(requests, cfg, cache, spend)
+    params = Params()
+    table, xs, ys = [], [], []
+    for key, g in results.items():
+        r, t = meta[key]
+        q = thread_quality(g, params)
+        user = ratings[(r["post_id"], r["cik"])]
+        table.append((user["rating"], q, g.get("stance"), g.get("is_thesis"), t.ticker,
+                      (g.get("why") or "")[:90], user.get("reason", "")[:60]))
+        xs.append(user["rating"])
+        ys.append(q)
+    table.sort(key=lambda row: (-row[0], -row[1]))
+    print(f"model {cfg.model}, prompt {prompt_version()}, {len(table)} rated threads")
+    print("you  Q    stance thesis ticker  model's reason | your reason")
+    for u, q, s, th, tick, why, reason in table:
+        print(f"{u:3.0f} {q:5.1f} {s:+6.2f} {'y' if th else 'n':6s} {tick:7s} {why} | {reason}")
+    rho = spearman(xs, ys)
+    pear = float(np.corrcoef(xs, ys)[0, 1]) if len(xs) > 2 else float("nan")
+    print(f"\nSpearman rho {rho:.2f}, Pearson r {pear:.2f}; lifetime spend ${spend.total:.3f}")
+    return 0
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--threads", default="data/features/threads.parquet")
+    p.add_argument("--gold", default="data/gold")
+    p.add_argument("--llm-dir", default="data/llm")
+    p.add_argument("--parquet", default="data/corpus/parquet")
+    p.add_argument("--mentions", default="data/features/mentions.parquet")
+    p.add_argument("--post-features", default="data/features/post_features.parquet")
+    p.add_argument("--lookback", type=int, default=90)
+    p.add_argument("--maturation", type=int, default=24)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    b = sub.add_parser("build")
+    b.add_argument("--n", type=int, default=30)
+    b.add_argument("--seed", type=int, default=0)
+    b.add_argument("--years", nargs="+", type=int)
+    b.set_defaults(fn=cmd_build)
+    e = sub.add_parser("evaluate")
+    e.add_argument("--ratings", default="data/gold/ratings.csv")
+    e.set_defaults(fn=cmd_evaluate)
+    a = p.parse_args(argv)
+    return a.fn(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -317,6 +317,11 @@ class SecurityMaster:
 
     # ------------------------------------------------------------ prices
 
+    def name_of(self, cik: str) -> str | None:
+        """A registered name for the company (the longest seen in any snapshot), for prompts."""
+        names = self._cik_names.get(cik)
+        return max(names, key=len) if names else None
+
     def name_matches(self, cik: str, code: str) -> bool:
         """Does EODHD's name for ``code`` resemble any name this company has had?"""
         en = self.code_names.get(code)

@@ -97,3 +97,13 @@ def test_bucket_presets():
     assert jobs.resolve("pull-data")[0][1:] == ["scripts/bucket_sync.py", "pull"]
     assert jobs.resolve("pull-data", "--only ref")[0][-2:] == ["--only", "ref"]
     assert jobs.resolve("verify-data")[0][-2:] == ["--direction", "pull"]
+
+
+def test_thesis_presets_and_holdout_guard():
+    assert jobs.resolve("census", "--years 2014")[0][-2:] == ["--years", "2014"]
+    assert jobs.resolve("llm-run", "--variant blinded")[0][1:3] == ["scripts/thesis_llm.py", "run"]
+    assert jobs.resolve("thesis-run", "--split dev")[0][-4:] == ["--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev"]
+    with pytest.raises(jobs.JobError, match="holdout"):
+        jobs.resolve("thesis-run", "--split holdout")
+    with pytest.raises(jobs.JobError, match="holdout"):
+        jobs.resolve("calibrate", "--split holdout")

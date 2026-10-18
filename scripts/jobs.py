@@ -61,13 +61,25 @@ PRESETS: dict[str, list[list[str]]] = {
     "pull-data": [_py("bucket_sync.py", "pull")],
     "bucket-status": [_py("bucket_sync.py", "status")],
     "verify-data": [_py("bucket_sync.py", "verify", "--direction", "pull")],
+    # the thesis scorer (see CLAUDE.md "Thesis scorer"); none of these spend money except
+    # llm-run and gold-eval, and those stop at LLM_SPEND_CAP_USD
+    "census": [_py("thesis_funnel.py")],
+    "llm-run": [_py("thesis_llm.py", "run")],
+    "llm-collect": [_py("thesis_llm.py", "collect")],
+    "check-blind": [_py("thesis_llm.py", "check-blind")],
+    "gold-build": [_py("goldset.py", "build")],
+    "gold-eval": [_py("goldset.py", "evaluate")],
+    "thesis-timeline": [_py("thesis_scorer.py", "timeline")],
+    "calibrate": [_py("thesis_scorer.py", "calibrate")],
+    "thesis-run": [_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory")],
 }
 # The full rebuild after a filter / ticker-list / resolver / price-cleaning change (CLAUDE.md).
 PRESETS["rebuild"] = [c for name in ("export-tickers", "refilter", "corpus", "wordstats",
                                      "mentions", "universe", "splits", "universe", "baselines",
                                      "ladder-dev", "ladder-validate") for c in PRESETS[name]]
 # Presets that accept JOB_ARGS (appended to their single command).
-TAKES_ARGS = {"run", "ladder-dev", "ladder-validate", "pull-data"}
+TAKES_ARGS = {"run", "ladder-dev", "ladder-validate", "pull-data", "census", "llm-run", "llm-collect",
+              "gold-build", "gold-eval", "thesis-timeline", "calibrate", "thesis-run"}
 
 
 class JobError(ValueError):
