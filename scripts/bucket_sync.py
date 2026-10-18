@@ -278,6 +278,12 @@ class Bucket:
     def upload(self, path: Path, key: str, callback) -> None:
         self.client.upload_file(str(path), self.name, key, Config=self.transfer, Callback=callback)
 
+    def get_bytes(self, key: str) -> bytes:
+        return self.client.get_object(Bucket=self.name, Key=key)["Body"].read()
+
+    def put_bytes(self, key: str, data: bytes) -> None:
+        self.client.put_object(Bucket=self.name, Key=key, Body=data)
+
     def download(self, key: str, path: Path, callback) -> None:
         self.client.download_file(self.name, key, str(path), Config=self.transfer,
                                   Callback=callback)

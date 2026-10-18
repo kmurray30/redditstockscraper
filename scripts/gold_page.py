@@ -224,6 +224,10 @@ textarea { font: inherit; width: 100%; min-height: 44px; resize: vertical; borde
     $('list').innerHTML = THREADS.map((t, i) => { const r = ratings[t.post_id] && ratings[t.post_id].rating;
       return `<li><button type="button" data-i="${i}"><span class="n">${t.n}</span><span class="t"><b>${esc(t.ticker)}</b> ${esc(t.title)}</span><span class="r ${r ? '' : 'none'}">${r || '–'}</span></button></li>`; }).join('');
   }
+  const API = window.__GOLD_API__ ? {
+    async load() { const r = await fetch('/api/ratings', {cache: 'no-store'}); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); },
+    async save(doc) { const r = await fetch('/api/rate', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(doc)}); if (!r.ok) throw new Error('HTTP ' + r.status); }
+  } : null;
   async function save() {
     const t = THREADS[idx];
     if (!pending.rating) return;
@@ -231,7 +235,11 @@ textarea { font: inherit; width: 100%; min-height: 44px; resize: vertical; borde
                  reason: $('reason').value.trim(), ts: new Date().toISOString()};
     ratings[t.post_id] = doc;
     try { localStorage.setItem('gold.local', JSON.stringify(ratings)); } catch (e) {}
-    if (DB) {
+    if (API) {
+      $('save').disabled = true;
+      try { await API.save(doc); status(`Saved ${t.ticker} as ${doc.rating}.`); }
+      catch (e) { status('Could not save (' + e.message + '). Kept on this phone; try again later.', true); }
+    } else if (DB) {
       $('save').disabled = true;
       try { await DB.doc('ratings/' + t.post_id).set(doc); status(`Saved ${t.ticker} as ${doc.rating}.`); }
       catch (e) { status('Could not save (' + (e && e.code || 'error') + '). Kept on this phone; try again later.', true); }
@@ -256,17 +264,24 @@ textarea { font: inherit; width: 100%; min-height: 44px; resize: vertical; borde
   // first unrated thread on a fresh open
   if (!ratings[THREADS[idx] && THREADS[idx].post_id]) { const first = THREADS.findIndex(t => !(ratings[t.post_id] && ratings[t.post_id].rating)); if (first >= 0 && idx === 0) idx = first; }
   render();
+  function merge(next) {
+    ratings = Object.assign({}, ratings, next);
+    if (!synced) { synced = true; const first = THREADS.findIndex(t => !(ratings[t.post_id] && ratings[t.post_id].rating)); if (first >= 0 && !(ratings[THREADS[idx].post_id] || {}).rating) idx = first; }
+    try { localStorage.setItem('gold.local', JSON.stringify(ratings)); } catch (e) {}
+    if (!$('drawer').hidden) renderIndex();
+    render();
+  }
   (async () => {
+    if (API) {
+      try { merge(await API.load()); status(''); } catch (e) { status('Could not load saved ratings (' + e.message + '); reload to retry.', true); }
+      return;
+    }
     const db = (window.claude && window.claude.use) ? await window.claude.use('db') : null;
     if (!db) { status('Sync unavailable in this view: ratings stay on this device.', true); return; }
     DB = db;
     db.collection('ratings').onSnapshot(snap => {
       const next = {}; snap.docs.forEach(d => { next[d.id] = d.data(); });
-      ratings = Object.assign({}, ratings, next);
-      if (!synced) { synced = true; const first = THREADS.findIndex(t => !(ratings[t.post_id] && ratings[t.post_id].rating)); if (first >= 0 && !(ratings[THREADS[idx].post_id] || {}).rating) idx = first; }
-      try { localStorage.setItem('gold.local', JSON.stringify(ratings)); } catch (e) {}
-      if (!$('drawer').hidden) renderIndex();
-      render();
+      merge(next);
     }, err => status('Live sync lost (' + err.code + '); saves still go through.', true));
   })();
 })();
@@ -274,9 +289,18 @@ textarea { font: inherit; width: 100%; min-height: 44px; resize: vertical; borde
 """
 
 
-def build(threads: list[dict]) -> str:
+def build(threads: list[dict], mode: str = "artifact") -> str:
+    """``artifact``: ratings go to the claude.ai artifact db; ``server``: to the gold server's
+    /api routes (same origin, so the browser sends the Basic credentials)."""
     data = json.dumps(threads, ensure_ascii=False).replace("</", "<\\/")
-    return PAGE.replace("__THREADS_JSON__", data)
+    page = PAGE.replace("__THREADS_JSON__", data)
+    if mode == "server":
+        page = page.replace('<script type="application/json" id="threads">',
+                            '<script>window.__GOLD_API__ = true;</script>\n'
+                            '<script type="application/json" id="threads">', 1)
+    elif mode != "artifact":
+        raise ValueError(mode)
+    return page
 
 
 def main(argv=None) -> int:
