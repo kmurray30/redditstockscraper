@@ -49,8 +49,13 @@ def build(tmp_path, posts, mentions, feats, comments=()):
 
 
 def test_reject_reasons():
-    base = {"method": "cashtag", "n_companies": 1, "author": "a", "is_self": True, "f_chars": 1000}
+    base = {"method": "bare_clean", "n_companies": 1, "author": "a", "is_self": True, "f_chars": 1000,
+            "in_title": True, "n": 1}
     assert tf.reject_reason(base) is None
+    # a passing mention is not a thread about the company
+    assert tf.reject_reason({**base, "in_title": False}) == "passing_mention"
+    assert tf.reject_reason({**base, "in_title": False, "n": 2}) is None
+    assert tf.reject_reason({**base, "in_title": False, "method": "cashtag"}) is None
     assert tf.reject_reason({**base, "method": "name"}) == "unreliable_mention"
     assert tf.reject_reason({**base, "n_companies": 3}) == "many_companies"
     assert tf.reject_reason({**base, "author": "[deleted]"}) == "deleted_author"
@@ -59,11 +64,12 @@ def test_reject_reasons():
     assert tf.reject_reason({**base, "is_self": False, "f_chars": 10, "f_primary_links": 1}) is None
     assert tf.reject_reason({**base, "is_self": False, "f_chars": 300}) is None
     # focus rule: a long DD naming 4 companies is kept when this one is in the title or dominant
-    many = {**base, "n_companies": 4, "n": 1, "in_title": False}
+    many = {**base, "n_companies": 4, "n": 2, "in_title": False}
     assert tf.reject_reason(many, post_max_n=3) == "many_companies"
     assert tf.reject_reason({**many, "in_title": True}, post_max_n=3) is None
     assert tf.reject_reason({**many, "n": 3}, post_max_n=3) is None
-    assert tf.reject_reason({**many, "n": 1}, post_max_n=1) == "many_companies"   # once each: a list
+    assert tf.reject_reason({**many, "n": 2}, post_max_n=2) is None        # the most-mentioned company
+    assert tf.reject_reason({**many, "n": 1}, post_max_n=1) == "passing_mention"   # once each: a list
     assert tf.reject_reason({**many, "in_title": True, "n_companies": 9}, post_max_n=3) == "many_companies"
     # discussion rule: a thin post with a real comment thread and votes is kept
     thin = {**base, "f_chars": 100, "votes": 50}

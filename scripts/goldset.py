@@ -47,6 +47,9 @@ def strata_key(r: dict, votes_median: float) -> tuple:
 def sample(rows: list[dict], n: int, seed: int) -> list[dict]:
     """Round-robin over strata so every (era, subreddit, length, votes) cell is represented."""
     rows = [r for r in rows if (r.get("n_companies") or 1) == 1]
+    titled = [r for r in rows if r.get("in_title")]       # plainly about the company
+    if len(titled) >= n:
+        rows = titled
     if not rows:
         return []
     rng = random.Random(seed)

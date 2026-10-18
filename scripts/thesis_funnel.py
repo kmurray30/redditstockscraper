@@ -4,7 +4,9 @@ Most kept posts are not theses: questions, news links, memes, lists. Scoring the
 spend the budget on noise, so the funnel is strict and point-in-time:
 
 1. A thread candidate is one (post, company) row of the view where the company was resolved
-   by a reliable method (cashtag, clean or context bare ticker); the post names at most
+   by a reliable method (cashtag, clean or context bare ticker) and is a subject of the post,
+   not a passing mention: a cashtag, or the ticker in the title, or at least two mentions
+   (a volatility post that says "ATR" once is not about AptarGroup); the post names at most
    ``MAX_COMPANIES`` companies, or up to ``MAX_FOCUS_COMPANIES`` when this company is the
    focus (in the title, or the most-mentioned company of the post, at least twice: a long
    DD naturally names competitors, a portfolio list has no focus); the author is not deleted
@@ -63,7 +65,7 @@ THREAD_SCHEMA = pa.schema([
     ("post_id", pa.string()), ("cik", pa.string()), ("ticker", pa.string()), ("name", pa.string()),
     ("subreddit", pa.string()), ("created_utc", pa.int64()), ("matured_utc", pa.int64()),
     ("author", pa.string()), ("flair", pa.string()), ("is_self", pa.bool_()),
-    ("n_companies", pa.int16()),
+    ("n_companies", pa.int16()), ("in_title", pa.bool_()), ("method", pa.string()), ("n", pa.int32()),
     ("chars", pa.int32()), ("votes", pa.int64()), ("n_comments", pa.int32()),
     ("pre_score", pa.float64()), ("first_month", pa.string()), ("n_months", pa.int16()),
     ("est_tokens", pa.int32()),
@@ -77,6 +79,8 @@ def reject_reason(row: dict, max_companies: int = MAX_COMPANIES, *, post_max_n: 
     inside the maturation window (for the discussion rule)."""
     if row["method"] not in CANDIDATE_METHODS:
         return "unreliable_mention"
+    if not (row["method"] == "cashtag" or row.get("in_title") or (row.get("n") or 0) >= 2):
+        return "passing_mention"
     nc = row.get("n_companies") or 1
     if nc > max_companies:
         n = row.get("n") or 0
@@ -192,7 +196,8 @@ def plan(corpus: PITCorpus, months: list[str], universe_by_month: dict | None, *
                 "created_utc": int(r["created_utc"]),
                 "matured_utc": int(r["created_utc"]) + corpus.config.maturation_hours * 3600,
                 "author": r.get("author"), "flair": r.get("flair"), "is_self": bool(r.get("is_self")),
-                "n_companies": int(r.get("n_companies") or 1), "chars": int(chars), "votes": r.get("votes"), "n_comments": int(n_comments.get(r["post_id"], 0)),
+                "n_companies": int(r.get("n_companies") or 1), "in_title": bool(r.get("in_title")),
+                "method": r.get("method"), "n": int(r.get("n") or 0), "chars": int(chars), "votes": r.get("votes"), "n_comments": int(n_comments.get(r["post_id"], 0)),
                 "pre_score": float(r["pre_score"]), "first_month": m, "n_months": 1,
                 "est_tokens": est_tokens(r.get("title") or "", int(chars), int(n_comments.get(r["post_id"], 0))),
             }
