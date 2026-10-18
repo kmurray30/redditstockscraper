@@ -107,7 +107,7 @@ body { background: var(--bg); color: var(--fg); font-family: var(--body); font-s
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg) }
 .top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); display: flex; gap: 12px; align-items: center;
   padding-block: 10px; border-bottom: 1px solid var(--line); margin-bottom: 16px }
-.top h1 { font: 700 20px/1.1 var(--display); margin: 0; flex: 1; text-wrap: balance }
+.top h1 { font: 700 18px/1.1 var(--display); margin: 0; flex: 1; white-space: nowrap; min-width: 0 }
 .progress { font: 500 13px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap }
 .bar { height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; flex-basis: 100%; order: 9 }
 .bar i { display: block; height: 100%; background: var(--accent); width: 0 }
@@ -141,8 +141,9 @@ textarea { font: inherit; width: 100%; min-height: 44px; resize: vertical; borde
 .row { display: flex; gap: 8px; align-items: center } .row .grow { flex: 1 }
 .status { font: 12px var(--mono); color: var(--muted); min-height: 1.2em } .status.err { color: var(--warn) }
 .drawer { position: fixed; inset: 0; background: var(--bg); z-index: 20; overflow: auto; padding: calc(12px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 24px max(16px, env(safe-area-inset-left, 0px)) }
-.drawer ol { list-style: none; padding: 0; margin: 12px auto 0; max-width: 72ch; display: grid; gap: 6px }
-.drawer li button { width: 100%; text-align: left; display: flex; gap: 10px; align-items: baseline }
+.drawer ol { list-style: none; padding: 0; margin: 12px auto 0; max-width: 72ch; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px }
+.drawer li { min-width: 0 }
+.drawer li button { width: 100%; min-width: 0; overflow: hidden; text-align: left; display: flex; gap: 10px; align-items: baseline }
 .drawer li .n { font: 500 12px var(--mono); color: var(--muted); width: 2ch } .drawer li .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .drawer li .r { font: 600 13px var(--mono); color: var(--good); width: 2ch; text-align: right } .drawer li .r.none { color: var(--muted) }
 .done { text-align: center; padding: 24px 0 } .done p { color: var(--muted) }
