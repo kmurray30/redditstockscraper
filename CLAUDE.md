@@ -462,6 +462,14 @@ stated horizon (days 14, weeks 30, months 90, years 180, unclear 60). Params (al
 Bear theses push the score down. Expected value is reported as calibrated bucket rates
 (`calibrate`), not as one number.
 
+**Census of dev (2026-10-18, funnel v2):** 12,854 unique threads over 84 cohorts (938 in 2012
+rising to 2,478 in 2018), 16.6M estimated input tokens; at GPT-5 nano $1.75 per variant, $3.51
+for identified + blinded. Rejects per cohort row: many_companies 120k, not_in_universe 64k,
+thin_self_post 61k, unreliable_mention 35k, deleted_author 19k, over_cap 15k, bare_link 12k.
+The first funnel (<= 2 companies, no discussion rule) gave 10,172 threads and rejected a
+10k-char Valeant DD for naming competitors; the focus and discussion rules fixed that.
+The census job peaks at about 8.7 GB RAM (the 90-day views); keep that in mind on Hobby.
+
 **Budget and order** ($5 total, user decision): census first (no spend) -> gold set rated by
 the user -> `gold-eval` on nano and on Jev, pick by correlation -> pilot `llm-run --years 2014 2017`
 identified and blinded (< $1) -> `thesis-run` next to the ladder -> full dev both variants (< $4)
