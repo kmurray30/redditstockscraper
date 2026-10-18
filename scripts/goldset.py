@@ -104,6 +104,11 @@ def cmd_build(a) -> int:
               "bucket's Files tab, fill the CSV, upload it back")
     except SystemExit as e:
         print(f"[gold] not pushed to the bucket ({e}); copy data/gold/ by hand")
+    if a.dump:   # print both files through the log (see dump_file.py) for the rating page
+        from dump_file import chunks
+        for name in ("threads.md", "ratings.csv"):
+            for line in chunks(name, (gold / name).read_bytes(), 4000):
+                print(line, flush=True)
     return 0
 
 
@@ -184,6 +189,7 @@ def main(argv=None) -> int:
     b.add_argument("--n", type=int, default=30)
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--years", nargs="+", type=int)
+    b.add_argument("--dump", action="store_true", help="also print the files as base64 chunks")
     b.set_defaults(fn=cmd_build)
     e = sub.add_parser("evaluate")
     e.add_argument("--ratings", default="data/gold/ratings.csv")
