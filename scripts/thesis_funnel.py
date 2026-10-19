@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from baselines import percentile_ranks  # noqa: E402
 from pit import PITConfig, PITCorpus  # noqa: E402
-from thesis_prompt import PRUNE  # noqa: E402
+from thesis_prompt import MATURATION_HOURS, PRUNE, prune_comments, thesis_pit_config  # noqa: E402
 
 CANDIDATE_METHODS = ("cashtag", "bare_clean", "bare_context")
 METHOD_RANK = {m: i for i, m in enumerate(CANDIDATE_METHODS + ("name",))}
@@ -68,7 +68,8 @@ THREAD_SCHEMA = pa.schema([
     ("n_companies", pa.int16()), ("in_title", pa.bool_()), ("method", pa.string()), ("n", pa.int32()),
     ("chars", pa.int32()), ("votes", pa.int64()), ("n_comments", pa.int32()),
     ("pre_score", pa.float64()), ("first_month", pa.string()), ("n_months", pa.int16()),
-    ("est_tokens", pa.int32()),
+    ("est_tokens", pa.int32()), ("decided_utc", pa.int64()), ("late_comments", pa.int32()),
+    ("late_shown", pa.int32()), ("edited_late", pa.bool_()),
 ])
 
 
@@ -167,6 +168,30 @@ def est_tokens(title: str, chars: int, n_comments: int) -> int:
     return (SYSTEM_CHARS + len(title or "") + body + comments) // 4
 
 
+def first_cutoff_after(ts: int) -> int:
+    """The first monthly cutoff (00:00 UTC on the 1st) at or after ``ts``: when a thread can
+    first enter a decision."""
+    from datetime import datetime, timezone
+    d = datetime.fromtimestamp(int(ts), timezone.utc)
+    if (d.day, d.hour, d.minute, d.second) == (1, 0, 0, 0):
+        return int(ts)
+    y, m = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+    return int(datetime(y, m, 1, tzinfo=timezone.utc).timestamp())
+
+
+def late_content(post: dict, comments: list[dict]) -> dict:
+    """What a reader at the thread's first decision cutoff could not have seen: comments
+    written after it (all, and those the prompt shows), and an edit after it (or at an
+    unknown time, ``edited_utc = -1``)."""
+    decided = first_cutoff_after(post["created_utc"])
+    shown = prune_comments(comments, post["post_id"], post.get("author"))
+    ed = int(post.get("edited_utc") or 0)
+    return {"decided_utc": decided,
+            "late_comments": sum(1 for c in comments if int(c["created_utc"]) > decided),
+            "late_shown": sum(1 for c in shown if int(c["created_utc"]) > decided),
+            "edited_late": ed == -1 or ed > decided}
+
+
 def plan(corpus: PITCorpus, months: list[str], universe_by_month: dict | None, *,
          lookback: int = LOOKBACK, top_k: int = TOP_K, max_companies: int = MAX_COMPANIES,
          names: dict[str, str] | None = None, log=print) -> tuple[list[dict], dict]:
@@ -181,9 +206,10 @@ def plan(corpus: PITCorpus, months: list[str], universe_by_month: dict | None, *
         sel, rej = select(view, uni, top_k, max_companies)
         rejects_total.update(rej)
         post_ids = [r["post_id"] for r in sel if (r["post_id"], r["cik"]) not in threads]
-        n_comments = {r["post_id"]: r["n"] for r in view.query(
-            "select post_id, count(*) n from thread_comments where post_id in "
-            f"({','.join('?' * len(post_ids))}) group by post_id", post_ids)} if post_ids else {}
+        by_post: dict[str, list[dict]] = defaultdict(list)
+        for c in view.comments_for(post_ids):
+            by_post[c["post_id"]].append(c)
+        n_comments = {pid: len(cs) for pid, cs in by_post.items()}
         for r in sel:
             k = (r["post_id"], r["cik"])
             if k in threads:
@@ -200,6 +226,7 @@ def plan(corpus: PITCorpus, months: list[str], universe_by_month: dict | None, *
                 "method": r.get("method"), "n": int(r.get("n") or 0), "chars": int(chars), "votes": r.get("votes"), "n_comments": int(n_comments.get(r["post_id"], 0)),
                 "pre_score": float(r["pre_score"]), "first_month": m, "n_months": 1,
                 "est_tokens": est_tokens(r.get("title") or "", int(chars), int(n_comments.get(r["post_id"], 0))),
+                **late_content(r, by_post.get(r["post_id"], [])),
             }
         yr = m[:4]
         stage[yr]["cohorts"] += 1
@@ -233,6 +260,18 @@ def format_census(threads: list[dict], census: dict, price_in: float, price_out:
     c = cost(census, price_in, price_out)
     lines.append(f"cost at {model} (${price_in}/M in, ${price_out}/M out, ~{OUT_TOKENS} out tokens each): "
                  f"identified ${c['identified']:.2f}, blinded ${c['blinded']:.2f}, both ${c['both']:.2f}")
+    if threads and "late_shown" in threads[0]:
+        n = len(threads)
+        shown = sum(1 for t in threads if t.get("late_shown"))
+        anyl = sum(1 for t in threads if t.get("late_comments"))
+        ed = sum(1 for t in threads if t.get("edited_late"))
+        either = sum(1 for t in threads if t.get("late_shown") or t.get("edited_late"))
+        lc = sum(t.get("late_comments") or 0 for t in threads)
+        nc = sum(t.get("n_comments") or 0 for t in threads)
+        lines.append(f"late content (written after the thread's first cutoff): {anyl:,} threads "
+                     f"({anyl / n:.0%}) have late comments, {lc:,} of {nc:,} comments ({lc / max(nc, 1):.0%}); "
+                     f"{shown:,} ({shown / n:.0%}) show one in the prompt; {ed:,} ({ed / n:.0%}) edited late; "
+                     f"exclude_late would drop {either:,} ({either / n:.0%})")
     rng = random.Random(seed)
     lines.append("\n10 random selected threads:")
     for t in rng.sample(threads, min(10, len(threads))):
@@ -286,7 +325,7 @@ def main(argv=None) -> int:
     p.add_argument("--splits", nargs="+", default=["dev"], choices=list(lg.SPLITS))
     p.add_argument("--years", nargs="+", type=int, help="limit to these cohort years")
     p.add_argument("--lookback", type=int, default=LOOKBACK)
-    p.add_argument("--maturation", type=int, default=24)
+    p.add_argument("--maturation", type=int, default=MATURATION_HOURS)
     p.add_argument("--top-k", type=int, default=TOP_K)
     p.add_argument("--max-companies", type=int, default=MAX_COMPANIES)
     p.add_argument("--model", default=None, help="for the cost line (default LLM_MODEL or gpt-5-nano)")
@@ -298,7 +337,7 @@ def main(argv=None) -> int:
     price_in, price_out = price_for(model, dict(os.environ))
 
     corpus = PITCorpus(Path(a.parquet), Path(a.mentions),
-                       PITConfig(maturation_hours=a.maturation, votes="final"),
+                       thesis_pit_config("final", a.maturation),
                        post_features=Path(a.post_features))
     con = duckdb.connect()
     con.execute(f"create view universe as select * from read_parquet('{a.universe}')")

@@ -599,7 +599,9 @@ def make_corpus(scorer, parquet: Path, mentions: Path, post_features: Path):
     from pit import PITConfig, PITCorpus
     return PITCorpus(parquet, mentions,
                      PITConfig(maturation_hours=scorer.maturation_hours,
-                               votes=getattr(scorer, "votes", "none")),
+                               votes=getattr(scorer, "votes", "none"),
+                               edited_policy=getattr(scorer, "edited_policy", "exclude"),
+                               comments=getattr(scorer, "comments", "window")),
                      post_features=post_features)
 
 

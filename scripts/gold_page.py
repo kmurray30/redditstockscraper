@@ -200,7 +200,7 @@ textarea { font: inherit; width: 100%; min-height: 44px; resize: vertical; borde
     const votes = t.votes === null || t.votes === undefined ? '' : `<span class="pill">${t.votes} votes</span>`;
     const flair = t.flair ? `<span class="pill">${esc(t.flair)}</span>` : '';
     const comments = t.comments.length ? t.comments.map(c => `<div class="c d${c.depth}"><div class="who"><span class="${c.label === 'OP' ? 'op' : ''}">${c.label}</span>${c.votes === null ? '' : `<span class="v">${c.votes} votes</span>`}</div><div>${esc(c.text)}</div></div>`).join('')
-      : '<p class="status">No comments inside the 24-hour window.</p>';
+      : '<p class="status">No comments on this thread.</p>';
     const long = t.body.length > 1800;
     $('main').innerHTML = `<article class="card">
       <div class="meta"><span class="tk">${esc(t.ticker)}</span><span>${esc(t.company)}</span><span>r/${esc(t.subreddit)}</span><span>${esc(t.as_of)}</span>${flair}${votes}<span>${t.n} / ${THREADS.length}</span></div>

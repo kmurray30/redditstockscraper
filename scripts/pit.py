@@ -15,6 +15,12 @@ cutoff). By construction it contains:
   2021 (no voting after that), so for cohorts before then a final score is a six-month score;
   the leak is the window between maturation and archive. Every scorer that uses it records
   ``votes`` in its ledger entry.
+* ``comments="all"`` is the second deliberate exception (the thesis pipeline, user decision
+  2026-10-19): every comment the thread ever got, including ones written after the cutoff, is
+  in ``thread_comments`` and ``comment_mentions``. With ``maturation_hours=0`` and
+  ``edited_policy="keep"`` there is then no lock at all. Measured on 2012-2020: 88% of
+  comments arrive within 24h of the post, 98.4% within 7 days, and 0.3% of long self posts
+  are edited after 7 days, so the hindsight this lets in is small but not zero.
 
 Because the view is a separate in-memory database that only ever receives these filtered
 rows, even arbitrary SQL run through ``CohortView.query`` cannot reach past the cutoff.
@@ -38,6 +44,7 @@ class PITConfig:
     maturation_hours: int = 24
     edited_policy: str = "exclude"   # exclude | keep (text edited after maturation)
     votes: str = "none"              # none | final (expose the dump's final scores as ``votes``)
+    comments: str = "window"         # window (inside maturation, before cutoff) | all (ever)
 
     def __post_init__(self):
         if self.edited_policy not in ("exclude", "keep"):
@@ -72,6 +79,8 @@ class PITCorpus:
         lo = cutoff_utc - window_days * DAY
         edit_p = self._edit_ok("p", f"(p.created_utc + {mat})")
         edit_c = self._edit_ok("c", f"(p.created_utc + {mat})")
+        c_time = ("true" if self.config.comments == "all"
+                  else f"c.created_utc <= p.created_utc + {mat} and c.created_utc <= {int(cutoff_utc)}")
         feat_cols = feat_join = ""
         pv = ", p.score as votes" if self.config.votes == "final" else ""
         cv = ", c.score as votes" if self.config.votes == "final" else ""
@@ -93,15 +102,13 @@ class PITCorpus:
             from mentions m join comments c on m.source = 'comment' and m.source_id = c.id
             join posts p on p.id = c.post_id
             where p.created_utc >= ? and p.created_utc + {mat} <= ?
-              and c.created_utc <= p.created_utc + {mat} and c.created_utc <= ?
-              and {edit_p} and {edit_c}""", [lo, cutoff_utc, cutoff_utc]).to_arrow_table()
+              and {c_time} and {edit_p} and {edit_c}""", [lo, cutoff_utc]).to_arrow_table()
         thread_comments = self.con.execute(f"""
             select c.id as comment_id, c.post_id, c.parent_id, c.created_utc, c.author, c.body,
                    c.edited_utc{cv}
             from comments c join posts p on p.id = c.post_id
             where p.created_utc >= ? and p.created_utc + {mat} <= ?
-              and c.created_utc <= p.created_utc + {mat} and c.created_utc <= ?
-              and {edit_p} and {edit_c}""", [lo, cutoff_utc, cutoff_utc]).to_arrow_table()
+              and {c_time} and {edit_p} and {edit_c}""", [lo, cutoff_utc]).to_arrow_table()
         return CohortView(cutoff_utc, window_days, post_mentions, comment_mentions, thread_comments)
 
 

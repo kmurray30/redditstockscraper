@@ -90,6 +90,8 @@ read it before designing the scorer, backtest or validation):
 - **Point-in-time everything**: no feature may use data after the decision time. Reddit scores and
   comment counts in the dumps are *final* values (not point-in-time); use text and
   comments created within a fixed maturation window (e.g. T+24h) for any backtest feature.
+  **Exception by user decision (2026-10-19): the thesis pipeline has no lock** (see "Thesis
+  scorer", "No lock"); the baselines keep the 24h window.
 - **Survivorship**: universe must include delisted names and historical tickers.
 - **LLM hindsight leakage**: run scoring both identified and ticker-blinded; if performance
   collapses when names are hidden, assume contamination. Posts dated after the model's training
@@ -139,7 +141,7 @@ read it before designing the scorer, backtest or validation):
 
 ## What exists in the repo
 
-Tests: `python -m pytest -q` (254 tests, ~5 s, no network). `requirements.txt`: zstandard,
+Tests: `python -m pytest -q` (300 tests, ~5 s, no network). `requirements.txt`: zstandard,
 orjson, pytest, pyarrow, duckdb, numpy, boto3. `data/` and `.env` are gitignored.
 
 **Reddit side** (`scripts/download_reddit.py`, `reddit_filter.py`): commands `check`, `list`,
@@ -422,7 +424,8 @@ Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstrin
 | `check-blind` | greps the blinded texts for the company's ticker or name; must report 0 | no |
 | `thesis-run` (`backtest.py run --scorer scripts/thesis_scorer.py:factory --split dev`) | the backtest; `THESIS_VARIANT`, `THESIS_PARAMS` (JSON), `THESIS_VOTES` select the configuration | no |
 | `thesis-timeline` | per-company score series after every thread event, `thesis_series_<variant>.parquet`, for graphs | no |
-| `calibrate --split dev` | P(5x), P(10x), P(permanent loss) and CAGR quartiles per score decile | no |
+| `calibrate --split dev` | P(5x), P(10x), P(permanent loss) and CAGR quartiles per score decile (`--exclude-late` before `calibrate` for the check) | no |
+| `script:comment_lag` | how long after a post its comments and edits arrive, per year | no |
 
 **Variables the user sets on the worker:** `LLM_MODEL` (e.g. `gpt-5-nano`; `fake` is a free
 deterministic backend for dry runs), `OPENAI_API_KEY` (or `OPENROUTER_API_KEY` +
@@ -449,6 +452,21 @@ a six-month score; the leak is the window between maturation (24h) and archive. 
 any holdout number. Votes enter in three places: comment pruning/weighting inside a thread, the
 funnel pre-score, and the thread weight `(1 + log(1 + votes))^gamma` (gamma 0.5 base, 0 and 1
 as ablations). `votes` is in every ledger entry.
+
+**No lock** (user decision 2026-10-19, "Indefinite"): the thesis pipeline's view is
+`thesis_prompt.thesis_pit_config()`: `maturation_hours=0`, `edited_policy="keep"`,
+`comments="all"` (`pit.PITConfig`). A post counts from the first monthly cutoff after it was
+written, the model sees every comment the thread ever got (including ones written years
+later) and the post's final, possibly edited text. Measured with `comment_lag.py` on
+2012-2020: 88% of comments arrive within 24h of the post, 95% within 48h, 98.4% within 7 days;
+0.3% of long self posts are edited after 7 days. The funnel records per thread `decided_utc`
+(first cutoff), `late_comments`, `late_shown` (late comments the prompt actually shows) and
+`edited_late`. **Kept by default; `exclude_late` drops threads with `late_shown > 0` or
+`edited_late`**: `THESIS_PARAMS='{"exclude_late": true}'` for `thesis-run`, `JOB_ARGS="--exclude-late
+calibrate --split dev"` for `calibrate`. Run both and report the gap next to any thesis
+result: a large gap means hindsight in late comments is doing the work. Dropping late threads
+also drops the most discussed ones, so the exclude run is a check, not a clean counterfactual.
+The baseline ladder is unchanged (24h window). Builder version 2 marks this in the prompt version.
 
 **The prompt** (`prompts/thesis_v1.md`, built by `thesis_prompt.py`): grades reasoning, sourcing
 and tone only; numbers-only JSON (`is_thesis`, `stance`, `horizon`, argument, evidence,

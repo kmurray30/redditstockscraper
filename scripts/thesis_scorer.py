@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import prices as px  # noqa: E402
 from scorer import Cohort  # noqa: E402
+from thesis_prompt import MATURATION_HOURS, THESIS_PIT  # noqa: E402
 
 DAY = 86400
 WEIGHTS = {"argument": 0.28, "evidence": 0.22, "tone": 0.12, "falsifiability": 0.10,
@@ -64,6 +65,8 @@ class Params:
     use_author: bool = False
     author_k: float = 5.0
     min_evidence: int = 0
+    exclude_late: bool = False   # drop threads whose graded text holds content written after
+                                 # their first decision cutoff (a comment shown, or a late edit)
     hype_penalty: float = 20.0
     weights: dict = field(default_factory=lambda: dict(WEIGHTS))
     half_life: dict = field(default_factory=lambda: dict(HALF_LIFE_DAYS))
@@ -105,6 +108,11 @@ def thread_quality(g: dict, p: Params) -> float:
     q = sum(p.weights[k] * parts[k] for k in p.weights)
     q -= p.hype_penalty * float(g.get("hype_risk") or 0) / 100
     return max(0.0, min(100.0, q))
+
+
+def is_late(g: dict) -> bool:
+    """True if the model saw something a reader at the thread's first cutoff could not have."""
+    return bool(g.get("late_shown") or 0) or bool(g.get("edited_late"))
 
 
 def vote_weight(votes, gamma: float) -> float:
@@ -177,11 +185,14 @@ class ThesisScorer:
     version = "1"
 
     def __init__(self, grades: list[dict], params: Params | None = None, *, variant: str = "identified",
-                 votes: str = "final", lookback_days: int = 90, maturation_hours: int = 24,
+                 votes: str = "final", lookback_days: int = 90, maturation_hours: int = MATURATION_HOURS,
                  store: px.PriceStore | None = None, eodhd_root: Path = Path("data/market/eodhd")):
         self.p = params or Params()
         self.variant, self.votes = variant, votes
         self.lookback_days, self.maturation_hours = lookback_days, maturation_hours
+        self.edited_policy, self.comments = THESIS_PIT["edited_policy"], THESIS_PIT["comments"]
+        if self.p.exclude_late:
+            grades = [g for g in grades if not is_late(g)]
         self.grades = {(g["post_id"], g["cik"]): g for g in grades}
         self.model = grades[0].get("model") if grades else None
         self.prompt_version = grades[0].get("prompt_version") if grades else None
@@ -197,7 +208,8 @@ class ThesisScorer:
 
     def params(self) -> dict:
         return {"model": self.model, "prompt_version": self.prompt_version, "variant": self.variant,
-                "votes": self.votes, "n_graded": len(self.grades), **asdict(self.p)}
+                "votes": self.votes, "n_graded": len(self.grades), "maturation_hours": self.maturation_hours,
+                "pit": dict(THESIS_PIT), **asdict(self.p)}
 
     def thread_value(self, g: dict, cutoff_utc: int, code: str | None) -> float:
         x = contribution(g, self.p)
@@ -237,6 +249,8 @@ class ThesisScorer:
 def timeline(grades: list[dict], p: Params) -> list[dict]:
     """One row per thread event, in time order, with the company's decayed score right after
     it. No price discount here (it needs a cutoff); author weight applies if enabled."""
+    if p.exclude_late:
+        grades = [g for g in grades if not is_late(g)]
     priors = author_priors(grades, p) if p.use_author else {}
     events: dict[str, list[tuple[int, float, str]]] = {}
     out = []
@@ -309,6 +323,9 @@ def main(argv=None) -> int:
     p.add_argument("--features", default="data/features")
     p.add_argument("--variant", default="identified")
     p.add_argument("--params", default=os.environ.get("THESIS_PARAMS"), help="JSON overrides")
+    p.add_argument("--exclude-late", action="store_true",
+                   help="drop threads holding content written after their first cutoff "
+                        "(same as THESIS_PARAMS {\"exclude_late\": true})")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("timeline", help="write thesis_series_<variant>.parquet")
     c = sub.add_parser("calibrate", help="outcome rates per score decile on a split")
@@ -319,6 +336,8 @@ def main(argv=None) -> int:
     c.add_argument("--post-features", default="data/features/post_features.parquet")
     a = p.parse_args(argv)
     params = Params.from_json(a.params)
+    if a.exclude_late:
+        params.exclude_late = True
     grades = load_grades(Path(a.features), a.variant)
     if a.cmd == "timeline":
         rows = timeline(grades, params)
@@ -335,6 +354,9 @@ def main(argv=None) -> int:
     if a.split == lg.SEALED:
         raise SystemExit("calibrate does not touch the sealed holdout")
     stamp = bt.data_stamp(Path(a.mentions), Path(a.post_features), Path(a.features) / "universe.parquet")
+    late = sum(1 for g in grades if is_late(g))
+    print(f"{len(grades):,} graded threads, {late:,} hold content written after their first cutoff; "
+          f"exclude_late={params.exclude_late}")
     scores = bt.build_scores(scorer, months, corpus, ev.con, Path("data/experiments"), print, stamp)
     for years in a.years:
         cand = ev.joined(scores, years, months)

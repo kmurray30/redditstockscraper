@@ -108,7 +108,7 @@ def test_selection_is_point_in_time_and_capped(tmp_path):
     assert census["rejects"]["not_in_universe"] == 1                     # "other" at M2
     assert census["rejects"]["over_cap"] >= 2                            # small and tiny at M1
     assert census["n_threads"] == len(threads) == 5
-    assert all(t["matured_utc"] == t["created_utc"] + 24 * 3600 for t in threads)
+    assert all(t["matured_utc"] == t["created_utc"] + corpus.config.maturation_hours * 3600 for t in threads)
     assert by["big"]["votes"] == 300 and by["big"]["est_tokens"] > by["talk"]["est_tokens"]
 
 
@@ -130,3 +130,21 @@ def test_census_text_and_cost():
     assert abs(c["identified"] - (3000 * 1.0 + 3 * tf.OUT_TOKENS * 2.0) / 1e6) < 1e-12
     text = tf.format_census(threads, census, 1.0, 2.0, "m")
     assert "TOTAL unique threads 3" in text and "thin_self_post" in text and "both $" in text
+
+
+def test_late_content_is_measured_against_the_first_cutoff():
+    from datetime import datetime, timezone
+    ts_ = lambda *a: int(datetime(*a, tzinfo=timezone.utc).timestamp())  # noqa: E731
+    assert tf.first_cutoff_after(ts_(2015, 3, 14, 12)) == ts_(2015, 4, 1)
+    assert tf.first_cutoff_after(ts_(2015, 12, 31, 23)) == ts_(2016, 1, 1)
+    assert tf.first_cutoff_after(ts_(2015, 4, 1)) == ts_(2015, 4, 1)
+    p = {"post_id": "x", "created_utc": ts_(2015, 3, 30), "author": "op", "edited_utc": 0}
+    cs = [{"comment_id": f"c{i}", "post_id": "x", "parent_id": "t3_x", "author": "u",
+           "body": "a substantive comment here", "votes": 10 - i, "created_utc": t}
+          for i, t in enumerate([ts_(2015, 3, 30, 5), ts_(2015, 4, 2), ts_(2016, 1, 1)])]
+    late = tf.late_content(p, cs)
+    assert late == {"decided_utc": ts_(2015, 4, 1), "late_comments": 2, "late_shown": 2,
+                    "edited_late": False}
+    assert tf.late_content({**p, "edited_utc": -1}, cs[:1])["edited_late"] is True
+    assert tf.late_content({**p, "edited_utc": ts_(2015, 3, 31)}, cs[:1]) == {
+        "decided_utc": ts_(2015, 4, 1), "late_comments": 0, "late_shown": 0, "edited_late": False}

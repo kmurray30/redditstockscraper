@@ -155,3 +155,14 @@ def test_decile_rates_rank_within_month():
     r = ts.decile_rates(cand)
     assert r[10]["n"] == 4 and r[10]["p5"] == 1.0 and r[1]["p5"] == 0.0
     assert "decile" in ts.calibrate(r)
+
+
+def test_exclude_late_drops_threads_with_later_content():
+    clean, late, edited = grade("p1", cik="1"), grade("p2", cik="2"), grade("p3", cik="3")
+    late["late_shown"], edited["edited_late"] = 2, True
+    assert not ts.is_late(clean) and ts.is_late(late) and ts.is_late(edited)
+    keep = ts.ThesisScorer([clean, late, edited], ts.Params())
+    drop = ts.ThesisScorer([clean, late, edited], ts.Params.from_json('{"exclude_late": true}'))
+    assert len(keep.grades) == 3 and set(drop.grades) == {("p1", "1")}
+    assert drop.params()["exclude_late"] is True and drop.params()["pit"]["comments"] == "all"
+    assert {r["post_id"] for r in ts.timeline([clean, late], ts.Params(exclude_late=True))} == {"p1"}

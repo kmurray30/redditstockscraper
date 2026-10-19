@@ -75,3 +75,20 @@ def test_load_threads_filters_years_and_limits(tmp_path):
     assert len(tl.load_threads(tmp_path / "t.parquet", years=[2013])) == 3
     assert len(tl.load_threads(tmp_path / "t.parquet", limit=4)) == 4
     assert [r["first_month"] for r in tl.load_threads(tmp_path / "t.parquet")][:3] == ["2012-01-01"] * 3
+
+
+def test_keep_rows_carries_an_existing_set_over(tmp_path):
+    rows = [thread(i, 2015, "stocks", 1000, 5) for i in range(10)]
+    f = tmp_path / "ratings.csv"
+    with f.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["n", "post_id", "cik", "ticker", "title", "rating", "reason", "ts"])
+        w.writeheader()
+        w.writerow({"n": 1, "post_id": "p3", "cik": "3", "ticker": "T3", "title": "t", "rating": "4", "reason": "ok", "ts": "x"})
+        w.writerow({"n": 2, "post_id": "gone", "cik": "99", "ticker": "T99", "title": "t", "rating": "2", "reason": "", "ts": ""})
+        w.writerow({"n": 3, "post_id": "p1", "cik": "1", "ticker": "T1", "title": "t", "rating": "", "reason": "", "ts": ""})
+    logs = []
+    picked, old = gs.keep_rows(rows, f, 4, 0, log=logs.append)
+    assert [r["post_id"] for r in picked[:2]] == ["p3", "p1"]      # kept, in the CSV's order
+    assert len(picked) == 4 and len({r["post_id"] for r in picked}) == 4
+    assert "gone" not in {r["post_id"] for r in picked} and "T99 gone" in logs[0]
+    assert old[("p3", "3")]["rating"] == "4"

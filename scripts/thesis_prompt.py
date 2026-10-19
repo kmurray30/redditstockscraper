@@ -1,7 +1,8 @@
 """Build the LLM request for one thread (post + pruned comment tree), identified or blinded.
 
 The text a model sees is assembled only from the point-in-time view (``pit.py``), so the
-comments are the ones inside the post's maturation window and nothing is edited after it.
+comments are every comment the thread ever got and the text is the post's final text (see
+``THESIS_PIT``); threads holding later content are flagged so they can be excluded.
 Vote counts come from the view's ``votes`` column when the corpus was opened with
 ``votes="final"``; they rank which comments are shown and are printed next to each comment.
 
@@ -35,7 +36,7 @@ from llm import Request  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPT_FILE = ROOT / "prompts" / "thesis_v1.md"
-BUILDER_VERSION = 1
+BUILDER_VERSION = 2   # 2: all comments, final text (no 24h lock)
 
 
 def prompt_text() -> str:
@@ -46,6 +47,19 @@ def prompt_version() -> str:
     tag = hashlib.sha1(prompt_text().encode()).hexdigest()[:6]
     return f"{PROMPT_FILE.stem}.{tag}.b{BUILDER_VERSION}"
 
+
+# The thesis pipeline's view (user decision 2026-10-19): no lock. A post counts from the
+# first cutoff after it was written, the model sees every comment the thread ever got and the
+# post's final text. Threads whose graded text holds anything written after that cutoff are
+# flagged (``late_shown``, ``edited_late``); ``Params.exclude_late`` drops them in the backtest
+# and the calibrator. comment_lag.py measured how much that is (88% of comments within 24h).
+MATURATION_HOURS = 0
+THESIS_PIT = {"edited_policy": "keep", "comments": "all"}
+
+
+def thesis_pit_config(votes: str = "final", maturation_hours: int = MATURATION_HOURS):
+    from pit import PITConfig
+    return PITConfig(maturation_hours=maturation_hours, votes=votes, **THESIS_PIT)
 
 PRUNE = {
     "body_head": 6000,        # chars kept from the start of a long body
@@ -167,7 +181,7 @@ def prune_comments(comments: list[dict], post_id: str, op: str | None, p: dict =
 
 def render_comments(pruned: list[dict], total: int, p: dict = PRUNE) -> str:
     if not pruned:
-        return "COMMENTS: none within the window."
+        return "COMMENTS: none."
     lines = [f"COMMENTS ({len(pruned)} shown of {total}; [votes] label: text; '>' marks a reply):"]
     for c in pruned:
         body = c["body"].strip().replace("\n", " ")

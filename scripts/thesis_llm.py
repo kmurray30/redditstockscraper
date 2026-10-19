@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import llm  # noqa: E402
 from pit import PITConfig, PITCorpus  # noqa: E402
-from thesis_prompt import Thread, blind_leaks, build_request, prompt_version  # noqa: E402
+from thesis_prompt import (MATURATION_HOURS, Thread, blind_leaks, build_request,  # noqa: E402
+                           prompt_version, thesis_pit_config)
 
 VARIANTS = ("identified", "blinded")
 GRADE_FIELDS = ("is_thesis", "stance", "horizon", "argument_quality", "evidence_quality",
@@ -43,6 +44,8 @@ GRADED_SCHEMA = pa.schema([
     ("subreddit", pa.string()), ("created_utc", pa.int64()), ("matured_utc", pa.int64()),
     ("author", pa.string()), ("votes", pa.int64()), ("n_comments", pa.int32()),
     ("n_companies", pa.int16()), ("first_month", pa.string()),
+    ("decided_utc", pa.int64()), ("late_comments", pa.int32()), ("late_shown", pa.int32()),
+    ("edited_late", pa.bool_()),
     ("is_thesis", pa.bool_()), ("stance", pa.float64()), ("horizon", pa.string()),
     ("argument_quality", pa.int16()), ("evidence_quality", pa.int16()), ("specificity", pa.int16()),
     ("tone_stability", pa.int16()), ("falsifiability", pa.int16()), ("balance", pa.int16()),
@@ -64,7 +67,7 @@ def load_threads(path: Path, years=None, limit: int | None = None) -> list[dict]
 
 def open_corpus(a, votes: str = "final") -> PITCorpus:
     return PITCorpus(Path(a.parquet), Path(a.mentions),
-                     PITConfig(maturation_hours=a.maturation, votes=votes),
+                     thesis_pit_config(votes, a.maturation),
                      post_features=Path(a.post_features))
 
 
@@ -131,7 +134,8 @@ def cmd_collect(a) -> int:
         rec = json.loads(p.read_text())
         row = {k: r.get(k) for k in ("post_id", "cik", "ticker", "name", "subreddit", "created_utc",
                                      "matured_utc", "author", "votes", "n_comments", "n_companies",
-                                     "first_month")}
+                                     "first_month", "decided_utc", "late_comments", "late_shown",
+                                     "edited_late")}
         row.update(flatten(rec))
         row["prompt_version"], row["variant"] = prompt_version(), a.variant
         out.append(row)
@@ -177,7 +181,7 @@ def main(argv=None) -> int:
     p.add_argument("--mentions", default="data/features/mentions.parquet")
     p.add_argument("--post-features", default="data/features/post_features.parquet")
     p.add_argument("--lookback", type=int, default=90)
-    p.add_argument("--maturation", type=int, default=24)
+    p.add_argument("--maturation", type=int, default=MATURATION_HOURS)
     p.add_argument("--model", help="override LLM_MODEL for collect / check-blind")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")

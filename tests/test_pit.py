@@ -137,3 +137,25 @@ def test_votes_are_hidden_unless_asked_for(tmp_path, corpus):
     assert with_votes.comments_for(["ok"])[0]["votes"] == 77
     with pytest.raises(ValueError):
         pit.PITConfig(votes="live")
+
+
+def test_comments_all_shows_every_comment_and_keep_shows_edited(tmp_path):
+    posts = [post("p", T0 - 5 * 86400, edited_utc=T0 + 86400)]          # edited after the cutoff
+    comments = [comment("early", "p", T0 - 5 * 86400 + H), comment("later", "p", T0 - 86400),
+                comment("future", "p", T0 + 30 * 86400)]                 # after the cutoff
+    (tmp_path / "posts").mkdir()
+    (tmp_path / "comments").mkdir()
+    pq.write_table(pa.Table.from_pylist(posts), tmp_path / "posts" / "s.parquet")
+    pq.write_table(pa.Table.from_pylist(comments), tmp_path / "comments" / "s.parquet")
+    pq.write_table(pa.Table.from_pylist([mention("post", "p", "p", T0 - 5 * 86400)]),
+                   tmp_path / "mentions.parquet")
+    strict = pit.PITCorpus(tmp_path, tmp_path / "mentions.parquet")
+    assert strict.at(T0, 30).posts() == []                               # edited late: hidden
+    loose = pit.PITCorpus(tmp_path, tmp_path / "mentions.parquet",
+                          pit.PITConfig(maturation_hours=0, edited_policy="keep", comments="all"))
+    v = loose.at(T0, 30)
+    assert [r["post_id"] for r in v.posts()] == ["p"]
+    assert [c["comment_id"] for c in v.comments_for(["p"])] == ["early", "later", "future"]
+    windowed = pit.PITCorpus(tmp_path, tmp_path / "mentions.parquet",
+                             pit.PITConfig(edited_policy="keep"))
+    assert [c["comment_id"] for c in windowed.at(T0, 30).comments_for(["p"])] == ["early"]

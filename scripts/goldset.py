@@ -1,6 +1,6 @@
 """The gold set: 30 single-company threads the user rates by hand, and the model comparison.
 
-    python scripts/goldset.py build [--n 30] [--seed 0]
+    python scripts/goldset.py build [--n 30] [--seed 0] [--keep data/gold/ratings.csv]
     python scripts/goldset.py evaluate [--ratings data/gold/ratings.csv]
 
 ``build`` samples single-company threads from the planned set (``threads.parquet``),
@@ -11,6 +11,8 @@ spread across years, subreddits, lengths and vote levels, and writes:
 
 and pushes ``data/gold/`` to the bucket when bucket credentials are present, so the user
 can download both from the bucket's file browser and upload the filled CSV the same way.
+``--keep RATINGS_CSV`` rebuilds the same threads (after a window or prompt change) and
+carries the ratings in that file over, so nothing already rated is lost.
 
 ``evaluate`` grades the rated threads with the configured model (identified, with a one-line
 ``why``), prints the user's rating next to the model's quality score and reason for every
@@ -33,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import llm  # noqa: E402
 import thesis_llm as tl  # noqa: E402
-from thesis_prompt import build_request, prompt_version, user_message  # noqa: E402
+from thesis_prompt import MATURATION_HOURS, build_request, prompt_version, user_message  # noqa: E402,F401
 from thesis_scorer import Params, thread_quality  # noqa: E402
 
 
@@ -69,9 +71,30 @@ def sample(rows: list[dict], n: int, seed: int) -> list[dict]:
     return out
 
 
+def keep_rows(rows: list[dict], ratings_path: Path, n: int, seed: int, log=print) -> tuple[list[dict], dict]:
+    """The threads of an existing ratings.csv, in its order, topped up to ``n`` with fresh
+    samples when some are no longer in ``threads.parquet``. Returns (rows, old rows by key)."""
+    with Path(ratings_path).open() as f:
+        old = {(r["post_id"], r["cik"]): r for r in csv.DictReader(f)}
+    by_key = {(r["post_id"], r["cik"]): r for r in rows}
+    picked = [by_key[k] for k in old if k in by_key]
+    missing = [k for k in old if k not in by_key]
+    if missing:
+        log(f"[gold] {len(missing)} rated threads are no longer in threads.parquet and are replaced: "
+            + ", ".join(f"{old[k]['ticker']} {k[0]}" for k in missing))
+    if len(picked) < n:
+        rest = [r for r in rows if (r["post_id"], r["cik"]) not in old]
+        picked += sample(rest, n - len(picked), seed)
+    return picked, old
+
+
 def cmd_build(a) -> int:
     rows = tl.load_threads(Path(a.threads), a.years)
-    picked = sample(rows, a.n, a.seed)
+    old: dict = {}
+    if a.keep:
+        picked, old = keep_rows(rows, Path(a.keep), a.n, a.seed)
+    else:
+        picked = sample(rows, a.n, a.seed)
     if not picked:
         print("no single-company threads in threads.parquet; run the funnel first")
         return 1
@@ -85,8 +108,10 @@ def cmd_build(a) -> int:
         md.append(f"\n\n---\n\n## {k}. [{t.ticker}] {t.title.strip()[:120]}\n\n"
                   f"post_id: `{t.post_id}`   company: {t.name or t.ticker}\n\n```text\n"
                   f"{user_message(t, blinded=False)}\n```\n")
+        prev = old.get((t.post_id, t.cik), {})
         csv_rows.append({"n": k, "post_id": t.post_id, "cik": t.cik, "ticker": t.ticker,
-                         "title": t.title.strip()[:80], "rating": "", "reason": ""})
+                         "title": t.title.strip()[:80], "rating": prev.get("rating", ""),
+                         "reason": prev.get("reason", ""), "ts": prev.get("ts", "")})
     (gold / "threads.md").write_text(
         "# Gold set\n\nRate each thread 1 (worthless) to 5 (I would act on this research) in "
         "`ratings.csv`, with a few words of reason. Judge the reasoning and sourcing, not whether "
@@ -183,13 +208,16 @@ def main(argv=None) -> int:
     p.add_argument("--mentions", default="data/features/mentions.parquet")
     p.add_argument("--post-features", default="data/features/post_features.parquet")
     p.add_argument("--lookback", type=int, default=90)
-    p.add_argument("--maturation", type=int, default=24)
+    p.add_argument("--maturation", type=int, default=MATURATION_HOURS)
     sub = p.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build")
     b.add_argument("--n", type=int, default=30)
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--years", nargs="+", type=int)
     b.add_argument("--dump", action="store_true", help="also print the files as base64 chunks")
+    b.add_argument("--keep", metavar="RATINGS_CSV",
+                   help="rebuild the same threads as this ratings.csv (e.g. after a window change) "
+                        "and carry its ratings over")
     b.set_defaults(fn=cmd_build)
     e = sub.add_parser("evaluate")
     e.add_argument("--ratings", default="data/gold/ratings.csv")
