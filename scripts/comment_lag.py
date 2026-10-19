@@ -26,7 +26,8 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     root = Path(a.parquet)
     con = duckdb.connect()
-    con.execute(f"create view posts as select id, created_utc from read_parquet('{root}/posts/*.parquet')")
+    con.execute(f"create view posts as select id, created_utc, edited_utc, is_self, length(selftext) as chars "
+                f"from read_parquet('{root}/posts/*.parquet')")
     con.execute(f"create view comments as select post_id, created_utc from read_parquet('{root}/comments/*.parquet')")
     lo, hi = a.years
     cols = ", ".join(f"avg(case when lag <= {s} then 1 else 0 end) as c_{n}" for n, s in WINDOWS)
@@ -62,6 +63,21 @@ def main(argv=None) -> int:
         select quantile_cont(lag, [0.5, 0.9, 0.95, 0.99]) from j""").fetchone()[0]
     print("\ncomment lag quantiles (hours): p50 %.1f  p90 %.1f  p95 %.1f  p99 %.1f"
           % tuple(v / 3600 for v in med))
+    # edits: a post edited after the window is excluded from the view (edited_policy="exclude")
+    cols = ", ".join(f"avg(case when edited_utc > created_utc + {s} then 1 else 0 end) as e_{n}"
+                     for n, s in WINDOWS)
+    rows = con.execute(f"""
+        select year(to_timestamp(created_utc)) as y, count(*) as n,
+               avg(case when edited_utc = -1 then 1 else 0 end) as unknown_time,
+               avg(case when edited_utc > 0 then 1 else 0 end) as edited, {cols}
+        from posts where is_self and chars >= 400
+          and year(to_timestamp(created_utc)) between {lo} and {hi}
+        group by y order by y""").fetchall()
+    print("\nself posts >= 400 chars: share edited at an unknown time (-1), edited at all, "
+          "and edited AFTER each window (those are dropped by the view)")
+    print("year        n   unkn  edited  " + "  ".join(f"{n:>5s}" for n, _ in WINDOWS))
+    for r in rows:
+        print(f"{r[0]}  {r[1]:9,d}  {r[2]:5.1%}  {r[3]:5.1%}  " + "  ".join(f"{v:5.1%}" for v in r[4:]))
     return 0
 
 
