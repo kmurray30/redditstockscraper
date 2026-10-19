@@ -497,7 +497,7 @@ title, or two mentions.
 The census job peaks at about 8.7 GB RAM (the 90-day views); keep that in mind on Hobby.
 
 **Gold set rating page (`gold-ui`, a second Railway service):** `scripts/gold_server.py`
-serves the page built by `scripts/gold_page.py` (one thread per card, 1-5 buttons, reason box)
+serves the page built by `scripts/gold_page.py` (one thread per card, 1-10 buttons, reason box; 1-5 ratings from before 2026-10-19 are mapped onto 1-10 by `gold_page.to_ten`)
 behind HTTP Basic auth (`GOLD_PASSWORD`, chosen by the user) at
 https://gold-ui-production-98fb.up.railway.app. It reads `gold/threads.md` and `gold/ratings.csv`
 from the bucket at start and rewrites `gold/ratings.csv` in the bucket after every rating, so

@@ -3,7 +3,7 @@
     python scripts/gold_page.py data/gold/threads.md data/gold/ratings.csv -o gold_ratings.html
 
 The page shows one thread at a time (post, then the pruned comments, exactly as the model
-sees them, identified), with 1-5 rating buttons and a reason box. Ratings are saved through
+sees them, identified), with 1-10 rating buttons and a reason box. Ratings are saved through
 the artifact's `db` capability (collection ``ratings``, one document per post id), so the
 session that published the page reads them back with the ArtifactData tool and writes
 ``gold/ratings.csv``. Nothing in the page talks to any other server.
@@ -75,6 +75,21 @@ def parse_threads_md(text: str) -> list[dict]:
     return threads
 
 
+SCALE = 10
+FROM_FIVE = {1: 1, 2: 3, 3: 6, 4: 8, 5: 10}   # 1-5 onto 1-10, symmetric about the midpoint
+
+
+def to_ten(row: dict) -> dict:
+    """Ratings were 1-5 until 2026-10-19; a row without ``scale == "10"`` is on that scale and is
+    mapped onto 1-10 by ``FROM_FIVE`` (1->1, 2->3, 3->6, 4->8, 5->10). Returns the row."""
+    r = (row.get("rating") or "").strip()
+    if r and str(row.get("scale") or "").strip() != str(SCALE):
+        row["rating"] = str(FROM_FIVE[int(float(r))])
+    if r:
+        row["scale"] = str(SCALE)
+    return row
+
+
 def attach_ciks(threads: list[dict], ratings_csv: str) -> None:
     by_post = {r["post_id"]: r for r in csv.DictReader(ratings_csv.splitlines())}
     for t in threads:
@@ -105,9 +120,9 @@ PAGE = r"""<title>Gold Set Ratings</title>
 body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 16px; line-height: 1.5;
   padding-block: 0 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)) }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg) }
-.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); display: flex; gap: 12px; align-items: center;
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
   padding-block: 10px; border-bottom: 1px solid var(--line); margin-bottom: 16px }
-.top h1 { font: 700 18px/1.1 var(--display); margin: 0; flex: 1; white-space: nowrap; min-width: 0 }
+.top h1 { font: 700 18px/1.1 var(--display); margin: 0; flex: 1; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis }
 .progress { font: 500 13px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap }
 .bar { height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; flex-basis: 100%; order: 9 }
 .bar i { display: block; height: 100%; background: var(--accent); width: 0 }
@@ -176,7 +191,7 @@ textarea { font: inherit; width: 100%; min-height: 44px; resize: vertical; borde
 <script>
 (function () {
   const THREADS = JSON.parse(document.getElementById('threads').textContent);
-  const LABELS = ['worthless', 'weak', 'some merit', 'solid', 'would act'];
+  const LABELS = ['worthless', '', 'weak', '', 'some merit', '', 'solid', '', 'strong', 'would act'];
   const $ = id => document.getElementById(id);
   let ratings = {}, DB = null, idx = 0, pending = {rating: null, reason: ''}, synced = false;
   try { const s = localStorage.getItem('gold.idx'); if (s !== null) idx = Math.min(THREADS.length - 1, Math.max(0, +s)); } catch (e) {}
@@ -187,7 +202,7 @@ textarea { font: inherit; width: 100%; min-height: 44px; resize: vertical; borde
   function status(msg, err) { const s = $('status'); s.textContent = msg || ''; s.classList.toggle('err', !!err); }
 
   function renderScale() {
-    $('scale').innerHTML = LABELS.map((l, i) => `<button type="button" data-r="${i + 1}" class="${pending.rating === i + 1 ? 'on' : ''}"><b>${i + 1}</b><small>${l}</small></button>`).join('');
+    $('scale').innerHTML = LABELS.map((l, i) => `<button type="button" data-r="${i + 1}" class="${pending.rating === i + 1 ? 'on' : ''}"><b>${i + 1}</b><small>${l || '&nbsp;'}</small></button>`).join('');
   }
   function render() {
     const n = ratedCount();
@@ -259,7 +274,7 @@ textarea { font: inherit; width: 100%; min-height: 44px; resize: vertical; borde
   $('indexBtn').onclick = () => { renderIndex(); $('drawer').hidden = false; };
   $('closeIndex').onclick = () => { $('drawer').hidden = true; };
   $('list').addEventListener('click', e => { const b = e.target.closest('button[data-i]'); if (!b) return; idx = +b.dataset.i; pending = {}; $('drawer').hidden = true; render(); });
-  document.addEventListener('keydown', e => { if (e.target.tagName === 'TEXTAREA') return; if (e.key >= '1' && e.key <= '5') { pending.rating = +e.key; renderScale(); $('save').disabled = false; } if (e.key === 'Enter' && pending.rating) save(); });
+  document.addEventListener('keydown', e => { if (e.target.tagName === 'TEXTAREA') return; if (e.key >= '0' && e.key <= '9') { pending.rating = e.key === '0' ? 10 : +e.key; renderScale(); $('save').disabled = false; } if (e.key === 'Enter' && pending.rating) save(); });
 
   // first unrated thread on a fresh open
   if (!ratings[THREADS[idx] && THREADS[idx].post_id]) { const first = THREADS.findIndex(t => !(ratings[t.post_id] && ratings[t.post_id].rating)); if (first >= 0 && idx === 0) idx = first; }

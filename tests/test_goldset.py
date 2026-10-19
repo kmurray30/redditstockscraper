@@ -40,9 +40,10 @@ def test_sample_is_single_company_and_spread_across_strata():
 def test_ratings_and_spearman(tmp_path):
     f = tmp_path / "ratings.csv"
     with f.open("w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["n", "post_id", "cik", "ticker", "title", "rating", "reason"])
+        w = csv.DictWriter(fh, fieldnames=["n", "post_id", "cik", "ticker", "title", "rating", "reason", "scale"])
         w.writeheader()
-        w.writerow({"n": 1, "post_id": "a", "cik": "1", "ticker": "A", "title": "t", "rating": "4", "reason": "ok"})
+        w.writerow({"n": 1, "post_id": "a", "cik": "1", "ticker": "A", "title": "t", "rating": "4", "reason": "ok",
+                    "scale": "10"})
         w.writerow({"n": 2, "post_id": "b", "cik": "2", "ticker": "B", "title": "t", "rating": "", "reason": ""})
     r = gs.read_ratings(f)
     assert list(r) == [("a", "1")] and r[("a", "1")]["rating"] == 4.0
@@ -91,4 +92,4 @@ def test_keep_rows_carries_an_existing_set_over(tmp_path):
     assert [r["post_id"] for r in picked[:2]] == ["p3", "p1"]      # kept, in the CSV's order
     assert len(picked) == 4 and len({r["post_id"] for r in picked}) == 4
     assert "gone" not in {r["post_id"] for r in picked} and "T99 gone" in logs[0]
-    assert old[("p3", "3")]["rating"] == "4"
+    assert old[("p3", "3")]["rating"] == "8" and old[("p3", "3")]["scale"] == "10"   # 1-5 row converted

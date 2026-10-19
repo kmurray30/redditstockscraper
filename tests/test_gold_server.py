@@ -114,7 +114,25 @@ def test_rating_round_trip_rewrites_the_bucket_csv(server):
 
 def test_bad_requests_are_refused(server):
     url, bucket, store = server
-    assert call(url, "/api/rate", "asdf", json.dumps({"post_id": "p1", "rating": 9}).encode())[0] == 400
+    assert call(url, "/api/rate", "asdf", json.dumps({"post_id": "p1", "rating": 11}).encode())[0] == 400
+    assert call(url, "/api/rate", "asdf", json.dumps({"post_id": "p1", "rating": 0}).encode())[0] == 400
     assert call(url, "/api/rate", "asdf", json.dumps({"post_id": "zz", "rating": 3}).encode())[0] == 400
     assert call(url, "/api/rate", "asdf", b"not json")[0] == 400
     assert bucket.objects["data/gold/ratings.csv"] == RATINGS_CSV.encode()
+
+
+def test_ten_point_scale_and_old_five_point_rows_are_converted(server):
+    url, bucket, store = server
+    code, body, _ = call(url, "/api/rate", "asdf", json.dumps({"post_id": "p1", "rating": 10}).encode())
+    assert code == 200
+    rows = list(csv.DictReader(io.StringIO(bucket.objects["data/gold/ratings.csv"].decode())))
+    assert rows[0]["rating"] == "10" and rows[0]["scale"] == "10"
+    old = ("n,post_id,cik,ticker,title,rating,reason,ts\n"
+           "1,p1,100,ACME,Why ACME doubles,4,ok,x\n2,p2,200,BETA,Beta is cheap,,,\n")
+    b2 = FakeBucket()
+    b2.objects["data/gold/ratings.csv"] = old.encode()
+    s2 = gs.Store(b2)
+    s2.load()
+    assert s2.ratings()["p1"]["rating"] == 8 and "p2" not in s2.ratings()
+    assert [gp.to_ten({"rating": str(r)})["rating"] for r in range(1, 6)] == ["1", "3", "6", "8", "10"]
+    assert gp.to_ten({"rating": "8", "scale": "10"})["rating"] == "8"

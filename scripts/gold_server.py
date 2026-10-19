@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gold_page as gp  # noqa: E402
 
 PREFIX = "data/gold/"
-RATING_COLS = ["n", "post_id", "cik", "ticker", "title", "rating", "reason"]
+RATING_COLS = ["n", "post_id", "cik", "ticker", "title", "rating", "reason", "scale"]
 MAX_BODY = 64 * 1024
 
 
@@ -48,7 +48,7 @@ class Store:
         csv_text = self.bucket.get_bytes(self.prefix + "ratings.csv").decode()
         self.threads = gp.parse_threads_md(md)
         gp.attach_ciks(self.threads, csv_text)
-        self.rows = list(csv.DictReader(io.StringIO(csv_text)))
+        self.rows = [gp.to_ten(r) for r in csv.DictReader(io.StringIO(csv_text))]
         self.page = gp.build(self.threads, mode="server").encode()
 
     def ratings(self) -> dict[str, dict]:
@@ -65,7 +65,7 @@ class Store:
             row = next((r for r in self.rows if r["post_id"] == post_id), None)
             if row is None:
                 raise KeyError(post_id)
-            row["rating"], row["reason"] = str(rating), reason
+            row["rating"], row["reason"], row["scale"] = str(rating), reason, str(gp.SCALE)
             row["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             buf = io.StringIO()
             w = csv.DictWriter(buf, fieldnames=RATING_COLS + ["ts"], extrasaction="ignore")
@@ -132,7 +132,7 @@ def make_handler(store: Store, password: str):
                 post_id = str(body["post_id"])
                 rating = int(body["rating"])
                 reason = str(body.get("reason") or "")[:2000]
-                if not 1 <= rating <= 5:
+                if not 1 <= rating <= gp.SCALE:
                     raise ValueError("rating out of range")
                 saved = store.rate(post_id, rating, reason)
             except (KeyError, ValueError, TypeError) as e:

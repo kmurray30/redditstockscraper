@@ -7,7 +7,7 @@
 spread across years, subreddits, lengths and vote levels, and writes:
 
     data/gold/threads.md    the threads as the model would see them (identified), to read
-    data/gold/ratings.csv   one row per thread: fill ``rating`` (1-5) and ``reason``
+    data/gold/ratings.csv   one row per thread: fill ``rating`` (1-10) and ``reason``
 
 and pushes ``data/gold/`` to the bucket when bucket credentials are present, so the user
 can download both from the bucket's file browser and upload the filled CSV the same way.
@@ -33,6 +33,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import gold_page  # noqa: E402
 import llm  # noqa: E402
 import thesis_llm as tl  # noqa: E402
 from thesis_prompt import MATURATION_HOURS, build_request, prompt_version, user_message  # noqa: E402,F401
@@ -75,7 +76,7 @@ def keep_rows(rows: list[dict], ratings_path: Path, n: int, seed: int, log=print
     """The threads of an existing ratings.csv, in its order, topped up to ``n`` with fresh
     samples when some are no longer in ``threads.parquet``. Returns (rows, old rows by key)."""
     with Path(ratings_path).open() as f:
-        old = {(r["post_id"], r["cik"]): r for r in csv.DictReader(f)}
+        old = {(r["post_id"], r["cik"]): gold_page.to_ten(r) for r in csv.DictReader(f)}
     by_key = {(r["post_id"], r["cik"]): r for r in rows}
     picked = [by_key[k] for k in old if k in by_key]
     missing = [k for k in old if k not in by_key]
@@ -111,9 +112,10 @@ def cmd_build(a) -> int:
         prev = old.get((t.post_id, t.cik), {})
         csv_rows.append({"n": k, "post_id": t.post_id, "cik": t.cik, "ticker": t.ticker,
                          "title": t.title.strip()[:80], "rating": prev.get("rating", ""),
-                         "reason": prev.get("reason", ""), "ts": prev.get("ts", "")})
+                         "reason": prev.get("reason", ""), "ts": prev.get("ts", ""),
+                         "scale": prev.get("scale", "")})
     (gold / "threads.md").write_text(
-        "# Gold set\n\nRate each thread 1 (worthless) to 5 (I would act on this research) in "
+        "# Gold set\n\nRate each thread 1 (worthless) to 10 (I would act on this research) in "
         "`ratings.csv`, with a few words of reason. Judge the reasoning and sourcing, not whether "
         "you remember how the stock did.\n" + "".join(md))
     with (gold / "ratings.csv").open("w", newline="") as f:
@@ -141,6 +143,7 @@ def read_ratings(path: Path) -> dict[tuple, dict]:
     out = {}
     with Path(path).open() as f:
         for row in csv.DictReader(f):
+            row = gold_page.to_ten(row)
             if (row.get("rating") or "").strip():
                 out[(row["post_id"], row["cik"])] = dict(row, rating=float(row["rating"]))
     return out
