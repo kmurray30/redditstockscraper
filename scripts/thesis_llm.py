@@ -96,12 +96,13 @@ def cmd_run(a) -> int:
     blinded = a.variant == "blinded"
     requests, meta = [], {}
     for r, t in threads_from_views(corpus, rows, a.lookback):
-        req = build_request(t, blinded=blinded)
+        req = build_request(t, blinded=blinded, backend=cfg.backend)
         requests.append(req)
         meta[req.key] = r
-    cache = llm.Cache(llm.cache_dir(Path(a.llm_dir), cfg.model, prompt_version(), a.variant))
+    pv = prompt_version(cfg.model)
+    cache = llm.Cache(llm.cache_dir(Path(a.llm_dir), cfg.model, pv, a.variant))
     spend = llm.Spend(Path(a.llm_dir) / "spend.jsonl")
-    print(f"[run] {len(requests):,} threads, variant {a.variant}, prompt {prompt_version()}, "
+    print(f"[run] {len(requests):,} threads, variant {a.variant}, prompt {pv}, "
           f"cache {cache.root}", flush=True)
     try:
         results = llm.run(requests, cfg, cache, spend, dry_run=a.dry_run)
@@ -123,7 +124,7 @@ def flatten(rec: dict) -> dict:
 
 def cmd_collect(a) -> int:
     model = a.model or llm.Config.from_env().model
-    cache = llm.cache_dir(Path(a.llm_dir), model, prompt_version(), a.variant)
+    cache = llm.cache_dir(Path(a.llm_dir), model, prompt_version(model), a.variant)
     rows = load_threads(Path(a.threads))
     out, missing = [], 0
     for r in rows:
@@ -137,7 +138,7 @@ def cmd_collect(a) -> int:
                                      "first_month", "decided_utc", "late_comments", "late_shown",
                                      "edited_late")}
         row.update(flatten(rec))
-        row["prompt_version"], row["variant"] = prompt_version(), a.variant
+        row["prompt_version"], row["variant"] = prompt_version(model), a.variant
         out.append(row)
     dest = Path(a.features) / f"thesis_threads_{a.variant}.parquet"
     pq.write_table(pa.Table.from_pylist(out, schema=GRADED_SCHEMA), dest, compression="zstd")
@@ -150,7 +151,7 @@ def cmd_collect(a) -> int:
 
 def cmd_check_blind(a) -> int:
     model = a.model or llm.Config.from_env().model
-    cache = llm.cache_dir(Path(a.llm_dir), model, prompt_version(), "blinded")
+    cache = llm.cache_dir(Path(a.llm_dir), model, prompt_version(model), "blinded")
     rows = {(r["post_id"], r["cik"]): r for r in load_threads(Path(a.threads))}
     n = leaks = 0
     examples = []

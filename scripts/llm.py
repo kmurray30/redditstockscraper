@@ -5,14 +5,30 @@ and results to disk, and it refuses to spend more than it is allowed to.
 
 Configuration (environment, or ``.env`` for the keys; see ``Config.from_env``):
 
-    LLM_MODEL            e.g. gpt-5-nano, or openai/gpt-5-nano and typesafe/jev-1.13 via OpenRouter;
+    LLM_MODEL            e.g. gpt-5-nano (or openai/gpt-5-nano via OpenRouter); ``jev-1.13.0`` for
+                         TypeSafe AI's Jev, which is not a chat model (see "Jev" below);
                          ``fake`` is a free deterministic backend for tests and dry runs
-    LLM_BASE_URL         default https://api.openai.com/v1 (OpenRouter: https://openrouter.ai/api/v1)
+    LLM_BASE_URL         default https://api.openai.com/v1 (OpenRouter: https://openrouter.ai/api/v1);
+                         for Jev the full decisions endpoint (default api.typesafe.ai/v1/systemone)
     OPENAI_API_KEY | OPENROUTER_API_KEY | LLM_API_KEY   never printed, never cached
+    JEV_API_KEY | TYPESAFE_API_KEY   TypeSafe's own key (direct endpoint); OPENROUTER_API_KEY also
+                         reaches Jev, through OpenRouter's alpha decisions endpoint
     LLM_SPEND_CAP_USD    hard cap over the lifetime log ``data/llm/spend.jsonl`` (default 5)
     LLM_PRICE_IN / LLM_PRICE_OUT   USD per 1M tokens; required for a model not in PRICES
     LLM_WORKERS          parallel requests (default 8)
     LLM_EXTRA_JSON       extra request-body fields, e.g. {"reasoning_effort": "minimal"}
+
+Jev (``Config.backend == "jev"``): Jev answers typed questions over a block of text instead
+of writing text: ``choice`` (one of named options, with probabilities), ``noul`` (a yes
+probability) and ``score`` (a probability-weighted index over 2-10 ordered rubric levels).
+A ``Request`` for Jev carries ``questions`` in that form and a ``decode`` callable that turns
+the answers into the same JSON shape a chat model would have returned, so caches, collect
+and scoring do not care which backend graded a thread. The body is
+``{"model", "state": {"rules": system, "discussion": user}, "questions"}``; the response is
+``{"model", "answers": {id: ...}, "usage": {"input_tokens", "output_tokens", "cost"?}}``.
+Jev's own reported ``cost`` is booked when present. Contract per the public references of
+September 2026 (the direct route is unverified from the build container; the first live call
+is the test). Output tokens are free, so a Jev run costs about a third of GPT-5 nano.
 
 Spend discipline: before a run, the cost of the *uncached* requests is estimated from their
 token counts at the model's price and the run is refused if the lifetime spend plus that
@@ -41,6 +57,10 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_CAP = 5.0
 KEY_NAMES = ("LLM_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY")
+JEV_DIRECT_URL = "https://api.typesafe.ai/v1/systemone"
+JEV_OPENROUTER_URL = "https://openrouter.ai/api/alpha/decisions"
+JEV_DIRECT_KEYS = ("JEV_API_KEY", "TYPESAFE_API_KEY")
+JEV_MODEL_IDS = {"direct": "jev-1.13.0", "openrouter": "typesafe/jev-1.13"}
 
 # USD per 1M tokens (input, output). From third-party price trackers in October 2026, because the
 # provider pages were unreachable from the build container: verify before a large run. Output
@@ -53,6 +73,7 @@ PRICES: dict[str, tuple[float, float]] = {
     "gpt-4.1-mini": (0.40, 1.60),
     "gpt-4o-mini": (0.15, 0.60),
     "jev-1.13": (0.042, 0.0),         # TypeSafe AI Jev: output is free (it returns typed decisions)
+    "jev-1.13.0": (0.042, 0.0),
     "fake": (0.0, 0.0),
 }
 
@@ -76,6 +97,10 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return out
 
 
+def is_jev(model: str) -> bool:
+    return "jev" in model.lower().split("/")[-1]
+
+
 def price_for(model: str, env: dict) -> tuple[float, float]:
     if env.get("LLM_PRICE_IN") and env.get("LLM_PRICE_OUT"):
         return float(env["LLM_PRICE_IN"]), float(env["LLM_PRICE_OUT"])
@@ -97,6 +122,7 @@ class Config:
     workers: int = 8
     timeout: float = 120.0
     extra: dict = field(default_factory=dict)
+    backend: str = "chat"            # chat | jev
 
     @classmethod
     def from_env(cls, env: dict | None = None, env_path: Path | None = None) -> "Config":
@@ -105,7 +131,9 @@ class Config:
             env.setdefault(k, v)
         model = env.get("LLM_MODEL")
         if not model:
-            raise SystemExit("LLM_MODEL is not set (e.g. gpt-5-nano, or fake for a dry run)")
+            raise SystemExit("LLM_MODEL is not set (e.g. gpt-5-nano, jev-1.13.0, or fake for a dry run)")
+        if is_jev(model):
+            return cls._jev_from_env(model, env)
         key = next((env[k] for k in KEY_NAMES if env.get(k)), None)
         if model != "fake" and not key:
             raise SystemExit("no API key: set OPENAI_API_KEY (or OPENROUTER_API_KEY / LLM_API_KEY)")
@@ -117,6 +145,25 @@ class Config:
                    price_in=pin, price_out=pout,
                    cap_usd=float(env.get("LLM_SPEND_CAP_USD") or DEFAULT_CAP),
                    workers=int(env.get("LLM_WORKERS") or 8), extra=extra)
+
+    @classmethod
+    def _jev_from_env(cls, model: str, env: dict) -> "Config":
+        """Jev: TypeSafe's own key goes to the direct endpoint, an OpenRouter key to OpenRouter's
+        decisions endpoint; the model id is normalised to the route's spelling."""
+        direct = next((env[k] for k in JEV_DIRECT_KEYS if env.get(k)), None)
+        if direct:
+            key, route, url = direct, "direct", JEV_DIRECT_URL
+        elif env.get("OPENROUTER_API_KEY"):
+            key, route, url = env["OPENROUTER_API_KEY"], "openrouter", JEV_OPENROUTER_URL
+        else:
+            raise SystemExit("no API key for Jev: set JEV_API_KEY (TypeSafe) or OPENROUTER_API_KEY")
+        if model in JEV_MODEL_IDS.values():
+            model = JEV_MODEL_IDS[route]
+        pin, pout = price_for(model, env)
+        return cls(model=model, base_url=env.get("LLM_BASE_URL") or url, api_key=key,
+                   price_in=pin, price_out=pout,
+                   cap_usd=float(env.get("LLM_SPEND_CAP_USD") or DEFAULT_CAP),
+                   workers=int(env.get("LLM_WORKERS") or 8), backend="jev")
 
     def cost(self, prompt_tokens: int, completion_tokens: int) -> float:
         return (prompt_tokens * self.price_in + completion_tokens * self.price_out) / 1e6
@@ -130,15 +177,21 @@ class Request:
     schema: dict
     schema_name: str = "result"
     max_out: int = 300
+    # Jev form of the same request: typed questions over {rules: system, discussion: user}, and
+    # a decoder from Jev's answers to the ``schema`` shape. Neither takes part in equality.
+    questions: dict | None = field(default=None, compare=False, hash=False)
+    decode: object = field(default=None, compare=False, hash=False, repr=False)
 
     @property
     def sha(self) -> str:
-        blob = json.dumps({"s": self.system, "u": self.user, "j": self.schema}, sort_keys=True)
+        blob = json.dumps({"s": self.system, "u": self.user, "j": self.schema,
+                           **({"q": self.questions} if self.questions else {})}, sort_keys=True)
         return hashlib.sha1(blob.encode()).hexdigest()
 
     @property
     def est_in_tokens(self) -> int:
-        return (len(self.system) + len(self.user)) // 4 + 40
+        q = len(json.dumps(self.questions)) if self.questions else 0
+        return (len(self.system) + len(self.user) + q) // 4 + 40
 
 
 # ------------------------------------------------------------------ cache and spend log
@@ -222,27 +275,7 @@ class Client:
                                     "json_schema": {"name": req.schema_name, "schema": req.schema,
                                                     "strict": True}},
                 "max_completion_tokens": req.max_out, **self.cfg.extra}
-        data = json.dumps(body).encode()
-        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
-        headers = {"content-type": "application/json", "authorization": f"Bearer {self.cfg.api_key}"}
-        last = None
-        for attempt in range(self.retries + 1):
-            try:
-                resp = self._post(url, data, headers)
-                break
-            except urllib.error.HTTPError as e:
-                text = e.read().decode(errors="replace")[:500]
-                if e.code in self.RETRY_STATUS and attempt < self.retries:
-                    last = f"HTTP {e.code}: {text}"
-                else:
-                    raise LLMError(f"HTTP {e.code} from {url}: {text}") from None
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-                last = f"{type(e).__name__}: {e}"
-                if attempt >= self.retries:
-                    raise LLMError(f"request failed after {self.retries + 1} tries: {last}") from None
-            self._sleep(min(2 ** attempt, 30) + random.random())
-        else:  # pragma: no cover - loop always breaks or raises
-            raise LLMError(last or "unknown failure")
+        resp = self.post_json(self.cfg.base_url.rstrip("/") + "/chat/completions", body)
         choice = (resp.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         if msg.get("refusal"):
@@ -257,10 +290,90 @@ class Client:
             raise LLMError(f"response is not JSON: {content[:200]!r}") from None
         return result, resp.get("usage") or {}
 
+    def post_json(self, url: str, body: dict) -> dict:
+        """POST with bounded retries on transient HTTP and network failures."""
+        data = json.dumps(body).encode()
+        headers = {"content-type": "application/json", "authorization": f"Bearer {self.cfg.api_key}"}
+        last = None
+        for attempt in range(self.retries + 1):
+            try:
+                return self._post(url, data, headers)
+            except urllib.error.HTTPError as e:
+                text = e.read().decode(errors="replace")[:500]
+                if e.code in self.RETRY_STATUS and attempt < self.retries:
+                    last = f"HTTP {e.code}: {text}"
+                else:
+                    raise LLMError(f"HTTP {e.code} from {url}: {text}") from None
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                last = f"{type(e).__name__}: {e}"
+                if attempt >= self.retries:
+                    raise LLMError(f"request failed after {self.retries + 1} tries: {last}") from None
+            self._sleep(min(2 ** attempt, 30) + random.random())
+        raise LLMError(last or "unknown failure")  # pragma: no cover - loop returns or raises
+
     def _post(self, url: str, data: bytes, headers: dict) -> dict:
         r = urllib.request.Request(url, data=data, headers=headers, method="POST")
         with urllib.request.urlopen(r, timeout=self.cfg.timeout) as f:
             return json.loads(f.read().decode())
+
+
+class JevClient(Client):
+    """TypeSafe AI Jev: one decisions call per request, answers validated and decoded."""
+
+    def complete(self, req: Request) -> tuple[dict, dict]:
+        if not req.questions:
+            raise LLMError("this request has no Jev questions; the prompt builder must supply them")
+        body = {"model": self.cfg.model, "state": {"rules": req.system, "discussion": req.user},
+                "questions": req.questions}
+        resp = self.post_json(self.cfg.base_url, body)
+        answers = validate_jev_answers(resp.get("answers"), req.questions)
+        u = resp.get("usage") or {}
+        usage = {"prompt_tokens": u.get("input_tokens"), "completion_tokens": u.get("output_tokens"),
+                 "cost": u.get("cost"), "resolved_model": resp.get("model")}
+        return (req.decode(answers) if req.decode else answers), usage
+
+
+def validate_jev_answers(answers, questions: dict) -> dict:
+    """Every question answered, with the right type and finite probabilities; LLMError otherwise."""
+    if not isinstance(answers, dict):
+        raise LLMError("Jev response has no answers object")
+    ok = lambda x: isinstance(x, (int, float)) and x == x and abs(x) != float("inf")  # noqa: E731
+    for qid, q in questions.items():
+        a = answers.get(qid)
+        if not isinstance(a, dict) or a.get("type") != q["type"]:
+            raise LLMError(f"Jev answer for {qid!r} missing or of the wrong type: {str(a)[:120]}")
+        if q["type"] == "score":
+            n = len(q["criteria"])
+            if not ok(a.get("score")) or not 0 <= a["score"] <= n - 1:
+                raise LLMError(f"Jev score for {qid!r} out of range: {a.get('score')!r}")
+        elif q["type"] == "noul":
+            if not ok(a.get("noul")) or not 0 <= a["noul"] <= 1:
+                raise LLMError(f"Jev noul for {qid!r} is not a probability: {a.get('noul')!r}")
+        elif q["type"] == "choice":
+            if a.get("choice") not in q["criteria"]:
+                raise LLMError(f"Jev choice for {qid!r} is not an option: {a.get('choice')!r}")
+        for v in (a.get("probabilities") or {}).values():
+            if not ok(v) or not 0 <= v <= 1:
+                raise LLMError(f"Jev probabilities for {qid!r} are malformed")
+    return answers
+
+
+def fake_jev_answers(questions: dict, seed: bytes) -> dict:
+    """Schema-valid Jev answers derived from ``seed`` (for the fake backend)."""
+    out = {}
+    for qid, q in questions.items():
+        rng = random.Random(seed + qid.encode())
+        if q["type"] == "score":
+            n = len(q["criteria"])
+            out[qid] = {"type": "score", "score": round(rng.random() * (n - 1), 3),
+                        "confidence": round(rng.random(), 3)}
+        elif q["type"] == "noul":
+            out[qid] = {"type": "noul", "noul": round(rng.random(), 3)}
+        else:
+            opts = list(q["criteria"])
+            out[qid] = {"type": "choice", "choice": rng.choice(opts), "confidence": round(rng.random(), 3),
+                        "probabilities": {o: round(1 / len(opts), 3) for o in opts}}
+    return out
 
 
 class FakeClient:
@@ -276,6 +389,9 @@ class FakeClient:
         self.calls += 1
         if self.fn:
             return self.fn(req), {"prompt_tokens": req.est_in_tokens, "completion_tokens": 100}
+        if req.questions and req.decode:   # the Jev path, decoded like the real thing
+            answers = fake_jev_answers(req.questions, hashlib.sha1(req.user.encode()).digest())
+            return req.decode(answers), {"prompt_tokens": req.est_in_tokens, "completion_tokens": 0}
         return (_fill(req.schema, hashlib.sha1(req.user.encode()).digest()),
                 {"prompt_tokens": req.est_in_tokens, "completion_tokens": 100})
 
@@ -305,7 +421,9 @@ def _fill(schema: dict, seed: bytes, depth: int = 0) -> object:
 
 
 def make_client(cfg: Config):
-    return FakeClient(cfg) if cfg.model == "fake" else Client(cfg)
+    if cfg.model == "fake":
+        return FakeClient(cfg)
+    return JevClient(cfg) if cfg.backend == "jev" else Client(cfg)
 
 
 # ------------------------------------------------------------------ running a batch
@@ -344,7 +462,10 @@ def run(requests: list[Request], cfg: Config, cache: Cache, spend: Spend, client
         if stop.is_set():
             return r, None, 0.0
         result, usage = client.complete(r)
-        cost = cfg.cost(int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0))
+        if usage.get("cost") is not None:      # the provider's own figure (Jev reports USD)
+            cost = float(usage["cost"])
+        else:
+            cost = cfg.cost(int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0))
         total = spend.add(cfg.model, usage, cost, r.key)
         cache.put(r, result, usage, cost, cfg.model)
         if total >= cfg.cap_usd:

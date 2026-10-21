@@ -1,4 +1,5 @@
 import sys
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
@@ -86,3 +87,39 @@ def test_no_usernames_in_the_message():
                                                       author="secret_commenter", votes=1)])
     msg = tp.user_message(t, blinded=False)
     assert "secret_op" not in msg and "secret_commenter" not in msg
+
+
+def test_jev_questions_cover_the_schema_and_decode_to_it():
+    q = tp.jev_questions()
+    assert set(q) == {"is_thesis", "stance", "horizon", "n_independent_voices", *tp.JEV_SCORES}
+    assert q["horizon"]["type"] == "choice" and set(q["horizon"]["criteria"]) == set(tp.SCHEMA["properties"]["horizon"]["enum"])
+    assert all(2 <= len(x["criteria"]) <= 10 for x in q.values() if x["type"] == "score")
+    assert len(q["n_independent_voices"]["criteria"]) == 10 and len(q["stance"]["criteria"]) == 5
+    answers = {k: {"type": "score", "score": 3.0, "confidence": 0.6} for k in tp.JEV_SCORES}
+    answers["stance"] = {"type": "score", "score": 4.0, "confidence": 0.9}
+    answers["n_independent_voices"] = {"type": "score", "score": 2.4, "confidence": 0.5}
+    answers["is_thesis"] = {"type": "noul", "noul": 0.8}
+    answers["horizon"] = {"type": "choice", "choice": "years", "probabilities": {"years": 0.7, "months": 0.3}}
+    g = tp.decode_jev(answers)
+    assert g["is_thesis"] is True and g["stance"] == 1.0 and g["horizon"] == "years"
+    assert g["argument_quality"] == 75 and g["comments"]["independent_support"] == 75
+    assert g["comments"]["n_independent_voices"] == 2 and g["_jev"]["is_thesis_p"] == 0.8
+    assert g["confidence"] == pytest.approx(round((0.6 * 10 + 0.9 + 0.5) / 12, 3))
+    assert set(tp.SCHEMA["required"]) <= set(g)
+    from thesis_scorer import Params, thread_quality
+    assert 0 < thread_quality(g, Params()) <= 100
+    answers["stance"]["score"] = 0.0
+    assert tp.decode_jev(answers)["stance"] == -1.0
+
+
+def test_build_request_backends_and_prompt_version(thread=None):
+    t = tp.Thread(post_id="p", cik="1", ticker="ACM", name="Acme", created_utc=1_400_000_000,
+                  subreddit="stocks", flair=None, title="t", body="b", url=None, is_self=True,
+                  author="op", votes=3, comments=[])
+    chat, jev = tp.build_request(t, blinded=False, why=True), tp.build_request(t, blinded=False, why=True, backend="jev")
+    assert chat.questions is None and "why" in chat.schema["properties"]
+    assert jev.questions == tp.jev_questions() and jev.decode is tp.decode_jev and jev.max_out == 0
+    assert "why" not in jev.schema["properties"] and chat.sha != jev.sha and chat.key == jev.key
+    assert tp.prompt_version().startswith("thesis_v1.") and tp.prompt_version("gpt-5-nano") == tp.prompt_version()
+    assert tp.prompt_version("jev-1.13.0") == tp.prompt_version("typesafe/jev-1.13") != tp.prompt_version()
+    assert tp.prompt_version("jev-1.13.0").startswith(tp.prompt_version() + ".jev")

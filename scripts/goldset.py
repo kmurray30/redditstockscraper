@@ -203,10 +203,10 @@ def cmd_evaluate(a) -> int:
     corpus = tl.open_corpus(a)
     requests, meta = [], {}
     for r, t in tl.threads_from_views(corpus, rows, a.lookback):
-        req = build_request(t, blinded=False, why=True)
+        req = build_request(t, blinded=False, why=True, backend=cfg.backend)
         requests.append(req)
         meta[req.key] = (r, t)
-    cache = llm.Cache(llm.cache_dir(Path(a.llm_dir), cfg.model, prompt_version(), "gold-why"))
+    cache = llm.Cache(llm.cache_dir(Path(a.llm_dir), cfg.model, prompt_version(cfg.model), "gold-why"))
     spend = llm.Spend(Path(a.llm_dir) / "spend.jsonl")
     results = llm.run(requests, cfg, cache, spend)
     params = Params()
@@ -229,7 +229,8 @@ def cmd_evaluate(a) -> int:
                       "n_comments": len(t.comments), "votes": t.votes or 0, "chars": len(t.body),
                       "year": t.created_utc // 31_557_600 + 1970})
     table.sort(key=lambda row: (-row[0], -row[1]))
-    print(f"model {cfg.model}, prompt {prompt_version()}, {len(table)} rated threads")
+    print(f"model {cfg.model}, prompt {prompt_version(cfg.model)}, {len(table)} rated threads"
+          + (" (Jev gives no reasons)" if cfg.backend == "jev" else ""))
     print("you  Q    stance thesis ticker  cmts  model's reason | your reason")
     for u, q, s, th, tick, nc, why, reason in table:
         print(f"{u:3.0f} {q:5.1f} {s:+6.2f} {'y' if th else 'n':6s} {tick:7s} {nc:4d}  {why} | {reason}")
@@ -240,7 +241,7 @@ def cmd_evaluate(a) -> int:
     for k in feats[0]:
         v = [float(f[k] or 0) for f in feats]
         print(f"  {k:14s} {spearman(xs, v):+.2f}   median {float(np.median(v)):g}")
-    out = Path(a.gold) / f"eval_{cfg.model}.csv"
+    out = Path(a.gold) / f"eval_{cfg.model.replace('/', '_')}.csv"
     with out.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["ticker", "you", "Q", "stance", "is_thesis", *feats[0]])
         w.writeheader()

@@ -37,6 +37,11 @@ scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: eval
 - A `JOB_ID` runs once. A redeploy, for example a push to the branch, does not repeat a finished
   job, but it **kills a running one**, which then re-runs from the start. Do not push while a
   long job is running.
+- **Railway can pause deploys for Hobby accounts** ("Deployments paused - limited access": Pro
+  demand is prioritised; seen 2026-10-21). `set-variables`, pushes and `redeploy` then create
+  no deployment (redeploy errors with "Deploys have been paused temporarily"); queued deploys run
+  on their own when it lifts, nothing is lost, running containers keep running. Check with
+  `list-deployments`; the only way around it is the Pro plan (user's call).
 - Anything touching the holdout split or `--accept-contaminated` is refused unless the user sets
   `ALLOW_HOLDOUT=1` themselves.
 - Secrets (`EODHD_API_KEY`, `MASSIVE_API_KEY`, `SEC_USER_AGENT`, later `OPENAI_API_KEY`) are
@@ -141,7 +146,7 @@ read it before designing the scorer, backtest or validation):
 
 ## What exists in the repo
 
-Tests: `python -m pytest -q` (300 tests, ~5 s, no network). `requirements.txt`: zstandard,
+Tests: `python -m pytest -q` (309 tests, ~5 s, no network). `requirements.txt`: zstandard,
 orjson, pytest, pyarrow, duckdb, numpy, boto3. `data/` and `.env` are gitignored.
 
 **Reddit side** (`scripts/download_reddit.py`, `reddit_filter.py`): commands `check`, `list`,
@@ -427,10 +432,19 @@ Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstrin
 | `calibrate --split dev` | P(5x), P(10x), P(permanent loss) and CAGR quartiles per score decile (`--exclude-late` before `calibrate` for the check) | no |
 | `script:comment_lag` | how long after a post its comments and edits arrive, per year | no |
 
-**Variables the user sets on the worker:** `LLM_MODEL` (e.g. `gpt-5-nano`; `fake` is a free
-deterministic backend for dry runs), `OPENAI_API_KEY` (or `OPENROUTER_API_KEY` +
-`LLM_BASE_URL=https://openrouter.ai/api/v1` for Jev as `typesafe/jev-1.13`), `LLM_SPEND_CAP_USD`
-(default 5). Prices are a table in `llm.py` from third-party trackers (Oct 2026); an unknown
+**Variables the user sets on the worker:** `LLM_MODEL` (`gpt-5-nano`, or `jev-1.13.0`; `fake`
+is a free deterministic backend for dry runs), `OPENAI_API_KEY`, `JEV_API_KEY` (set by the user
+2026-10-20; TypeSafe's own key, direct endpoint `api.typesafe.ai/v1/systemone`), `LLM_SPEND_CAP_USD`
+(default 5). I switch `LLM_MODEL` between jobs with `set-variables`; caches are per model.
+**Jev is not a chat model** (an earlier note here was wrong): it answers typed questions over a
+block of text, a `score` on 2-10 ordered rubric levels, a `noul` yes-probability or a `choice`,
+with no text output. `thesis_prompt.jev_questions()` restates the prompt's grades as rubrics
+(five levels each, x25 to 0-100; voices 0-9; stance five levels to -1..1), `decode_jev` maps
+the answers back into the same JSON the chat model returns, raw probabilities kept under `_jev`,
+so collect, scoring and the gold evaluation are backend-agnostic. No `why` column from Jev.
+Input $0.042/M, output free, so a full dev variant is about $1 vs $1.34 on nano. The route
+contract (`llm.JevClient`) follows public references of Sept 2026 and is mock-tested only; the
+first live call is the test. `OPENROUTER_API_KEY` reaches Jev too (alpha decisions endpoint). Prices are a table in `llm.py` from third-party trackers (Oct 2026); an unknown
 model needs `LLM_PRICE_IN`/`LLM_PRICE_OUT`. Every call's real cost goes to `data/llm/spend.jsonl`;
 a run is refused up front if its estimate would cross the cap and stops mid-run if real spend does.
 
