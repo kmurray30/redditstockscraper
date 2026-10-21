@@ -93,3 +93,42 @@ def test_keep_rows_carries_an_existing_set_over(tmp_path):
     assert len(picked) == 4 and len({r["post_id"] for r in picked}) == 4
     assert "gone" not in {r["post_id"] for r in picked} and "T99 gone" in logs[0]
     assert old[("p3", "3")]["rating"] == "8" and old[("p3", "3")]["scale"] == "10"   # 1-5 row converted
+
+
+def test_build_and_evaluate_end_to_end_with_the_fake_model(tmp_path, monkeypatch, capsys):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import test_thesis_funnel as ff
+    import thesis_funnel as tf
+    t = ff.T1 - 20 * ff.DAY
+    posts = [ff.post("a", t, 3000, score=50), ff.post("b", t + ff.DAY, 2500, score=5),
+             ff.post("c", t + 2 * ff.DAY, 2000, score=0)]
+    mentions = [ff.mention(p["id"], p["created_utc"], cik=str(i + 1)) for i, p in enumerate(posts)]
+    comments = [{"id": f"c{i}", "post_id": "a", "parent_id": "t3_a", "created_utc": t + 3600 * i,
+                 "author": f"u{i}", "body": "a substantive comment with a number: 42", "score": 9 - i,
+                 "edited_utc": 0} for i in range(3)]
+    ff.build(tmp_path, posts, mentions, [ff.feat(p) for p in posts], comments)
+    corpus = tl.open_corpus(type("A", (), {"parquet": tmp_path, "mentions": tmp_path / "mentions.parquet",
+                                           "post_features": tmp_path / "pf.parquet", "maturation": 0})())
+    threads, _ = tf.plan(corpus, [ff.M1], {ff.M1: {"1": {}, "2": {}, "3": {}}}, lookback=90, log=lambda *_: None)
+    pq.write_table(pa.Table.from_pylist(threads, schema=tf.THREAD_SCHEMA), tmp_path / "threads.parquet")
+    monkeypatch.setenv("LLM_MODEL", "fake")
+    monkeypatch.chdir(tmp_path)   # keep the (no-credentials) bucket push from touching the repo
+    common = ["--threads", str(tmp_path / "threads.parquet"), "--gold", str(tmp_path / "gold"),
+              "--llm-dir", str(tmp_path / "llm"), "--parquet", str(tmp_path),
+              "--mentions", str(tmp_path / "mentions.parquet"), "--post-features", str(tmp_path / "pf.parquet")]
+    assert gs.main([*common, "build", "--n", "3"]) == 0
+    rows = list(csv.DictReader((tmp_path / "gold" / "ratings.csv").open()))
+    assert len(rows) == 3 and (tmp_path / "gold" / "threads.md").read_text().count("## ") == 3
+    for r, rating in zip(rows, ("9", "4", "")):           # two rated, one left blank
+        r["rating"], r["scale"] = rating, "10" if rating else ""
+    with (tmp_path / "gold" / "ratings.csv").open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    capsys.readouterr()
+    assert gs.main([*common, "evaluate", "--ratings", str(tmp_path / "gold" / "ratings.csv")]) == 0
+    out = capsys.readouterr().out
+    assert "2 rated threads" in out and "Spearman rho" in out and "n_comments" in out and "voices" in out
+    ev = list(csv.DictReader((tmp_path / "gold" / "eval_fake.csv").open()))
+    assert len(ev) == 2 and {e["you"] for e in ev} == {"9.0", "4.0"} and all(e["Q"] for e in ev)

@@ -182,23 +182,46 @@ def cmd_evaluate(a) -> int:
     spend = llm.Spend(Path(a.llm_dir) / "spend.jsonl")
     results = llm.run(requests, cfg, cache, spend)
     params = Params()
-    table, xs, ys = [], [], []
+    table, xs, ys, feats = [], [], [], []
     for key, g in results.items():
         r, t = meta[key]
         q = thread_quality(g, params)
         user = ratings[(r["post_id"], r["cik"])]
+        c = g.get("comments") or {}
         table.append((user["rating"], q, g.get("stance"), g.get("is_thesis"), t.ticker,
-                      (g.get("why") or "")[:90], user.get("reason", "")[:60]))
+                      len(t.comments), (g.get("why") or "")[:90], user.get("reason", "")[:60]))
         xs.append(user["rating"])
         ys.append(q)
+        feats.append({"argument": g.get("argument_quality"), "specificity": g.get("specificity"),
+                      "evidence": g.get("evidence_quality"), "tone": g.get("tone_stability"),
+                      "falsifiability": g.get("falsifiability"), "balance": g.get("balance"),
+                      "hype_risk": g.get("hype_risk"), "confidence": g.get("confidence"),
+                      "support": c.get("independent_support"), "opposition": c.get("independent_opposition"),
+                      "objection": c.get("strongest_objection_severity"), "voices": c.get("n_independent_voices"),
+                      "n_comments": len(t.comments), "votes": t.votes or 0, "chars": len(t.body),
+                      "year": t.created_utc // 31_557_600 + 1970})
     table.sort(key=lambda row: (-row[0], -row[1]))
     print(f"model {cfg.model}, prompt {prompt_version()}, {len(table)} rated threads")
-    print("you  Q    stance thesis ticker  model's reason | your reason")
-    for u, q, s, th, tick, why, reason in table:
-        print(f"{u:3.0f} {q:5.1f} {s:+6.2f} {'y' if th else 'n':6s} {tick:7s} {why} | {reason}")
+    print("you  Q    stance thesis ticker  cmts  model's reason | your reason")
+    for u, q, s, th, tick, nc, why, reason in table:
+        print(f"{u:3.0f} {q:5.1f} {s:+6.2f} {'y' if th else 'n':6s} {tick:7s} {nc:4d}  {why} | {reason}")
     rho = spearman(xs, ys)
     pear = float(np.corrcoef(xs, ys)[0, 1]) if len(xs) > 2 else float("nan")
     print(f"\nSpearman rho {rho:.2f}, Pearson r {pear:.2f}; lifetime spend ${spend.total:.3f}")
+    print("\nrank correlation of each component with your rating (n = %d):" % len(xs))
+    for k in feats[0]:
+        v = [float(f[k] or 0) for f in feats]
+        print(f"  {k:14s} {spearman(xs, v):+.2f}   median {float(np.median(v)):g}")
+    out = Path(a.gold) / f"eval_{cfg.model}.csv"
+    with out.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["ticker", "you", "Q", "stance", "is_thesis", *feats[0]])
+        w.writeheader()
+        for i, key in enumerate(results):
+            r, t = meta[key]
+            w.writerow({"ticker": t.ticker, "you": xs[i], "Q": round(ys[i], 1),
+                        "stance": results[key].get("stance"), "is_thesis": results[key].get("is_thesis"),
+                        **feats[i]})
+    print(f"wrote {out}")
     return 0
 
 
