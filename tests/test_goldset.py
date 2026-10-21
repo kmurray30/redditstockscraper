@@ -132,3 +132,13 @@ def test_build_and_evaluate_end_to_end_with_the_fake_model(tmp_path, monkeypatch
     assert "2 rated threads" in out and "Spearman rho" in out and "n_comments" in out and "voices" in out
     ev = list(csv.DictReader((tmp_path / "gold" / "eval_fake.csv").open()))
     assert len(ev) == 2 and {e["you"] for e in ev} == {"9.0", "4.0"} and all(e["Q"] for e in ev)
+
+
+def test_coverage_and_min_comments(tmp_path):
+    rows = [dict(thread(i, 2013 + i % 3, "stocks", 1000, i), n_comments=i) for i in range(12)]
+    text = gs.coverage(rows[:3], rows)
+    assert "gold set 3 of 12" in text and ">= 10 comments: gold 0%, planned 17%" in text and "2013 1" in text
+    f = tmp_path / "r.csv"
+    f.write_text("n,post_id,cik,ticker,title,rating,reason,scale\n1,p0,0,T0,t,5,,10\n")
+    picked, _ = gs.keep_rows(rows, f, 4, 0, log=lambda *_: None, min_comments=9)
+    assert picked[0]["post_id"] == "p0" and all(r["n_comments"] >= 9 for r in picked[1:]) and len(picked) == 4

@@ -72,9 +72,11 @@ def sample(rows: list[dict], n: int, seed: int) -> list[dict]:
     return out
 
 
-def keep_rows(rows: list[dict], ratings_path: Path, n: int, seed: int, log=print) -> tuple[list[dict], dict]:
+def keep_rows(rows: list[dict], ratings_path: Path, n: int, seed: int, log=print,
+              min_comments: int = 0) -> tuple[list[dict], dict]:
     """The threads of an existing ratings.csv, in its order, topped up to ``n`` with fresh
-    samples when some are no longer in ``threads.parquet``. Returns (rows, old rows by key)."""
+    samples (with at least ``min_comments`` comments) when some are no longer in
+    ``threads.parquet`` or ``n`` is larger than the set. Returns (rows, old rows by key)."""
     with Path(ratings_path).open() as f:
         old = {(r["post_id"], r["cik"]): gold_page.to_ten(r) for r in csv.DictReader(f)}
     by_key = {(r["post_id"], r["cik"]): r for r in rows}
@@ -84,7 +86,8 @@ def keep_rows(rows: list[dict], ratings_path: Path, n: int, seed: int, log=print
         log(f"[gold] {len(missing)} rated threads are no longer in threads.parquet and are replaced: "
             + ", ".join(f"{old[k]['ticker']} {k[0]}" for k in missing))
     if len(picked) < n:
-        rest = [r for r in rows if (r["post_id"], r["cik"]) not in old]
+        rest = [r for r in rows if (r["post_id"], r["cik"]) not in old
+                and (r.get("n_comments") or 0) >= min_comments]
         picked += sample(rest, n - len(picked), seed)
     return picked, old
 
@@ -93,9 +96,9 @@ def cmd_build(a) -> int:
     rows = tl.load_threads(Path(a.threads), a.years)
     old: dict = {}
     if a.keep:
-        picked, old = keep_rows(rows, Path(a.keep), a.n, a.seed)
+        picked, old = keep_rows(rows, Path(a.keep), a.n, a.seed, min_comments=a.min_comments)
     else:
-        picked = sample(rows, a.n, a.seed)
+        picked = sample([r for r in rows if (r.get("n_comments") or 0) >= a.min_comments], a.n, a.seed)
     if not picked:
         print("no single-company threads in threads.parquet; run the funnel first")
         return 1
@@ -139,6 +142,29 @@ def cmd_build(a) -> int:
     return 0
 
 
+def coverage(gold: list[dict], planned: list[dict]) -> str:
+    """How the gold sample sits in the planned set: comments, votes and years."""
+    def q(rows, k):
+        v = np.asarray([r.get(k) or 0 for r in rows], dtype=float)
+        return np.percentile(v, [25, 50, 75]) if len(v) else np.zeros(3)
+    def share(rows, k, lo):
+        return sum(1 for r in rows if (r.get(k) or 0) >= lo) / max(len(rows), 1)
+    lines = [f"gold set {len(gold)} of {len(planned):,} planned threads"]
+    for k in ("n_comments", "votes", "chars"):
+        g, p = q(gold, k), q(planned, k)
+        lines.append(f"  {k:10s} gold quartiles {g[0]:.0f}/{g[1]:.0f}/{g[2]:.0f}   planned {p[0]:.0f}/{p[1]:.0f}/{p[2]:.0f}")
+    lines.append(f"  >= 10 comments: gold {share(gold, 'n_comments', 10):.0%}, planned {share(planned, 'n_comments', 10):.0%};"
+                 f"  >= 25: gold {share(gold, 'n_comments', 25):.0%}, planned {share(planned, 'n_comments', 25):.0%}")
+    yg = defaultdict(int); yp = defaultdict(int)
+    for r in gold:
+        yg[r["first_month"][:4]] += 1
+    for r in planned:
+        yp[r["first_month"][:4]] += 1
+    lines.append("  years: " + ", ".join(f"{y} {yg.get(y, 0)} ({yp[y] / max(len(planned), 1):.0%} of planned)"
+                                          for y in sorted(yp)))
+    return "\n".join(lines)
+
+
 def read_ratings(path: Path) -> dict[tuple, dict]:
     out = {}
     with Path(path).open() as f:
@@ -170,7 +196,9 @@ def cmd_evaluate(a) -> int:
     if not ratings:
         print("no ratings filled in yet")
         return 1
-    rows = [r for r in tl.load_threads(Path(a.threads)) if (r["post_id"], r["cik"]) in ratings]
+    allrows = tl.load_threads(Path(a.threads))
+    rows = [r for r in allrows if (r["post_id"], r["cik"]) in ratings]
+    print(coverage(rows, allrows))
     cfg = llm.Config.from_env()
     corpus = tl.open_corpus(a)
     requests, meta = [], {}
@@ -241,6 +269,8 @@ def main(argv=None) -> int:
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--years", nargs="+", type=int)
     b.add_argument("--dump", action="store_true", help="also print the files as base64 chunks")
+    b.add_argument("--min-comments", type=int, default=0,
+                   help="only sample threads with at least this many comments (kept rows are exempt)")
     b.add_argument("--keep", metavar="RATINGS_CSV",
                    help="rebuild the same threads as this ratings.csv (e.g. after a window change) "
                         "and carry its ratings over")
