@@ -183,6 +183,11 @@ def test_substantive_checks_switch_off_one_rule_per_run_starting_with_deleted_au
     assert {next(iter(r)) for r in rules} == {"drop_deleted", "subject", "max_companies", "substance"}
 
 
+def test_gold_dump_pulls_the_gold_folder_then_prints_the_ratings():
+    cmds = jobs.resolve("gold-dump")
+    assert cmds[0][-3:] == ["pull", "--only", "gold"] and cmds[1][1:3] == ["scripts/dump_file.py", "data/gold/ratings.csv"]
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]

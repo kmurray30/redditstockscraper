@@ -68,6 +68,10 @@ PRESETS: dict[str, list[list[str]]] = {
     "llm-collect": [_py("thesis_llm.py", "collect")],
     "check-blind": [_py("thesis_llm.py", "check-blind")],
     "gold-build": [_py("goldset.py", "build")],
+    # the user's ratings and written reasons, through the log (the rating page is not
+    # reachable from a session; the bucket copy is the truth)
+    "gold-dump": [_py("bucket_sync.py", "pull", "--only", "gold"),
+                  _py("dump_file.py", "data/gold/ratings.csv", "--chunk", "3000")],
     "gold-eval": [_py("goldset.py", "evaluate")],
     # both graders on the gold set in one deployment (Railway queues can take an hour each)
     "gold-eval-both": [_py("goldset.py", "evaluate"), _py("goldset.py", "evaluate", "--model", "jev-1.13.0")],
