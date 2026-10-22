@@ -328,22 +328,27 @@ def timeline(grades: list[dict], p: Params) -> list[dict]:
 # ------------------------------------------------------------------ calibration
 
 def calibrate(scores_by_decile: dict[int, dict]) -> str:
-    lines = ["decile  n     P(5x)  P(10x) P(loss) median CAGR  25% CAGR  75% CAGR"]
+    """One line per decile: the multibagger and ruin rates, how often a pick beat the market
+    over the horizon and by how much on average, the CAGR quartiles, and the picks' average
+    return over the 12 months *before* the cutoff (prior 12m), which says whether a decile
+    is catching companies that had already run."""
+    lines = ["decile  n     P(5x)  P(10x) P(loss) P(beat mkt) mean excess  median CAGR  25% CAGR  75% CAGR  prior 12m"]
     for d in sorted(scores_by_decile, reverse=True):
         r = scores_by_decile[d]
         if not r.get("n"):
             lines.append(f"{d:6d}  {0:5d}")
             continue
         c = r["cagr"]
+        mom = r.get("mom", float("nan"))
         lines.append(f"{d:6d}  {r['n']:5d}  {r['p5']:.3f}  {r['p10']:.3f}  {r['p_loss']:.3f}  "
-                     f"{c[50]:10.1%}  {c[25]:8.1%}  {c[75]:8.1%}")
+                     f"{r.get('p_beat', float('nan')):11.3f}  {r.get('mean_excess', float('nan')):11.1%}  "
+                     f"{c[50]:10.1%}  {c[25]:8.1%}  {c[75]:8.1%}  {mom:9.1%}")
     return "\n".join(lines)
 
 
-def decile_rates(cand: dict) -> dict[int, dict]:
-    """Within-month score deciles (10 = best) pooled over months, with the engine's rates."""
-    from backtest import event_rates
-    months, scores = np.asarray(cand["month"]), np.asarray(cand["score"], dtype=float)
+def deciles_within_month(months, scores) -> np.ndarray:
+    """Score decile of each candidate within its month, 1 = lowest, 10 = highest."""
+    months, scores = np.asarray(months), np.asarray(scores, dtype=float)
     dec = np.zeros(len(scores), dtype=int)
     for m in np.unique(months):
         idx = np.nonzero(months == m)[0]
@@ -351,7 +356,63 @@ def decile_rates(cand: dict) -> dict[int, dict]:
         ranks = np.empty(len(idx))
         ranks[order] = np.arange(len(idx))
         dec[idx] = np.minimum(10, (ranks / max(len(idx), 1) * 10).astype(int) + 1)
-    return {d: event_rates({k: v[dec == d] for k, v in cand.items()}) for d in range(1, 11)}
+    return dec
+
+
+def decile_rates(cand: dict) -> dict[int, dict]:
+    """Within-month score deciles (10 = best) pooled over months, with the engine's rates and
+    the decile's mean prior-12-month return when the candidates carry ``mom``."""
+    from backtest import event_rates
+    dec = deciles_within_month(cand["month"], cand["score"])
+    out = {}
+    for d in range(1, 11):
+        sub = {k: v[dec == d] for k, v in cand.items()}
+        out[d] = event_rates(sub)
+        if "mom" in sub and len(sub["mom"]):
+            mom = np.asarray(sub["mom"], dtype=float)
+            out[d]["mom"] = float(np.nanmean(mom)) if np.isfinite(mom).any() else float("nan")
+    return out
+
+
+def _day(ts: int | float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def sample_report(cand: dict, grades: list[dict], p: Params, titles: dict[str, str], *, years: int,
+                  n: int = 6, lookback_days: int = 90, deciles=(1, 10)) -> str:
+    """The most extreme company-months of the bottom and top deciles, with every graded thread
+    the scorer could see at that cutoff (written inside the lookback, before the cutoff), its
+    stance, quality and signed contribution, and the outcome measured from the cutoff forward.
+    A reader can check the point-in-time ordering line by line: post date < cutoff < entry."""
+    from backtest import month_utc
+    dec = deciles_within_month(cand["month"], cand["score"])
+    by_cik: dict[str, list[dict]] = {}
+    for g in grades:
+        by_cik.setdefault(g["cik"], []).append(g)
+    lines = []
+    for d in deciles:
+        idx = np.nonzero(dec == d)[0]
+        if not len(idx):
+            continue
+        order = idx[np.argsort(np.asarray(cand["score"], dtype=float)[idx])]
+        pick = order[:n] if d == 1 else order[::-1][:n]
+        lines.append(f"\n== decile {d} ({'lowest' if d == 1 else 'highest'} scores), {len(idx):,} company-months, "
+                     f"{n} most extreme, {years}y outcomes ==")
+        for i in pick:
+            cutoff = month_utc(str(cand["month"][i]))
+            mom = float(cand["mom"][i]) if "mom" in cand else float("nan")
+            lines.append(f"{cand['ticker'][i]} cohort {cand['month'][i]} (cutoff {_day(cutoff)}, entry = first open after it)"
+                         f"  score {float(cand['score'][i]):+.3f}  prior 12m {mom:+.0%}  status {cand['status'][i]}"
+                         f"  {years}y max x{float(cand['max_mult'][i]):.1f}  excess vs market {float(cand['excess'][i]):+.0%}"
+                         f"  permanent loss {bool(cand['perm_loss'][i])}")
+            vis = [g for g in by_cik.get(str(cand["cik"][i]), [])
+                   if cutoff - lookback_days * DAY <= g["matured_utc"] <= cutoff]
+            for g in sorted(vis, key=lambda g: contribution(g, p)):
+                lines.append(f"    {_day(g['matured_utc'])}  stance {float(g.get('stance') or 0):+.1f}"
+                             f"  Q {thread_quality(g, p):5.1f}  x {contribution(g, p):+.3f}"
+                             f"  votes {int(g.get('votes') or 0):4d}  {(titles.get(g['post_id']) or '')[:90]}")
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------ loading and CLI
@@ -392,6 +453,9 @@ def main(argv=None) -> int:
     c.add_argument("--parquet", default="data/corpus/parquet")
     c.add_argument("--mentions", default="data/features/mentions.parquet")
     c.add_argument("--post-features", default="data/features/post_features.parquet")
+    c.add_argument("--samples", type=int, default=0,
+                   help="print the N most extreme company-months of the bottom and top deciles "
+                        "with the threads behind them (a point-in-time sanity check)")
     a = p.parse_args(argv)
     params = Params.from_json(a.params)
     if a.exclude_late:
@@ -416,11 +480,20 @@ def main(argv=None) -> int:
     print(f"{len(grades):,} graded threads, {late:,} hold content written after their first cutoff; "
           f"exclude_late={params.exclude_late}")
     scores = bt.build_scores(scorer, months, corpus, ev.con, Path("data/experiments"), print, stamp)
+    titles: dict[str, str] = {}
+    if a.samples:
+        ids = sorted({g["post_id"] for g in grades})
+        corpus.con.register("wanted", pa.table({"id": pa.array(ids)}))
+        titles = {r[0]: r[1] for r in corpus.con.execute(
+            "select p.id, p.title from posts p join wanted w on w.id = p.id").fetchall()}
     for years in a.years:
         cand = ev.joined(scores, years, months)
         print(f"\n{a.split}, {years}y horizon, {len(cand['month']):,} candidate-months, "
               f"params {json.dumps(asdict(params))}")
         print(calibrate(decile_rates(cand)))
+        if a.samples:
+            print(sample_report(cand, list(scorer.grades.values()), params, titles, years=years,
+                                n=a.samples, lookback_days=scorer.lookback_days))
     return 0
 
 

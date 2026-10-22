@@ -203,3 +203,29 @@ def test_exclude_late_drops_threads_with_later_content():
     assert len(keep.grades) == 3 and set(drop.grades) == {("p1", "1")}
     assert drop.params()["exclude_late"] is True and drop.params()["pit"]["comments"] == "all"
     assert {r["post_id"] for r in ts.timeline([clean, late], ts.Params(exclude_late=True))} == {"p1"}
+
+
+def test_calibration_reports_beat_rate_and_prior_momentum_and_samples_are_point_in_time():
+    import numpy as np
+    n = 40
+    months = np.array(["2014-01-01"] * 20 + ["2014-02-01"] * 20)
+    scores = np.arange(n, dtype=float)
+    cand = {"month": months, "cik": np.array([str(i % 20) for i in range(n)]), "ticker": np.array([f"T{i % 20}" for i in range(n)]),
+            "score": scores, "status": np.array(["complete"] * n), "max_mult": np.where((scores % 20) >= 18, 6.0, 1.5),
+            "min_mult": np.full(n, 0.8), "perm_loss": np.zeros(n, dtype=bool), "cagr": np.full(n, 0.1),
+            "excess": np.where(scores % 2 == 0, 0.2, -0.1), "mom": np.where((scores % 20) >= 18, 0.9, 0.0),
+            "d2": np.full(n, np.nan), "d5": np.full(n, np.nan), "d10": np.full(n, np.nan),
+            "entry_day": np.zeros(n, dtype=int), "end_day": np.full(n, 2000)}
+    rates = ts.decile_rates(cand)
+    assert rates[10]["p5"] == 1.0 and rates[1]["p5"] == 0.0 and rates[10]["mom"] == pytest.approx(0.9)
+    assert rates[1]["p_beat"] == pytest.approx(0.5)
+    text = ts.calibrate(rates)
+    assert "P(beat mkt)" in text and "prior 12m" in text and "90.0%" in text
+    cutoff = 1388534400 + 31 * 86400   # 2014-02-01
+    g_in = grade(post_id="in", cik="19", matured=cutoff - 5 * 86400, stance=-1.0)
+    g_late = grade(post_id="late", cik="19", matured=cutoff + 86400, stance=1.0)
+    g_old = grade(post_id="old", cik="19", matured=cutoff - 200 * 86400, stance=1.0)
+    out = ts.sample_report(cand, [g_in, g_late, g_old], ts.Params(), {"in": "Short this now", "late": "Told you"},
+                           years=5, n=2)
+    assert "decile 10" in out and "decile 1" in out and "Short this now" in out
+    assert "Told you" not in out and "old" not in out.split("decile 10")[1]

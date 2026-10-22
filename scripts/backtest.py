@@ -173,6 +173,8 @@ def event_rates(a: dict) -> dict:
            "p_dd50": float((lo <= 0.5).mean()), "p_dd80": float((lo <= 0.2).mean()),
            "cagr": stats.quantiles(a["cagr"][final]), "excess": stats.quantiles(a["excess"][final]),
            "mean_excess": float(np.nanmean(a["excess"][final])) if np.isfinite(a["excess"][final]).any() else float("nan"),
+           # the share of holdings that beat the benchmark over the horizon (excess > 0)
+           "p_beat": float((a["excess"][final] > 0).mean()) if np.isfinite(a["excess"][final]).any() else float("nan"),
            "delisted_share": float((a["status"][final] == "delisted").mean()),
            "bad_data": int((a["status"] == "bad_data").sum())}
     return out
@@ -258,7 +260,8 @@ class Evaluator:
         extra = ", sic.division as division" if self.has_sic else ""
         join = "left join sic on sic.cik = s.cik" if self.has_sic else ""
         return self._fetch(f"""
-            select s.month, s.cik, s.score, u.size_q, u.ticker, u.code, {cols}{extra}
+            select s.month, s.cik, s.score, u.size_q, u.ticker, u.code,
+                   coalesce(cast(u.mom as double), 'nan'::double) as mom, {cols}{extra}
             from scores s join universe u on u.month = s.month and u.cik = s.cik
             join labels l on l.month = s.month and l.cik = s.cik and l.years = {int(years)}
             {join} where u.eligible order by s.month, s.cik""")
