@@ -530,6 +530,25 @@ point, not a result. **Decision: Jev is the grader.** The gold sample matches th
 on comments (median 8; 43% with >= 10, 19-20% with >= 25) and votes; gold posts are longer.
 The corpus, not the sample, is thin on discussion.
 
+**Pilot on Jev (2026-10-22; dev cohorts of 2014 and 2017 only, 24 months, 3,022 threads graded
+per variant in 80 s each, $0.92 lifetime spend, check-blind 0 of 3,022; top decile per month =
+538 company-months over 188 companies; `pilot` preset):**
+
+| Variant | 5y lift (95% CI) | size-matched | vs mentioned | 10x lift | loss lift (size-m) | perm p | 3y lift (size-m, perm p) | CAGR vs SPY | IR | DSR |
+|---|---|---|---|---|---|---|---|---|---|---|
+| identified | 2.68 [1.96, 3.47] | 3.37 | 1.65 | 5.28 | 0.92 (1.47) | 0.007 | 3.22 (5.22, 0.003) | 12.0% vs 12.3% | 0.06 | 0.31 |
+| blinded | 2.56 [2.02, 3.12] | 3.21 | 1.56 | 4.94 | 0.95 (1.51) | 0.007 | 2.58 (4.15, 0.007) | 12.1% vs 12.3% | 0.07 | 0.32 |
+
+Read: (1) the blinded run is within noise of the identified one, so hindsight from seeing the
+company name is not what makes the ranking work; (2) the ranking adds about 60% over a random
+pick among mentioned companies in those months (vs mentioned 1.65 / 1.56) and its permanent-loss
+rate is below the universe's (0.92) where mention count's is above (1.05); (3) the equal-weight
+portfolio only matches SPY and the median pick is 42% behind the market at 5y: the lift is a
+few multibaggers, which is the asymmetric profile the project wants, not a portfolio; (4) these
+two years are not the ladder's 2012-2018, so compare with `pilot-checks` (every baseline on the
+same years, and `exclude_late` both variants), not with the ladder table; (5) Jev called 799
+threads theses when it saw the name and 941 when blinded. 1y rows are empty (no 5x in a year).
+
 **Census of dev (2026-10-18, funnel v3):** 9,429 unique threads over 84 cohorts (662 in 2012
 rising to 1,929 in 2018), 12.1M estimated input tokens; at GPT-5 nano $1.28 per variant, $2.57
 for identified + blinded. Rejects per cohort row: passing_mention 85k, not_in_universe 64k,

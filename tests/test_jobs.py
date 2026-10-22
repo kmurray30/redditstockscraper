@@ -133,6 +133,13 @@ def test_pilot_chain_covers_both_variants_and_restricts_the_years():
     assert cmds[-1][-1] == "check-blind"
 
 
+def test_pilot_checks_run_the_ladder_and_the_late_exclusion_on_the_same_years():
+    cmds = jobs.resolve("pilot-checks")
+    assert cmds[0][1:3] == ["scripts/backtest.py", "ladder"] and cmds[0][-3:] == ["--years", "2014", "2017"]
+    assert all('THESIS_PARAMS={"exclude_late": true}' in c for c in cmds[1:])
+    assert {c[1] for c in cmds[1:]} == {"THESIS_VARIANT=identified", "THESIS_VARIANT=blinded"}
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]
