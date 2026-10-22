@@ -741,6 +741,32 @@ hindsight) and which of the four rules carries the gain: `substantive-checks` pr
 rule off per run. (5) The validate split is unseen by all of this; the ledger holds every
 row.
 
+**Rule decomposition (2026-10-22, `substantive-checks` preset; full dev, 5y, top decile per
+month, one rule off per row; trials 50-53):**
+
+| `substantive` with | picks (names) | 5y lift (95% CI) | size-m | vs mentioned | 10x lift | loss (size-m) | median pick vs market | CAGR vs SPY 16.1% | IR | DSR |
+|---|---|---|---|---|---|---|---|---|---|---|
+| all four rules | 1,373 (230) | 4.38 [4.00, 4.80] | 5.81 | 3.49 | 9.30 | 0.65 (1.22) | -6.5% | 26.7% | 0.67 | 0.65 |
+| **no deleted-author rule** (no look-ahead of any kind) | 1,462 (232) | **4.29 [3.90, 4.67]** | 5.66 | 3.55 | 9.00 | **0.64 (1.19)** | **-1.5%** | 26.3% | 0.69 | 0.42 |
+| no subject rule | 1,945 (259) | 3.62 [3.30, 3.93] | 4.73 | 3.16 | 6.73 | 0.56 (0.99) | -5.8% | 24.3% | 0.60 | 0.28 |
+| no two-company cap (10 as the other baselines) | 2,032 (277) | 3.86 [3.43, 4.33] | 5.13 | 3.20 | 7.42 | 0.63 (1.19) | -7.6% | 25.4% | 0.75 | 0.48 |
+| no substance rule (any length) | 3,342 (431) | 3.06 [2.76, 3.39] | 3.99 | 2.40 | 5.34 | **1.30 (2.30)** | -18.2% | 22.2% | 0.50 | 0.17 |
+
+Read: (1) **The deleted-author rule carries nothing** (4.38 -> 4.29, loss 0.65 -> 0.64, the
+median pick even improves to 1.5% behind the market), so the result does not rest on the one
+rule with hindsight in it. (2) **The substance rule is the ruin filter**: without it the loss
+lift goes from 0.65 to 1.30 (size-matched 2.30, worse than mention count's 1.84) and the lift
+falls to 3.06. Thin posts about a company are where the pump-and-dump and the dead companies
+are; posts with real length or a primary source are not. (3) The subject rule and the
+two-company cap each add some upside (3.62 and 3.86 without them) and are both point-in-time.
+(4) The DSR falls across the rows only because the trial count keeps growing (50-53); the raw
+excess Sharpes are 1.09-1.21. (5) **Finalist (my recommendation, awaiting the user):**
+`substantive` with `{"drop_deleted": false}`: a company's count of posts in the last 90 days,
+on the 24h-window view, whose subject it is (cashtag, title, or named twice), naming at most
+two companies, with >= 400 characters of text (self post) or >= 200 characters or a primary
+source (link post). Nothing in it looks past the cutoff. The validate split (2019-2020) is
+the next and only remaining look; the user chooses which finalists see it.
+
 **Census of dev (2026-10-18, funnel v3):** 9,429 unique threads over 84 cohorts (662 in 2012
 rising to 1,929 in 2018), 12.1M estimated input tokens; at GPT-5 nano $1.28 per variant, $2.57
 for identified + blinded. Rejects per cohort row: passing_mention 85k, not_in_universe 64k,
@@ -790,10 +816,13 @@ same for this workload; the gold set decides.
 2. **Decisions for the user:** add wallstreetbets (last, postponed); backfill 2025+ via
    `arctic` (the corpus ends 2024-12, so cohorts end there too); the sealed holdout (2021-2022)
    is untouched: decide who consults it and when.
-3. **Run the thesis scorer** (built; see "Thesis scorer"): `census` -> user rates the gold set ->
-   `gold-eval` -> pilot -> full dev -> ablations -> validate once. ~~Record the ladder rows,
-   calibration table, blinded-vs-identified gap and spend here~~ done through full dev
-   (2026-10-22): the scorer trails mention count on the full dev; the ablations decide whether
-   the aggregation (direction, votes, gates) or the grades are the reason.
+3. **Run the thesis scorer** (built; see "Thesis scorer"): ~~`census` -> user rates the gold set ->
+   `gold-eval` -> pilot -> full dev -> ablations~~ done 2026-10-22 -> validate once. Outcome:
+   the thesis scorer trails mention count on the full dev; without direction it reaches 3.48;
+   the plain count of substantive single-subject posts (`substantive` baseline, 24h view, no
+   votes, no model) reaches 4.29-4.38 with loss 0.64 and is the recommended finalist (see "Rule
+   decomposition"). **Waiting on the user: which finalist(s) get the validate look**
+   (`backtest.py run --baseline substantive --split validate --rules '{"drop_deleted": false}'`,
+   and optionally the graded no-direction thesis scorer as the one LLM row).
 4. Phase 2 (later): fundamental-resilience gate (SEC XBRL), forward data from non-Reddit
    sources, Postgres/pgvector, alerts, dashboard.
