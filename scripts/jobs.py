@@ -164,6 +164,21 @@ PRESETS: dict[str, list[list[str]]] = {
                 _py("thesis_llm.py", "check-blind"),
                 _py("goldset.py", "evaluate", "--tune"),
                 _py("thread_export.py", "--push")],
+    # the gated formula on the full dev after the re-grade: signed, direction none, the
+    # blinded direction-none check, the additive formula on the merged threads for the
+    # like-for-like, both calibration tables, and the browser export. No spend.
+    "gated-dev": [*[["env", f"THESIS_VARIANT={variant}", f"THESIS_PARAMS={params}",
+                     *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")]
+                    for variant, params in (("identified", '{"quality": "gated"}'),
+                                            ("identified", '{"quality": "gated", "direction": "none"}'),
+                                            ("blinded", '{"quality": "gated", "direction": "none"}'),
+                                            ("identified", '{"direction": "none"}'),
+                                            ("identified", '{}'))],
+                  ["env", "THESIS_VARIANT=identified", 'THESIS_PARAMS={"quality": "gated"}',
+                   *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
+                  ["env", "THESIS_VARIANT=identified", 'THESIS_PARAMS={"quality": "gated", "direction": "none"}',
+                   *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
+                  _py("thread_export.py", "--push")],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),

@@ -446,6 +446,8 @@ Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstrin
 | `finalist-checks` | the `substantive` baseline (LLM-free, vote-free, 24h control), the ablation winner without votes / late content / both, the graded no-direction run blinded / without late content / without votes, and both calibration tables | no |
 | `substantive-checks` | the `substantive` baseline with one rule off per run (`--rules` JSON: `drop_deleted`, `subject`, `max_companies`, `substance`) | no |
 | `gold-dump` | `pull-data --only gold`, then the ratings CSV (with the user's written reasons) through the log as base64 chunks (`dump_file.reassemble`) | no |
+| `regrade` | census (with the cross-post merge), `llm-run` both variants (only changed texts are new calls), `llm-collect` both, `check-blind`, `gold-eval --tune`, `export-threads`; one deployment | cents |
+| `gated-dev` | the gated formula on dev: identified signed, identified direction none, blinded direction none, plus the additive formula (direction none and signed) on the merged threads, both calibration tables, `export-threads` | no |
 | `export-threads` (`thread_export.py --push`) | every graded thread with the exact text the model saw (from the LLM cache), its grades, Q and the company's 5y outcome, to `data/ui/threads.json.zst` on the volume and in the bucket; feeds `thread-ui` | no |
 | `script:comment_lag` | how long after a post its comments and edits arrive, per year | no |
 
@@ -834,6 +836,31 @@ retuned Q put 0.30 on discussion additively; the user's model is a gate (corrobo
 multiplies OP substance), plus dedup. Proposed, not built, awaiting the user: a
 `corroboration_gate` form of Q tuned on the gold set, and an event dedup (same author and
 title within 7 days = one thread, the most-discussed copy kept).
+
+**Cross-post merge and the gated formula (2026-10-22, user decisions: "cross posts are fine,
+just merge the comments as though it's one post"; "do so with the new rules in mind").**
+`thesis_funnel.merge_events`: the same author's same title (normalised) about the same
+company within 7 days is one thread; the earliest copy is the primary (its post_id, text,
+subreddit), `copies` and `subreddits` list every copy, votes and comments are summed, and
+the prompt shows every copy's comments under the primary with "(also posted in r/...)" in
+the header (`thesis_prompt.merge_comments`, `Thread.also_in`). `thesis_scorer.Params.quality
+= "gated"` is the user's rule as a formula (`gated_quality`): OP substance (.45 argument +
+.25 evidence + .10 tone + .10 falsifiability + .10 balance, minus hype) counts in full only
+once independent discussion tests it, `Q = 100 (op_weight * OP * (floor + (1 - floor) * D)
++ (1 - op_weight) * D)`, D = mean (or max) of support, opposition and strongest objection.
+`goldset.py evaluate --tune` prints the grid against the ratings. **Regrade (`regrade`
+preset, 2026-10-22):** census 9,586 threads (from 9,681; 117 merged threads, 126 copies
+folded in); identified re-graded 1,087 threads (the merged ones plus about 950 whose
+company-name string in the header had changed since the 10-18 census, so their text hash
+changed; the blinded text has no name, so only 133 there), $0.185, lifetime $3.076;
+check-blind 0 of 9,586; theses 2,321 identified / 2,701 blinded. **Gold tuning on the 27
+rated threads that survive the merge (two EROC copies became one, etc.):** additive
+(current) rho 0.75; gated best 0.72 at floor 0.7, op_weight 0.7, mean (the defaults now);
+the gated grid runs 0.52-0.72, mean aggregation beats max throughout. So the user's stated
+rule and the gold-tuned sum agree with the ratings about equally on 27 points; both are
+reported on dev (`gated-dev` preset), the choice between them is not a backtest decision.
+At the defaults a perfect write-up with no discussion scores 49 ("a 5 at best"), a thin
+post under a great discussion 30. The browser export carries `q` and `q_gated`.
 
 **Budget and order** ($5 total, user decision): ~~census -> gold set -> gold-eval -> pick~~ done
 2026-10-22 (Jev; $0.011 spent) -> `pilot` (one job; the cache makes the full run pay only for

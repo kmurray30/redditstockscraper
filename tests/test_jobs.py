@@ -195,6 +195,16 @@ def test_regrade_chain_runs_census_grading_collect_blind_check_gold_tuning_and_e
     assert "holdout" not in " ".join(" ".join(c) for c in cmds)
 
 
+def test_gated_dev_runs_the_gated_formula_both_ways_plus_controls_calibrations_and_the_export():
+    import json
+    cmds = jobs.resolve("gated-dev")
+    params = [json.loads(c[2].split("=", 1)[1]) for c in cmds[:5]]
+    assert params[0] == {"quality": "gated"} and params[1]["direction"] == "none" and cmds[2][1] == "THESIS_VARIANT=blinded"
+    assert params[3] == {"direction": "none"} and params[4] == {} and all(c[-2:] == ["--split", "dev"] for c in cmds[:7])
+    assert all(c[-3:-2] == ["calibrate"] for c in cmds[5:7]) and cmds[-1][-1] == "--push"
+    assert "holdout" not in " ".join(" ".join(c) for c in cmds)
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]

@@ -109,8 +109,8 @@ class Params:
     direction: str = "signed"           # signed | abs | none
     flat_quality: bool = False          # Q = 100, confidence = 1: the funnel-only control
     quality: str = "additive"           # additive (the gold-tuned sum) | gated (the user's rules)
-    gate_floor: float = 0.5             # gated: share of OP substance that counts with no discussion
-    op_weight: float = 0.6              # gated: weight of the gated OP term; the rest is the discussion's own value
+    gate_floor: float = 0.7             # gated: share of OP substance that counts with no discussion (gold-tuned 2026-10-22)
+    op_weight: float = 0.7              # gated: weight of the gated OP term; the rest is the discussion's own value (gold-tuned)
     discussion_agg: str = "mean"        # gated: mean | max of support, opposition, strongest objection
     weights: dict = field(default_factory=lambda: dict(WEIGHTS))
     half_life: dict = field(default_factory=lambda: dict(HALF_LIFE_DAYS))
@@ -182,8 +182,11 @@ def gated_quality(g: dict, p: Params) -> float:
     in full once independent commenters have tested it; the discussion itself is worth
     something even under a thin post.  Q = 100 * (op_weight * OP * (floor + (1 - floor) * D)
     + (1 - op_weight) * D), OP and D in 0..1.  With no discussion a perfect write-up scores
-    100 * op_weight * floor (30 at the defaults, "a 5 at best"); a great top comment under a
-    thin post scores about 100 * (1 - op_weight) (40 to 50)."""
+    100 * op_weight * floor (49 at the gold-tuned defaults of 0.7 and 0.7: "a 5 at best"); a
+    great top comment under a thin post scores 100 * (1 - op_weight) (30). On the 27 gold
+    threads after the cross-post merge the additive formula agrees with the ratings at rho
+    0.75 and this one at 0.72 (its best setting); the grid is flat, so neither is "the"
+    formula and both are reported."""
     op = op_substance(g, p) / 100
     d = (discussion_value(g, p.discussion_agg) if p.use_comments else 0.0) / 100
     q = 100 * (p.op_weight * op * (p.gate_floor + (1 - p.gate_floor) * d) + (1 - p.op_weight) * d)
