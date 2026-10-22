@@ -635,6 +635,8 @@ def main(argv=None) -> int:
         if name == "run":
             g = s.add_mutually_exclusive_group(required=True)
             g.add_argument("--baseline", choices=Baseline.KINDS)
+            s.add_argument("--rules", help="JSON overrides of the substantive baseline's rules, "
+                                           "e.g. '{\"drop_deleted\": false}'")
             g.add_argument("--scorer", metavar="MODULE:FACTORY",
                            help="a custom scorer, e.g. my_scorer.py:make_scorer")
     a = p.parse_args(argv)
@@ -646,8 +648,9 @@ def main(argv=None) -> int:
         scorers = [load_scorer(a.scorer)]
     else:
         kinds = [a.baseline] if a.cmd == "run" else list(Baseline.KINDS)
+        rules = json.loads(a.rules) if getattr(a, "rules", None) else None
         scorers = [Baseline(k, lookback_days=a.lookback, maturation_hours=a.maturation,
-                            min_posts=a.min_posts, seed=a.seed) for k in kinds]
+                            min_posts=a.min_posts, seed=a.seed, rules=rules) for k in kinds]
     for sc in scorers:
         corpus = make_corpus(sc, Path(a.parquet), feats / "mentions.parquet", feats / "post_features.parquet")
         rep = run(sc, ev, corpus, a.split, ledger=led, top_frac=a.top, seed=a.seed,

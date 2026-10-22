@@ -171,20 +171,34 @@ SUBSTANTIVE_LINK_CHARS = 200
 BAD_AUTHORS = ("[deleted]", "AutoModerator", "None", "")
 
 
-def substantive_counts(cohort: Cohort, methods=RELIABLE_METHODS) -> dict[str, int]:
+SUBSTANTIVE_RULES = {"subject": True, "max_companies": SUBSTANTIVE_MAX_COMPANIES,
+                     "drop_deleted": True, "substance": True}
+
+
+def substantive_counts(cohort: Cohort, methods=RELIABLE_METHODS, rules: dict | None = None) -> dict[str, int]:
     """Distinct substantive, single-subject posts per eligible company in the visible window:
-    the LLM-free, vote-free, 24h-window control for the thesis scorer's funnel."""
+    the LLM-free, vote-free, 24h-window control for the thesis scorer's funnel. ``rules``
+    switches each of the four rules off for the decomposition (see SUBSTANTIVE_RULES);
+    ``drop_deleted`` is the one with a look-ahead flavour (an author deleted *later* is
+    missing from the dump), so it must be ablated before any number is believed."""
+    r = {**SUBSTANTIVE_RULES, **(rules or {})}
     marks = ",".join("?" * len(methods))
     bad = ",".join("?" * len(BAD_AUTHORS))
+    where = [f"method in ({marks})"]
+    args: list = list(methods)
+    if r["subject"]:
+        where.append("(method = 'cashtag' or in_title or n >= 2)")
+    where.append(f"n_companies <= {int(r['max_companies'])}")
+    if r["drop_deleted"]:
+        where.append(f"coalesce(author, '') not in ({bad})")
+        args += list(BAD_AUTHORS)
+    if r["substance"]:
+        where.append(f"((is_self and f_chars >= {SUBSTANTIVE_SELF_CHARS}) or "
+                     f"(not is_self and (f_chars >= {SUBSTANTIVE_LINK_CHARS} or f_primary_links > 0)))")
     rows = cohort.view.query(f"""
         select cik, count(distinct post_id) n from post_mentions
-        where method in ({marks})
-          and (method = 'cashtag' or in_title or n >= 2)
-          and n_companies <= {SUBSTANTIVE_MAX_COMPANIES}
-          and coalesce(author, '') not in ({bad})
-          and ((is_self and f_chars >= {SUBSTANTIVE_SELF_CHARS})
-               or (not is_self and (f_chars >= {SUBSTANTIVE_LINK_CHARS} or f_primary_links > 0)))
-        group by cik""", list(methods) + list(BAD_AUTHORS))
+        where {" and ".join(where)}
+        group by cik""", args)
     return {r["cik"]: int(r["n"]) for r in rows if r["cik"] in cohort.universe}
 
 
@@ -211,23 +225,26 @@ class Baseline:
 
     def __init__(self, kind: str, *, lookback_days: int = 90, maturation_hours: int = 24,
                  min_posts: int = 1, seed: int = 0, methods=RELIABLE_METHODS,
-                 max_companies: int = MAX_COMPANIES_PER_POST):
+                 max_companies: int = MAX_COMPANIES_PER_POST, rules: dict | None = None):
         if kind not in self.KINDS:
             raise ValueError(kind)
+        if rules and set(rules) - set(SUBSTANTIVE_RULES):
+            raise ValueError(f"unknown substantive rules {sorted(set(rules) - set(SUBSTANTIVE_RULES))}")
         self.kind, self.lookback_days, self.maturation_hours = kind, lookback_days, maturation_hours
         self.min_posts, self.seed, self.methods = min_posts, seed, tuple(methods)
         self.max_companies = max_companies
+        self.rules = {**SUBSTANTIVE_RULES, **(rules or {})} if kind == "substantive" else {}
         self.name, self.version = f"baseline:{kind}", "1"
 
     def params(self) -> dict:
         return {"min_posts": self.min_posts, "seed": self.seed, "methods": list(self.methods),
-                "max_companies": self.max_companies}
+                "max_companies": self.max_companies, **({"rules": self.rules} if self.rules else {})}
 
     def score(self, cohort: Cohort) -> dict[str, dict[str, float]]:
         if self.kind == "momentum":
             return {c: {"score": u["mom"]} for c, u in cohort.universe.items() if u.get("mom") is not None}
         if self.kind == "substantive":
-            counts = substantive_counts(cohort, self.methods)
+            counts = substantive_counts(cohort, self.methods, self.rules)
             return {c: {"score": float(n), "n_posts": n} for c, n in counts.items() if n >= self.min_posts}
         feats = cohort_features(cohort, self.methods, self.max_companies)
         feats = {c: f for c, f in feats.items() if f["n_posts"] >= self.min_posts}

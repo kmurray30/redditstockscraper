@@ -140,6 +140,12 @@ PRESETS: dict[str, list[list[str]]] = {
                          *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
                         ["env", "THESIS_VARIANT=identified", 'THESIS_PARAMS={"flat_quality": true, "direction": "none"}',
                          *_py("thesis_scorer.py", "calibrate", "--split", "dev")]],
+    # the substantive baseline with one rule switched off per run: drop_deleted first (the
+    # one rule with a look-ahead flavour: an author deleted later is missing from the dump),
+    # then the subject rule, the two-company cap and the substance rule. No spend.
+    "substantive-checks": [_py("backtest.py", "run", "--baseline", "substantive", "--split", "dev", "--rules", rules)
+                           for rules in ('{"drop_deleted": false}', '{"subject": false}',
+                                         '{"max_companies": 10}', '{"substance": false}')],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),

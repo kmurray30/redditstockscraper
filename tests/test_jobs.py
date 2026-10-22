@@ -174,6 +174,15 @@ def test_finalist_checks_cover_the_control_the_leak_checks_and_the_calibrations(
     assert "holdout" not in " ".join(" ".join(c) for c in cmds)
 
 
+def test_substantive_checks_switch_off_one_rule_per_run_starting_with_deleted_authors():
+    import json
+    cmds = jobs.resolve("substantive-checks")
+    assert len(cmds) == 4 and all(c[-6:-1] == ["--baseline", "substantive", "--split", "dev", "--rules"] for c in cmds)
+    rules = [json.loads(c[-1]) for c in cmds]
+    assert rules[0] == {"drop_deleted": False} and all(len(r) == 1 for r in rules)
+    assert {next(iter(r)) for r in rules} == {"drop_deleted", "subject", "max_companies", "substance"}
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]

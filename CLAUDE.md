@@ -444,6 +444,7 @@ Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstrin
 | `full-dev` | `llm-run` both variants on every planned thread, `llm-collect` both, `thesis-run` both plain and with `exclude_late`, `calibrate --split dev`, `check-blind` last; one deployment | yes, about $2 on Jev |
 | `ablations` | 14 `thesis-run`s on the identified grades, one parameter changed at a time (gamma 0 / 1, beta 1, use_author, min_evidence 50, no comments, thesis_gate hard / soft, net corroboration, specificity, direction abs / none, flat_quality, flat_quality + direction none); every row in the ledger | no |
 | `finalist-checks` | the `substantive` baseline (LLM-free, vote-free, 24h control), the ablation winner without votes / late content / both, the graded no-direction run blinded / without late content / without votes, and both calibration tables | no |
+| `substantive-checks` | the `substantive` baseline with one rule off per run (`--rules` JSON: `drop_deleted`, `subject`, `max_companies`, `substance`) | no |
 | `script:comment_lag` | how long after a post its comments and edits arrive, per year | no |
 
 **Variables the user sets on the worker:** `LLM_MODEL` (`gpt-5-nano`, or `jev-1.13.0`; `fake`
@@ -686,6 +687,59 @@ blinded, without late content and without votes; and the calibration tables of b
 `substantive` baseline matches the winner, the result is "count substantive single-company
 posts", and the LLM layer is a cost without a benefit on this metric. (4) The rows were
 chosen after the calibration table; validate stays unseen until one finalist is named.
+
+**Finalist checks (2026-10-22, `finalist-checks` preset; full dev, 5y, top decile per month;
+trials 43-49):**
+
+| Scorer | 5y lift (95% CI) | size-m | vs mentioned | 10x lift | loss (size-m) | perm p | median pick vs market | CAGR vs SPY 16.1% | IR | DSR |
+|---|---|---|---|---|---|---|---|---|---|---|
+| mention count (ladder) | 2.25 | 2.92 | 1.98 | | 1.05 (1.84) | 0.003 | | 18.3% | 0.28 | 0.82 |
+| **`substantive` baseline** (24h view, no votes, no comments, no model; 1,373 picks, 230 names) | **4.38 [4.00, 4.80]** | **5.81** | **3.49** | **9.30** | **0.65 (1.22)** | 0.003 | **-6.5%** | **26.7%** | 0.67 | 0.65 |
+| thesis count (flat_quality + direction none) | 3.94 [3.47, 4.45] | 5.26 | 3.04 | 7.16 | 0.70 (1.33) | 0.003 | -8.8% | 25.4% | 0.75 | 0.79 |
+| thesis count, late content excluded | 3.94 [3.48, 4.41] | 5.24 | 3.03 | 7.12 | 0.64 (1.21) | 0.003 | -7.4% | 24.5% | 0.89 | 0.79 |
+| thesis count, no votes (gamma 0) | 3.65 [3.21, 4.14] | 4.87 | 2.75 | 6.47 | 0.72 (1.36) | 0.003 | -12.9% | 25.3% | 0.70 | 0.56 |
+| thesis count, no votes, late excluded | 3.57 [3.05, 4.09] | 4.74 | 2.65 | 6.38 | 0.65 (1.21) | 0.003 | -12.5% | 24.4% | 0.83 | 0.68 |
+| thesis graded, direction none (identified) | 3.48 [3.07, 3.99] | 4.53 | 2.59 | 6.92 | 0.76 (1.35) | 0.003 | -20.3% | 23.4% | 0.59 | 0.64 |
+| thesis graded, direction none, blinded | 3.44 [2.99, 3.98] | 4.49 | 2.54 | 6.81 | 0.80 (1.42) | 0.003 | -20.3% | 22.7% | 0.58 | 0.30 |
+| thesis graded, direction none, late excluded | 3.56 [3.14, 4.03] | 4.61 | 2.64 | 6.90 | 0.72 (1.26) | 0.003 | -16.6% | 23.9% | 0.63 | 0.36 |
+| thesis graded, direction none, no votes | 3.35 [2.87, 3.93] | 4.33 | 2.45 | 6.44 | 0.77 (1.35) | 0.003 | -21.4% | 23.3% | 0.52 | 0.16 |
+
+Calibration without direction (dev, 5y, decile 10 = highest; the U shape is gone and the
+signal sits in the top two deciles, the rest are at the universe rate):
+
+| Decile | graded, direction none: P(5x) / P(10x) / P(loss) / median CAGR | thesis count (flat + none): P(5x) / P(10x) / P(loss) / median CAGR |
+|---|---|---|
+| 10 | 0.167 / 0.072 / 0.048 / 9.6% | 0.193 / 0.077 / 0.044 / 11.1% |
+| 9 | 0.108 / 0.040 / 0.062 / 8.5% | 0.094 / 0.038 / 0.057 / 7.9% |
+| 8 | 0.062 / 0.022 / 0.066 / 7.0% | 0.066 / 0.019 / 0.059 / 7.0% |
+| 7 | 0.075 / 0.021 / 0.083 / 6.1% | 0.061 / 0.017 / 0.078 / 6.3% |
+| 6 | 0.059 / 0.016 / 0.081 / 6.5% | 0.057 / 0.018 / 0.085 / 5.8% |
+| 5 | 0.054 / 0.016 / 0.073 / 5.2% | 0.051 / 0.015 / 0.081 / 5.6% |
+| 4 | 0.054 / 0.011 / 0.077 / 5.2% | 0.053 / 0.013 / 0.087 / 5.2% |
+| 3 | 0.061 / 0.014 / 0.083 / 5.5% | 0.054 / 0.013 / 0.075 / 5.8% |
+| 2 | 0.051 / 0.014 / 0.094 / 5.7% | 0.058 / 0.015 / 0.077 / 5.3% |
+| 1 | 0.054 / 0.016 / 0.096 / 5.5% | 0.061 / 0.017 / 0.119 / 5.2% |
+
+(3y, top decile: graded 0.058 / 0.022 / 0.032 / 12.5%; count 0.063 / 0.020 / 0.026 / 15.0%.)
+
+Read: (1) **The clean control wins.** The `substantive` baseline, which sees nothing the
+24h-window baselines do not see (no votes, no comments, no late content, no model), beats
+every thesis configuration on every number: lift 4.38, size-matched 5.81, 10x lift 9.30,
+loss 0.65 (1.22), CAGR 26.7% against SPY's 16.1%, median pick 6.5% behind the market.
+So the signal is **how many substantive, single-subject posts by real authors a company
+drew in the last 90 days**, and the LLM grades, the votes and the no-lock view each add
+nothing or subtract (votes: 3.94 -> 3.65 without them; grades: 3.94 -> 3.48 with them;
+blinding and late-content exclusion move the graded rows within noise, so hindsight is
+not in them either). (2) Direction was the bug in the thesis design, not the grader: Jev's
+grades agree with the user's ratings (rho 0.72), and a well-rated thread is not a better
+multibagger signal than a plainly substantive one. (3) The deflated Sharpe of the
+`substantive` row (0.65 at 43 trials) is below mention count's 0.82 only because the
+trial count has grown from 10 to 43; its raw excess Sharpe is 1.18 against 0.90. (4) Still
+to rule out before the finalist is named: the `drop_deleted` rule (an author deleted
+*later* is missing from the dump, so pump accounts banned afterwards are excluded with
+hindsight) and which of the four rules carries the gain: `substantive-checks` preset, one
+rule off per run. (5) The validate split is unseen by all of this; the ledger holds every
+row.
 
 **Census of dev (2026-10-18, funnel v3):** 9,429 unique threads over 84 cohorts (662 in 2012
 rising to 1,929 in 2018), 12.1M estimated input tokens; at GPT-5 nano $1.28 per variant, $2.57

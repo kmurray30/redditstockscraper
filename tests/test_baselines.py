@@ -148,3 +148,22 @@ def test_substantive_counts_single_subject_posts_with_substance_only():
     assert scores(bl.Baseline("substantive"), c) == {"A": 3.0, "B": 1.0}
     assert set(scores(bl.Baseline("substantive", min_posts=2), c)) == {"A"}
     assert bl.Baseline("substantive").maturation_hours == 24
+
+
+def test_substantive_rules_switch_off_one_at_a_time_and_go_to_the_ledger():
+    rows = [post_row("p1", "A", f_chars=500),
+            post_row("p2", "A", f_chars=100),                                   # thin
+            post_row("p3", "A", f_chars=500, in_title=False, method="bare_clean", n=1),   # passing
+            post_row("p5", "A", f_chars=500, n_companies=3),                    # three companies
+            post_row("p6", "A", f_chars=500, author="[deleted]")]
+    c = cohort(rows, universe={"A": {"mom": 0.0}})
+    assert bl.substantive_counts(c) == {"A": 1}
+    assert bl.substantive_counts(c, rules={"substance": False}) == {"A": 2}
+    assert bl.substantive_counts(c, rules={"subject": False}) == {"A": 2}
+    assert bl.substantive_counts(c, rules={"max_companies": 10}) == {"A": 2}
+    assert bl.substantive_counts(c, rules={"drop_deleted": False}) == {"A": 2}
+    b = bl.Baseline("substantive", rules={"drop_deleted": False})
+    assert b.params()["rules"] == {"subject": True, "max_companies": 2, "drop_deleted": False, "substance": True}
+    assert scores(b, c) == {"A": 2.0} and "rules" not in bl.Baseline("mentions").params()
+    with pytest.raises(ValueError, match="unknown substantive rules"):
+        bl.Baseline("substantive", rules={"votes": True})
