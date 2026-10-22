@@ -85,11 +85,15 @@ def test_interrupted_run_is_retried(tmp_path, monkeypatch):
     assert jobs.handle({"JOB": "ok", "JOB_ID": "k1"}, data=tmp_path) == 0
 
 
-def test_nothing_requested_or_refused(tmp_path, capsys):
+def test_nothing_requested_or_refused(tmp_path, capsys, monkeypatch):
     assert jobs.handle({}, data=tmp_path) is None
     assert jobs.handle({"JOB": "corpus"}, data=tmp_path) is None      # no JOB_ID
     assert jobs.handle({"JOB": "nope", "JOB_ID": "r1"}, data=tmp_path) == 2
     assert "refused" in capsys.readouterr().out
+    assert [r["event"] for r in _records(tmp_path)] == ["refused"]
+    # a refusal does not consume the JOB_ID: a newer deployment that knows the job still runs it
+    monkeypatch.setitem(jobs.PRESETS, "nope", [[sys.executable, "-c", "print('now known')"]])
+    assert jobs.handle({"JOB": "nope", "JOB_ID": "r1"}, data=tmp_path) == 0
     assert jobs.handle({"JOB": "nope", "JOB_ID": "r1"}, data=tmp_path) is None
 
 

@@ -212,7 +212,9 @@ def handle(env: dict, data: Path = ROOT / "data", scripts_dir: Path = ROOT / "sc
         cmds = resolve(job, env.get("JOB_ARGS", ""), env, scripts_dir)
     except JobError as e:
         print(f"[jobs] refused: {e}", flush=True)
-        _append(ledger, {"event": "finished", "job_id": job_id, "job": job, "ts": _now(),
+        # A refusal does not consume the JOB_ID: an older queued deployment running older code
+        # can refuse a preset the newer code knows, and the newer deployment must still run it.
+        _append(ledger, {"event": "refused", "job_id": job_id, "job": job, "ts": _now(),
                          "exit": None, "refused": str(e)})
         return 2
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
