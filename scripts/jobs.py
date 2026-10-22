@@ -76,6 +76,8 @@ PRESETS: dict[str, list[list[str]]] = {
     # both graders on the gold set in one deployment (Railway queues can take an hour each)
     "gold-eval-both": [_py("goldset.py", "evaluate"), _py("goldset.py", "evaluate", "--model", "jev-1.13.0")],
     "thesis-timeline": [_py("thesis_scorer.py", "timeline")],
+    # the graded threads with the text the model saw, for the password-gated thread browser
+    "export-threads": [_py("thread_export.py", "--push")],
     "calibrate": [_py("thesis_scorer.py", "calibrate")],
     "thesis-run": [_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory")],
     # the pilot in one deployment: grade 2014 and 2017 both ways, collect, check the blinding,
@@ -166,7 +168,7 @@ PRESETS["rebuild"] = [c for name in ("export-tickers", "refilter", "corpus", "wo
                                      "ladder-dev", "ladder-validate") for c in PRESETS[name]]
 # Presets that accept JOB_ARGS (appended to their single command).
 TAKES_ARGS = {"run", "ladder-dev", "ladder-validate", "pull-data", "census", "llm-run", "llm-collect",
-              "gold-build", "gold-eval", "thesis-timeline", "calibrate", "thesis-run"}
+              "gold-build", "gold-eval", "thesis-timeline", "calibrate", "thesis-run", "export-threads"}
 
 
 class JobError(ValueError):
