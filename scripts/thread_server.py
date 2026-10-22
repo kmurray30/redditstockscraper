@@ -340,8 +340,16 @@ def main() -> int:
     if path:
         store = Store.from_file(Path(path))
     else:
+        import time
         import bucket_sync as bs
-        store = Store.from_bucket(bs.Bucket(bs.load_creds(), workers=2))
+        bucket = bs.Bucket(bs.load_creds(), workers=2)
+        while True:   # the export may not be in the bucket yet (export-threads still running)
+            try:
+                store = Store.from_bucket(bucket)
+                break
+            except Exception as e:
+                print(f"[thread-ui] waiting for {KEY} in the bucket ({type(e).__name__}); retry in 30 s", flush=True)
+                time.sleep(30)
     port = int(os.environ.get("PORT") or 8080)
     print(f"[thread-ui] {len(store.records):,} threads, port {port}", flush=True)
     serve(store, password, port).serve_forever()

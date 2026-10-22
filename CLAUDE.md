@@ -445,6 +445,8 @@ Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstrin
 | `ablations` | 14 `thesis-run`s on the identified grades, one parameter changed at a time (gamma 0 / 1, beta 1, use_author, min_evidence 50, no comments, thesis_gate hard / soft, net corroboration, specificity, direction abs / none, flat_quality, flat_quality + direction none); every row in the ledger | no |
 | `finalist-checks` | the `substantive` baseline (LLM-free, vote-free, 24h control), the ablation winner without votes / late content / both, the graded no-direction run blinded / without late content / without votes, and both calibration tables | no |
 | `substantive-checks` | the `substantive` baseline with one rule off per run (`--rules` JSON: `drop_deleted`, `subject`, `max_companies`, `substance`) | no |
+| `gold-dump` | `pull-data --only gold`, then the ratings CSV (with the user's written reasons) through the log as base64 chunks (`dump_file.reassemble`) | no |
+| `export-threads` (`thread_export.py --push`) | every graded thread with the exact text the model saw (from the LLM cache), its grades, Q and the company's 5y outcome, to `data/ui/threads.json.zst` on the volume and in the bucket; feeds `thread-ui` | no |
 | `script:comment_lag` | how long after a post its comments and edits arrive, per year | no |
 
 **Variables the user sets on the worker:** `LLM_MODEL` (`gpt-5-nano`, or `jev-1.13.0`; `fake`
@@ -790,6 +792,48 @@ is separate from the worker so the worker keeps no domain. Tear it down with `de
 once the gold set is rated. (An earlier claude.ai artifact version of the page,
 https://claude.ai/artifact/S1GTrszHG1kJtAjtxd682y, only saves when its owner is signed in and is
 no longer the path.)
+
+**Thread browser (`thread-ui`, a third Railway service, 2026-10-22, user request):**
+`scripts/thread_server.py` at https://thread-ui-production.up.railway.app behind the same
+HTTP Basic password as `gold-ui` (`GOLD_PASSWORD`). It reads `data/ui/threads.json.zst` from
+the bucket at start (retrying every 30 s until `export-threads` has pushed it) and serves a
+grid of the model's stance (bull at or above +0.25, bear at or below -0.25, neutral between)
+against thread quality (Q at or above a threshold, default 50, adjustable on the page), each
+count linking to a list of titles, each title to the thread rendered from the exported text
+(the post, the comments as the model saw them, the grades, the 5-year outcome). Nothing links
+to Reddit. Service id `5508cca9-db74-47e0-861a-3be0c4cb5ae2`; start command
+`python scripts/thread_server.py`, healthcheck `/healthz`, S3 variables are references to
+the bucket's. **This is the second deliberate exception to "no public endpoint"**: it holds
+the 9,681 graded threads (text and comments) behind a password, which is more than the gold
+page did; the user asked for it to review the grading. Tear down with `delete-service` when
+no longer needed. Refresh after a new grading run with `JOB=export-threads` and a redeploy of
+`thread-ui`.
+
+**Sanity checks the user asked for (2026-10-22, `calibrate --split dev --samples 8`, signed
+scorer):** the calibration table now also reports P(beat market), mean excess and the
+picks' prior 12-month return per decile, and prints the most extreme company-months of
+deciles 1 and 10 with every thread the scorer could see at that cutoff (dates, stance, Q,
+contribution, title), so the point-in-time ordering (post date < cutoff < entry) can be
+read off the lines. Findings: (1) by the beats-the-market view the picture is the same as
+by 5x: decile 1 (net bearish) 39% of picks beat the market with mean excess +31%, decile 10
+35% and +19%, the middle deciles negative; (2) the bottom-decile threads are real bear theses
+on large, well-discussed names (Square short ideas with 65 votes, "$NFLX: the worst of
+FANG" with 132, "Amazon: Killing Me Softly" with 231, "Sell Palo Alto Networks?"), not
+misread neutral posts, and the prior 12-month return of decile 1 (+16%) is below decile 10's
+(+29%), so "bears dog stocks that already ran" is not the explanation in aggregate; (3) **the
+top of the signed scorer is lone, cross-posted bullish write-ups with no corroboration**:
+Morgans Hotel Group's ">100% upside" post counted three times (three subreddits, 5/17/59
+votes; delisted, 1.2x), Whole Foods' "Value Investment Case" three times (4/13/13 votes),
+ARLP twice (permanent loss). Two design flaws follow: cross-posts are not de-duplicated
+(the report's information-event engine, not built), and Q is additive, so a well-written
+post with zero discussion still scores 50-60. (4) The user's written rating reasons
+(`gold-dump`) say the same thing explicitly: the poster is assumed emotionally biased, the
+comments are how the facts are checked, a good write-up with no comments is a 5 at best,
+agreement between post and comments is a 7, and direction is not what is rated. The
+retuned Q put 0.30 on discussion additively; the user's model is a gate (corroboration
+multiplies OP substance), plus dedup. Proposed, not built, awaiting the user: a
+`corroboration_gate` form of Q tuned on the gold set, and an event dedup (same author and
+title within 7 days = one thread, the most-discussed copy kept).
 
 **Budget and order** ($5 total, user decision): ~~census -> gold set -> gold-eval -> pick~~ done
 2026-10-22 (Jev; $0.011 spent) -> `pilot` (one job; the cache makes the full run pay only for
