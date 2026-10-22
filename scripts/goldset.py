@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import random
 import sys
 from collections import defaultdict
@@ -199,6 +200,8 @@ def cmd_evaluate(a) -> int:
     allrows = tl.load_threads(Path(a.threads))
     rows = [r for r in allrows if (r["post_id"], r["cik"]) in ratings]
     print(coverage(rows, allrows))
+    if a.model:
+        os.environ["LLM_MODEL"] = a.model
     cfg = llm.Config.from_env()
     corpus = tl.open_corpus(a)
     requests, meta = [], {}
@@ -278,6 +281,7 @@ def main(argv=None) -> int:
     b.set_defaults(fn=cmd_build)
     e = sub.add_parser("evaluate")
     e.add_argument("--ratings", default="data/gold/ratings.csv")
+    e.add_argument("--model", help="override LLM_MODEL for this evaluation (e.g. jev-1.13.0)")
     e.set_defaults(fn=cmd_evaluate)
     a = p.parse_args(argv)
     return a.fn(a)

@@ -69,6 +69,8 @@ PRESETS: dict[str, list[list[str]]] = {
     "check-blind": [_py("thesis_llm.py", "check-blind")],
     "gold-build": [_py("goldset.py", "build")],
     "gold-eval": [_py("goldset.py", "evaluate")],
+    # both graders on the gold set in one deployment (Railway queues can take an hour each)
+    "gold-eval-both": [_py("goldset.py", "evaluate"), _py("goldset.py", "evaluate", "--model", "jev-1.13.0")],
     "thesis-timeline": [_py("thesis_scorer.py", "timeline")],
     "calibrate": [_py("thesis_scorer.py", "calibrate")],
     "thesis-run": [_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory")],

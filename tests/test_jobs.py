@@ -118,3 +118,8 @@ def test_dump_file_round_trip():
         df.reassemble(lines[1:])
     with pytest.raises(ValueError, match="checksum"):
         df.reassemble([lines[0].replace("DUMP a.md 1/", "DUMP a.md 1/")[:-4] + "AAAA"] + lines[1:])
+
+
+def test_gold_eval_both_runs_nano_then_jev():
+    cmds = jobs.resolve("gold-eval-both")
+    assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]

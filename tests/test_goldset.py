@@ -129,6 +129,9 @@ def test_build_and_evaluate_end_to_end_with_the_fake_model(tmp_path, monkeypatch
     capsys.readouterr()
     assert gs.main([*common, "evaluate", "--ratings", str(tmp_path / "gold" / "ratings.csv")]) == 0
     out = capsys.readouterr().out
+    monkeypatch.setenv("LLM_MODEL", "gpt-5-nano")      # --model wins over the environment
+    assert gs.main([*common, "evaluate", "--ratings", str(tmp_path / "gold" / "ratings.csv"), "--model", "fake"]) == 0
+    assert "model fake" in capsys.readouterr().out
     assert "2 rated threads" in out and "Spearman rho" in out and "n_comments" in out and "voices" in out
     ev = list(csv.DictReader((tmp_path / "gold" / "eval_fake.csv").open()))
     assert len(ev) == 2 and {e["you"] for e in ev} == {"9.0", "4.0"} and all(e["Q"] for e in ev)
