@@ -110,13 +110,17 @@ PRESETS: dict[str, list[list[str]]] = {
     # (the prompt still showed vote counts), gamma=1 the strong-votes one; beta=1 the full
     # price-since-thesis discount; use_author the causal author prior; min_evidence=50 a
     # sourcing gate; use_comments=false drops the discussion term; the thesis gates and the
-    # net corroboration reach the first formula's choices; use_specificity puts it back in.
+    # net corroboration reach the first formula's choices; use_specificity puts it back in;
+    # direction abs / none drop the sign of the stance; flat_quality (with direction none)
+    # is the funnel-only control: the vote-weighted count of graded threads, no grades at all.
     "ablations": [["env", "THESIS_VARIANT=identified", f"THESIS_PARAMS={params}",
                    *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")]
                   for params in ('{"gamma": 0}', '{"gamma": 1}', '{"beta": 1}', '{"use_author": true}',
                                  '{"min_evidence": 50}', '{"use_comments": false}',
                                  '{"thesis_gate": "hard"}', '{"thesis_gate": "soft"}',
-                                 '{"corroboration": "net"}', '{"use_specificity": true}')],
+                                 '{"corroboration": "net"}', '{"use_specificity": true}',
+                                 '{"direction": "abs"}', '{"direction": "none"}',
+                                 '{"flat_quality": true}', '{"flat_quality": true, "direction": "none"}')],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),

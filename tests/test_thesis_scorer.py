@@ -79,6 +79,23 @@ def test_contribution_sign_votes_and_decay():
     assert ts.decay(14, "days", p) == pytest.approx(0.5) and ts.decay(60, None, p) == pytest.approx(0.5)
 
 
+def test_direction_and_flat_quality_ablations():
+    p = ts.Params()
+    bull, bear, mild = ts.contribution(grade(stance=1), p), ts.contribution(grade(stance=-1), p), ts.contribution(grade(stance=0.2), p)
+    assert ts.contribution(grade(stance=-1), ts.Params(direction="abs")) == bull
+    assert ts.contribution(grade(stance=0.2), ts.Params(direction="abs")) == mild
+    none = ts.Params(direction="none")
+    assert ts.contribution(grade(stance=-1), none) == ts.contribution(grade(stance=0.2), none) == bull
+    assert ts.contribution(grade(stance=0), none) == bull     # a question post counts like a thesis
+    flat = ts.Params(flat_quality=True)
+    assert ts.contribution(grade(stance=1, votes=0), flat) == 1.0        # Q 100, confidence 1, votes 0
+    assert ts.contribution(grade(stance=-1, votes=0), flat) == -1.0
+    assert ts.contribution(grade(stance=1, votes=0), flat) == ts.contribution({**grade(stance=1, votes=0), "argument_quality": 0, "confidence": 0.1}, flat)
+    assert ts.contribution(grade(stance=0, votes=0), ts.Params(flat_quality=True, direction="none")) == 1.0
+    with pytest.raises(ValueError, match="direction"):
+        ts.contribution(grade(), ts.Params(direction="up"))
+
+
 def test_score_sums_visible_threads_with_decay_and_gates():
     g1 = grade("p1", matured=T0 - 90 * DAY, horizon="months")      # half decayed
     g2 = grade("p2", matured=T0 - 1 * DAY, horizon="years", stance=-1, q=40)

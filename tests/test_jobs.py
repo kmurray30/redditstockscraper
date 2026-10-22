@@ -151,9 +151,12 @@ def test_full_dev_chain_grades_collects_backtests_calibrates_then_checks_blindin
 def test_ablations_change_one_parameter_at_a_time_on_the_identified_variant():
     import json
     cmds = jobs.resolve("ablations")
-    assert len(cmds) == 10 and all(c[1] == "THESIS_VARIANT=identified" for c in cmds)
+    assert len(cmds) == 14 and all(c[1] == "THESIS_VARIANT=identified" for c in cmds)
     changed = [json.loads(c[2].split("=", 1)[1]) for c in cmds]
-    assert all(len(d) == 1 for d in changed) and len({next(iter(d)) for d in changed}) == 8
+    assert all(len(d) == 1 for d in changed[:-1]) and changed[-1] == {"flat_quality": True, "direction": "none"}
+    assert {next(iter(d)) for d in changed} == {"gamma", "beta", "use_author", "min_evidence", "use_comments",
+                                                "thesis_gate", "corroboration", "use_specificity", "direction",
+                                                "flat_quality"}
     assert all(c[-2:] == ["--split", "dev"] and "--years" not in c for c in cmds)
     with pytest.raises(jobs.JobError, match="no JOB_ARGS"):
         jobs.resolve("ablations", "--years 2014")

@@ -435,6 +435,8 @@ Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstrin
 | `calibrate --split dev` | P(5x), P(10x), P(permanent loss) and CAGR quartiles per score decile (`--exclude-late` before `calibrate` for the check) | no |
 | `gold-eval-both` | `gold-eval` on `LLM_MODEL`, then on `jev-1.13.0` (`evaluate --model`), one deployment | cents |
 | `pilot` | `llm-run` 2014+2017 identified and blinded, `llm-collect --years`, `check-blind`, `thesis-run --years 2014 2017` both variants; one deployment, grader = `LLM_MODEL` | yes, about $0.6 on Jev |
+| `full-dev` | `llm-run` both variants on every planned thread, `llm-collect` both, `thesis-run` both plain and with `exclude_late`, `calibrate --split dev`, `check-blind` last; one deployment | yes, about $2 on Jev |
+| `ablations` | 14 `thesis-run`s on the identified grades, one parameter changed at a time (gamma 0 / 1, beta 1, use_author, min_evidence 50, no comments, thesis_gate hard / soft, net corroboration, specificity, direction abs / none, flat_quality, flat_quality + direction none); every row in the ledger | no |
 | `script:comment_lag` | how long after a post its comments and edits arrive, per year | no |
 
 **Variables the user sets on the worker:** `LLM_MODEL` (`gpt-5-nano`, or `jev-1.13.0`; `fake`
@@ -578,6 +580,63 @@ the threads that hold late comments *raises* the lift, so hindsight in late disc
 what works; blinded stays within noise of identified; no scorer beats SPY on these two cohort
 years. Decision 2026-10-22: run the full dev (`full-dev` preset, about $2 on Jev).
 
+**Full dev on Jev (2026-10-22, `full-dev` preset; all 84 cohorts of 2012-2018, 9,681 threads
+graded per variant in about 4 min each, 6,659 new per variant, $1.97 for the job, $2.89 lifetime;
+check-blind 0 of 9,681; Jev judged 2,349 threads theses identified and 2,740 blinded; 905
+threads hold content written after their first cutoff; top decile per month = 1,822
+company-months over 490 companies, 1,702 over 465 with late content excluded):**
+
+| Scorer, full dev 2012-2018 | 5y lift (95% CI) | size-m | vs mentioned | 10x lift | loss (size-m) | perm p | 3y lift (size-m, p) | CAGR vs SPY 16.1% | IR | DSR |
+|---|---|---|---|---|---|---|---|---|---|---|
+| mention count (ladder) | 2.25 | 2.92 | 1.98 | | 1.05 (1.84) | 0.003 | | 18.3% | 0.28 | 0.82 |
+| random among mentioned (ladder) | 1.37 | 1.56 | 1.0 by construction | | 1.25 (1.59) | 0.38 | | 14.3% | | 0.06 |
+| thesis, identified | 1.96 [1.62, 2.36] | 2.44 | 1.29 | 3.85 | 1.16 (1.80) | 0.003 | 2.31 (3.55, 0.003) | 17.6% | 0.18 | 0.17 |
+| thesis, blinded | 1.99 [1.62, 2.41] | 2.47 | 1.31 | 3.68 | 1.16 (1.81) | 0.010 | 2.13 (3.29, 0.003) | 17.5% | 0.17 | 0.16 |
+| thesis, identified, late content excluded | 2.06 [1.67, 2.51] | 2.55 | 1.36 | 4.07 | 1.06 (1.65) | 0.010 | 2.20 (3.38, 0.003) | 17.8% | 0.21 | 0.20 |
+| thesis, blinded, late content excluded | 2.02 [1.61, 2.52] | 2.49 | 1.32 | 3.84 | 1.05 (1.62) | 0.007 | 2.08 (3.17, 0.003) | 18.4% | 0.25 | 0.23 |
+
+The median pick is 34% behind the market at 5y in every row (the lift is a few multibaggers,
+as in the pilot). The ladder's "vs mentioned" compares a baseline's top decile with every
+mentioned company; the thesis rows compare with the companies holding a graded thread, a
+smaller and already better pool (see the pilot-checks note), so the two are not the same
+number, but 1.29-1.36 against mention count's 1.98 is a real gap either way.
+
+Calibration of the identified scorer on dev (`calibrate --split dev`, 17,819 candidate-months
+ranked within month, decile 10 = highest score; P(loss) = permanent loss; CAGR quartiles of
+the 5y return):
+
+| Decile | n | P(5x) 5y | P(10x) 5y | P(loss) 5y | median CAGR | 25% | 75% | P(5x) 3y | P(10x) 3y | P(loss) 3y |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 10 | 1,719 | 0.095 | 0.041 | 0.072 | 6.8% | -5.3% | 17.8% | 0.047 | 0.010 | 0.047 |
+| 9 | 1,745 | 0.077 | 0.034 | 0.078 | 6.8% | -6.7% | 17.3% | 0.031 | 0.011 | 0.050 |
+| 8 | 1,736 | 0.075 | 0.022 | 0.080 | 7.1% | -6.2% | 17.8% | 0.029 | 0.006 | 0.054 |
+| 7 | 1,747 | 0.078 | 0.027 | 0.080 | 6.7% | -6.7% | 17.7% | 0.030 | 0.009 | 0.057 |
+| 6 | 1,775 | 0.069 | 0.017 | 0.081 | 6.7% | -6.7% | 17.1% | 0.026 | 0.005 | 0.060 |
+| 5 | 1,729 | 0.061 | 0.016 | 0.095 | 5.2% | -8.8% | 15.0% | 0.032 | 0.006 | 0.057 |
+| 4 | 1,739 | 0.049 | 0.012 | 0.078 | 5.9% | -5.6% | 16.3% | 0.020 | 0.003 | 0.050 |
+| 3 | 1,735 | 0.047 | 0.013 | 0.054 | 5.9% | -4.3% | 16.2% | 0.024 | 0.002 | 0.044 |
+| 2 | 1,751 | 0.069 | 0.021 | 0.072 | 5.8% | -9.1% | 17.0% | 0.027 | 0.005 | 0.069 |
+| 1 | 1,799 | **0.124** | 0.038 | 0.074 | 7.5% | -4.9% | 20.3% | **0.044** | **0.018** | 0.059 |
+
+Read, honestly: (1) **the pilot's edge did not hold on the full dev.** On 2012-2018 the thesis
+scorer is below mention count on every upside number (5y lift 1.96 vs 2.25, size-matched 2.44 vs
+2.92, CAGR 17.6% vs 18.3%, DSR 0.17 vs 0.82) and no better on ruin (loss 1.16 vs 1.05; size-matched
+1.80 vs 1.84). 2014 and 2017 were favourable years for it. (2) What the pilot said about
+hindsight still holds: blinded equals identified (1.99 vs 1.96), and excluding the 905 threads
+with late content raises the lift slightly (2.06 / 2.02) and lowers ruin (1.06 / 1.05). The
+grades carry real information (perm p 0.003-0.010; lift 1.96 against the random row's 1.37),
+but the aggregation does not beat counting mentions. (3) **The calibration table is U-shaped:**
+deciles 10 down to 3 are roughly monotone in P(5x) (9.5% to 4.7%), then the *lowest* decile,
+which holds the strongly bearish threads (`x < 0`), has the highest 5x rate of all (12.4%, and
+10x 3.8%) with an average loss rate. In 2012-2018 a well-argued Reddit bear case on a company
+was a better multibagger signal than a bull case: bear theses land on contested high-flyers,
+and those kept going up in that regime. Direction, which the user's ratings also ignore, may be
+hurting the score; the `direction` (`abs` / `none`) and `flat_quality` ablations test that and
+the "funnel only, no grades" control. They were added after seeing this table, so they are
+backtest-informed and count as trials in the deflated Sharpe. (4) Nothing here touches
+validate or the holdout. Decision 2026-10-22: run the free `ablations` preset (14 runs, identified
+variant) before anything else.
+
 **Census of dev (2026-10-18, funnel v3):** 9,429 unique threads over 84 cohorts (662 in 2012
 rising to 1,929 in 2018), 12.1M estimated input tokens; at GPT-5 nano $1.28 per variant, $2.57
 for identified + blinded. Rejects per cohort row: passing_mention 85k, not_in_universe 64k,
@@ -604,10 +663,11 @@ no longer the path.)
 
 **Budget and order** ($5 total, user decision): ~~census -> gold set -> gold-eval -> pick~~ done
 2026-10-22 (Jev; $0.011 spent) -> `pilot` (one job; the cache makes the full run pay only for
-the other years) -> `thesis-run` next to the ladder -> full dev both variants (about $2 on Jev)
--> free ablations (gamma, beta, use_author, min_evidence, no comments; `gamma=0` is the
-no-votes ablation of the aggregation, though the prompt still showed vote counts) -> validate
-for the one finalist. Holdout untouched. Model choice: GPT-5 nano (about $0.05/M in, $0.40/M out,
+the other years) -> `thesis-run` next to the ladder -> ~~full dev both variants (about $2 on Jev)~~
+done 2026-10-22 ($2.89 lifetime; see "Full dev on Jev") -> free ablations (`ablations` preset:
+gamma, beta, use_author, min_evidence, no comments, gates, corroboration, specificity,
+direction, flat_quality; `gamma=0` is the no-votes ablation of the aggregation, though the
+prompt still showed vote counts) -> validate for the one finalist. Holdout untouched. Model choice: GPT-5 nano (about $0.05/M in, $0.40/M out,
 reasoning_effort minimal) and Jev 1.13 ($0.042/M in, output free, early access) cost about the
 same for this workload; the gold set decides.
 
@@ -627,7 +687,9 @@ same for this workload; the gold set decides.
    `arctic` (the corpus ends 2024-12, so cohorts end there too); the sealed holdout (2021-2022)
    is untouched: decide who consults it and when.
 3. **Run the thesis scorer** (built; see "Thesis scorer"): `census` -> user rates the gold set ->
-   `gold-eval` -> pilot -> full dev -> ablations -> validate once. Record the ladder rows,
-   calibration table, blinded-vs-identified gap and spend here.
+   `gold-eval` -> pilot -> full dev -> ablations -> validate once. ~~Record the ladder rows,
+   calibration table, blinded-vs-identified gap and spend here~~ done through full dev
+   (2026-10-22): the scorer trails mention count on the full dev; the ablations decide whether
+   the aggregation (direction, votes, gates) or the grades are the reason.
 4. Phase 2 (later): fundamental-resilience gate (SEC XBRL), forward data from non-Reddit
    sources, Postgres/pgvector, alerts, dashboard.

@@ -38,7 +38,15 @@ Optional, each a ledger parameter:
   opposition);
 * ``thesis_gate``: ``none`` (default), ``hard`` (a non-thesis contributes nothing) or
   ``soft`` (multiply by the model's thesis probability where it gave one);
-* ``use_specificity``: average specificity into the argument grade.
+* ``use_specificity``: average specificity into the argument grade;
+* ``direction``: ``signed`` (default; a bear thesis pushes the score down), ``abs`` (the
+  stance's size without its sign: conviction either way counts for the company) or ``none``
+  (every thread counts as if stance were 1: quality and discussion only);
+* ``flat_quality``: Q = 100 and confidence = 1 for every thread, so the score is only the
+  vote-weighted, decayed count of graded threads: the funnel without the grades. Together
+  with ``direction = none`` it is the "does the LLM add anything" control. These two were
+  added after the full dev calibration table showed the lowest score decile (bear theses)
+  with the highest 5x rate, so they are backtest-informed: the ledger counts them as trials.
 
 Everything evaluative is deterministic given the grades file, so every ablation that only
 changes parameters costs nothing. ``params()`` carries the model, prompt version, variant
@@ -90,6 +98,8 @@ class Params:
     corroboration: str = "discussion"   # discussion | net
     thesis_gate: str = "none"           # none | hard | soft
     use_specificity: bool = False
+    direction: str = "signed"           # signed | abs | none
+    flat_quality: bool = False          # Q = 100, confidence = 1: the funnel-only control
     weights: dict = field(default_factory=lambda: dict(WEIGHTS))
     half_life: dict = field(default_factory=lambda: dict(HALF_LIFE_DAYS))
 
@@ -161,9 +171,18 @@ def vote_weight(votes, gamma: float) -> float:
 
 
 def contribution(g: dict, p: Params) -> float:
-    q = thread_quality(g, p)
-    return float(g.get("stance") or 0) * (q / 100) ** 2 * float(g.get("confidence") or 0) * \
-        vote_weight(g.get("votes"), p.gamma)
+    stance = float(g.get("stance") or 0)
+    if p.direction == "abs":
+        stance = abs(stance)
+    elif p.direction == "none":
+        stance = 1.0
+    elif p.direction != "signed":
+        raise ValueError(f"direction must be signed, abs or none, not {p.direction!r}")
+    if p.flat_quality:
+        q, conf = 100.0, 1.0
+    else:
+        q, conf = thread_quality(g, p), float(g.get("confidence") or 0)
+    return stance * (q / 100) ** 2 * conf * vote_weight(g.get("votes"), p.gamma)
 
 
 def decay(dt_days: float, horizon: str | None, p: Params) -> float:
