@@ -375,17 +375,17 @@ _CASHTAG = re.compile(r"\$[A-Za-z]{1,6}\b")
 
 
 def blind_leaks(text: str, ticker: str, name: str | None) -> list[str]:
-    """Ticker / cashtag / name-alias strings still present in a blinded message (for the
-    check-blind job). Empty means clean."""
+    """Ticker / cashtag / name strings still present in a blinded message's content (for the
+    check-blind job). The fixed header ("AS-OF DATE", "COMPANY UNDER EVALUATION", "r/sub",
+    "POST VOTES") is skipped: it is template text, and tickers such as DATE or names such as
+    Under Armour and Post Holdings matched it. Empty means clean."""
+    content = text.split("\n\nTITLE: ", 1)[-1]
     hits = []
-    if re.search(rf"\$?\b{re.escape(ticker)}\b", text):
+    if re.search(rf"\$?\b{re.escape(ticker)}\b", content):
         hits.append(ticker)
     if name:
-        from names import alias_candidates, core_tokens
-        for alias, _ in alias_candidates(name):
-            if re.search(rf"\b{re.escape(alias)}\b", text, re.I):
+        from names import blind_tokens
+        for alias in blind_tokens(name):
+            if re.search(rf"\b{re.escape(alias).replace(chr(92) + ' ', chr(92) + 's+')}\b", content, re.I):
                 hits.append(alias)
-        core = core_tokens(name)
-        if core and re.search(rf"\b{re.escape(core[0])}\b", text, re.I):
-            hits.append(core[0])
     return sorted(set(hits))

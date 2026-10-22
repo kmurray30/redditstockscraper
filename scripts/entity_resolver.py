@@ -202,13 +202,9 @@ def blind_text(text: str, mentions: list[Mention]) -> str:
     for k, m in enumerate(mentions):
         label = f"COMPANY_{chr(ord('A') + k % 26)}{'' if k < 26 else k // 26}"
         pats = [rf"\$?\b{re.escape(t)}\b" for t in sorted(m.tickers, key=len, reverse=True)]
-        for alias, _ in names.alias_candidates(m.name):
+        for alias in names.blind_tokens(m.name):   # the full name, and a distinctive leading word
             spaced = re.escape(alias).replace("\\ ", r"\s+")
             pats.append(rf"\b{spaced}\b")
-        # also the leading word of the registered name ("Palantir")
-        core = names.core_tokens(m.name)
-        if core:
-            pats.append(rf"\b{re.escape(core[0])}\b")
         out = re.sub("|".join(pats), label, out, flags=re.I) if pats else out
     return out
 

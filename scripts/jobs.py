@@ -81,13 +81,13 @@ PRESETS: dict[str, list[list[str]]] = {
               _py("thesis_llm.py", "run", "--variant", "blinded", "--years", "2014", "2017"),
               _py("thesis_llm.py", "collect", "--variant", "identified", "--years", "2014", "2017"),
               _py("thesis_llm.py", "collect", "--variant", "blinded", "--years", "2014", "2017"),
-              _py("thesis_llm.py", "check-blind"),
               ["env", "THESIS_VARIANT=identified", *_py("backtest.py", "run", "--scorer",
                                                         "scripts/thesis_scorer.py:factory", "--split", "dev",
                                                         "--years", "2014", "2017")],
               ["env", "THESIS_VARIANT=blinded", *_py("backtest.py", "run", "--scorer",
                                                      "scripts/thesis_scorer.py:factory", "--split", "dev",
-                                                     "--years", "2014", "2017")]],
+                                                     "--years", "2014", "2017")],
+              _py("thesis_llm.py", "check-blind")],     # last: a leak flags the job, the reports still print
 }
 # The full rebuild after a filter / ticker-list / resolver / price-cleaning change (CLAUDE.md).
 PRESETS["rebuild"] = [c for name in ("export-tickers", "refilter", "corpus", "wordstats",

@@ -146,3 +146,17 @@ def test_a_leading_word_alone_is_not_a_company_alias():
     e = er_mod.EntityResolver(sm.SecurityMaster(snaps))
     assert e.find("Microsoft's Azure growth is strong, I own the stock", "2022-06-01") == []
     assert {m.cik for m in e.find("Azure Power Global reported earnings", "2022-06-01")} == {"21"}
+
+
+def test_blind_tokens_keep_everyday_leading_words():
+    import names
+    assert names.blind_tokens("Palantir Technologies Inc") == ["palantir technologies", "palantir"]
+    assert names.blind_tokens("Under Armour Inc") == ["under armour"]          # "under" is prose
+    assert names.blind_tokens("Post Holdings Inc") == ["post"]                 # one core word: the name itself
+    assert names.blind_tokens("Air Products & Chemicals Inc") == ["air products & chemicals"]
+    assert names.blind_tokens("General Electric Co") == ["general electric"]   # generic first word
+    assert names.blind_tokens("Apple Inc") == ["apple"]
+    ms = [er_mod.Mention(cik="1", ticker="UA", name="Under Armour Inc", sec_type="CS", method="cashtag",
+                         resolve_conf="stable", tickers={"UA", "UAA"})]
+    out = er_mod.blind_text("UA is under pressure; Under Armour and $UAA fell", ms)
+    assert out == "COMPANY_A is under pressure; COMPANY_A and COMPANY_A fell"

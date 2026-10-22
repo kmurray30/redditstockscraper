@@ -128,8 +128,9 @@ def test_pilot_chain_covers_both_variants_and_restricts_the_years():
     cmds = jobs.resolve("pilot")
     assert len(cmds) == 7 and cmds[0][-3:] == ["--years", "2014", "2017"]
     assert all("2014" in c and "2017" in c for c in cmds if "check-blind" not in c)
-    assert cmds[-2][:2] == ["env", "THESIS_VARIANT=identified"] and cmds[-1][1] == "THESIS_VARIANT=blinded"
-    assert "--split" in cmds[-1] and "dev" in cmds[-1] and "holdout" not in " ".join(cmds[-1])
+    assert cmds[-3][:2] == ["env", "THESIS_VARIANT=identified"] and cmds[-2][1] == "THESIS_VARIANT=blinded"
+    assert "--split" in cmds[-2] and "dev" in cmds[-2] and "holdout" not in " ".join(cmds[-2])
+    assert cmds[-1][-1] == "check-blind"
 
 
 def test_gold_eval_both_runs_nano_then_jev():

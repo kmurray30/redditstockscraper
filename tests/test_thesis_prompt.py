@@ -72,6 +72,13 @@ def test_blinded_message_has_no_ticker_cashtag_or_name():
     assert "ir.acme.com" not in msg
     # the identified message does leak, so the check is not vacuous
     assert tp.blind_leaks(tp.user_message(t, blinded=False), "ACME", "Acme Widgets Inc")
+    # the fixed header is template text, not a leak: ticker DATE, names led by "Under", "Post"
+    header_only = "AS-OF DATE: 2015-01-01 (UTC).\nCOMPANY UNDER EVALUATION: COMPANY_A\nSUBREDDIT: r/stocks   POST VOTES: 3\n\nTITLE: x\n\nBODY:\ny\n"
+    assert tp.blind_leaks(header_only, "DATE", "Date Inc") == []
+    assert tp.blind_leaks(header_only, "UA", "Under Armour Inc") == []
+    assert tp.blind_leaks(header_only, "PPS", "Post Properties Inc") == []
+    assert tp.blind_leaks(header_only + "under armour makes shoes", "UA", "Under Armour Inc") == ["under armour"]
+    assert tp.blind_leaks(header_only + "Palantir is cheap", "PLTR", "Palantir Technologies Inc") == ["palantir"]
 
 
 def test_prompt_version_changes_with_prompt_text(monkeypatch, tmp_path):

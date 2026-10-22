@@ -54,6 +54,29 @@ def alias_candidates(name: str | None) -> list[tuple[str, bool]]:
     return out
 
 
+# everyday words that lead some registered names ("Under Armour", "Post Holdings", "Air
+# Products"): blinding them on their own would rewrite ordinary prose
+COMMON_LEAD = frozenset("""
+under post air date one two three big best true main home world life care star sun gold blue
+green red black white open free fast next live play real super prime core key net web total
+pure smart simple just good top high low long short up on in at go the a and or for of to by
+""".split())
+
+
+def blind_tokens(name: str | None) -> list[str]:
+    """What to hide for a company name besides its tickers: the full normalised name, and its
+    leading word alone when that word is identity-bearing (four letters or more, not a generic
+    or everyday word). ``blind_text`` and the blinded-text leak check share this."""
+    core = core_tokens(name)
+    if not core:
+        return []
+    out = [" ".join(core)]
+    lead = core[0]
+    if len(core) > 1 and len(lead) >= 4 and lead not in GENERIC_FIRST and lead not in COMMON_LEAD:
+        out.append(lead)
+    return out
+
+
 def compact(name: str | None) -> str:
     return "".join(core_tokens(name))
 
