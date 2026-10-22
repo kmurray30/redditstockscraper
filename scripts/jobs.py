@@ -105,6 +105,18 @@ PRESETS: dict[str, list[list[str]]] = {
                   *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")],
                  _py("thesis_scorer.py", "calibrate", "--split", "dev"),
                  _py("thesis_llm.py", "check-blind")],
+    # the free ablations on the full dev run (identified variant; every row is a ledger entry):
+    # one parameter changed at a time against the default. gamma=0 is the no-votes aggregation
+    # (the prompt still showed vote counts), gamma=1 the strong-votes one; beta=1 the full
+    # price-since-thesis discount; use_author the causal author prior; min_evidence=50 a
+    # sourcing gate; use_comments=false drops the discussion term; the thesis gates and the
+    # net corroboration reach the first formula's choices; use_specificity puts it back in.
+    "ablations": [["env", "THESIS_VARIANT=identified", f"THESIS_PARAMS={params}",
+                   *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")]
+                  for params in ('{"gamma": 0}', '{"gamma": 1}', '{"beta": 1}', '{"use_author": true}',
+                                 '{"min_evidence": 50}', '{"use_comments": false}',
+                                 '{"thesis_gate": "hard"}', '{"thesis_gate": "soft"}',
+                                 '{"corroboration": "net"}', '{"use_specificity": true}')],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),
