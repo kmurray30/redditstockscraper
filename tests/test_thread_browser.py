@@ -73,22 +73,33 @@ def get(url, password="pw"):
 def test_pages_need_the_password_and_render_grid_list_and_post(server):
     assert get(server + "/healthz", password=None)[0] == 200
     assert get(server + "/", password=None)[0] == 401 and get(server + "/", password="wrong")[0] == 401
-    code, grid = get(server + "/api/grid?q=50")
-    counts = json.loads(grid)["counts"]
-    assert code == 200 and counts["bear"]["1"] == 1 and counts["bull"]["0"] == 1 and counts["neutral"]["1"] == 1
-    code, html_ = get(server + "/?q=50")
-    assert code == 200 and "/list?stance=bear&amp;sub=1&amp;q=50" in html_.replace("&sub", "&amp;sub") or "/list?stance=bear&sub=1&q=50" in html_
-    code, lst = get(server + "/list?stance=bear&sub=1&q=50")
+    code, grid = get(server + "/api/grid")
+    g = json.loads(grid)
+    counts = g["counts"]
+    assert code == 200 and g["measure"] == "q" and len(g["bins"]) == 10
+    assert sum(counts["strong_bear"]) == 1 and sum(counts["strong_bull"]) == 1 and sum(counts["neutral"]) == 1
+    assert counts["strong_bear"][tsv.qbin(74.0)] == 1 and counts["strong_bull"][tsv.qbin(24.0)] == 1
+    code, html_ = get(server + "/")
+    assert code == 200 and "/list?stance=strong_bear&qbin=" in html_ and "Strong bull" in html_
+    code, lst = get(server + f"/list?stance=strong_bear&qbin={tsv.qbin(74.0)}")
     assert code == 200 and "Killing Me Softly" in lst and "/post/p1_1" in lst and "reddit.com" not in lst
     code, post = get(server + "/post/p1_1")
     assert code == 200 and "&lt;b&gt;Sell&lt;/b&gt;" in post and "AWS alone" in post and "x5.9" in post
     assert "+414%" in post and "stance" in post and "argument quality" in post
-    assert get(server + "/post/nope")[0] == 404 and get(server + "/list?stance=up&sub=1")[0] == 404
+    assert get(server + "/post/nope")[0] == 404 and get(server + "/list?stance=up&qbin=1")[0] == 404
+    assert get(server + "/list?stance=bull&qbin=12")[0] == 404
     code, post2 = get(server + "/post/p2_1")
     assert code == 200 and "not in the export" in post2
 
 
-def test_stance_classes_and_grid_threshold():
-    assert tsv.stance_class(0.3) == "bull" and tsv.stance_class(-0.25) == "bear" and tsv.stance_class(0.1) == "neutral"
-    store = tsv.Store([{"key": "a", "stance": 1, "q": 55}, {"key": "b", "stance": 1, "q": 45}])
-    assert store.grid(50)["counts"]["bull"] == {"1": 1, "0": 1} and store.grid(40)["counts"]["bull"] == {"1": 2, "0": 0}
+def test_stance_levels_quality_bins_and_the_measure_switch():
+    assert tsv.stance_class(0.3) == "bull" and tsv.stance_class(0.9) == "strong_bull" and tsv.stance_class(-0.25) == "bear"
+    assert tsv.stance_class(-0.8) == "strong_bear" and tsv.stance_class(0.1) == "neutral" and tsv.stance_class(None) == "neutral"
+    assert tsv.qbin(0) == 0 and tsv.qbin(9.9) == 0 and tsv.qbin(55) == 5 and tsv.qbin(100) == 9 and tsv.qbin_label(9) == "90-100"
+    store = tsv.Store([{"key": "a", "stance": 1, "q": 55, "q_gated": 25}, {"key": "b", "stance": 1, "q": 45}])
+    assert store.measures == ["q", "q_gated"] and store.measure("nope") == "q"
+    assert store.grid("q")["counts"]["strong_bull"][5] == 1 and store.grid("q")["counts"]["strong_bull"][4] == 1
+    assert store.grid("q_gated")["counts"]["strong_bull"][2] == 1   # b has no q_gated: falls back to its q (45 -> bin 4)
+    assert store.grid("q_gated")["counts"]["strong_bull"][4] == 1
+    plain = tsv.Store([{"key": "a", "stance": 0, "q": 10}])
+    assert plain.measures == ["q"] and plain.measure("q_gated") == "q"
