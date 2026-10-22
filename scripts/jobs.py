@@ -74,6 +74,20 @@ PRESETS: dict[str, list[list[str]]] = {
     "thesis-timeline": [_py("thesis_scorer.py", "timeline")],
     "calibrate": [_py("thesis_scorer.py", "calibrate")],
     "thesis-run": [_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory")],
+    # the pilot in one deployment: grade 2014 and 2017 both ways, collect, check the blinding,
+    # backtest both variants on dev. LLM_MODEL decides the grader. Cached per thread, so the
+    # later full dev run pays only for the other years.
+    "pilot": [_py("thesis_llm.py", "run", "--variant", "identified", "--years", "2014", "2017"),
+              _py("thesis_llm.py", "run", "--variant", "blinded", "--years", "2014", "2017"),
+              _py("thesis_llm.py", "collect", "--variant", "identified", "--years", "2014", "2017"),
+              _py("thesis_llm.py", "collect", "--variant", "blinded", "--years", "2014", "2017"),
+              _py("thesis_llm.py", "check-blind"),
+              ["env", "THESIS_VARIANT=identified", *_py("backtest.py", "run", "--scorer",
+                                                        "scripts/thesis_scorer.py:factory", "--split", "dev",
+                                                        "--years", "2014", "2017")],
+              ["env", "THESIS_VARIANT=blinded", *_py("backtest.py", "run", "--scorer",
+                                                     "scripts/thesis_scorer.py:factory", "--split", "dev",
+                                                     "--years", "2014", "2017")]],
 }
 # The full rebuild after a filter / ticker-list / resolver / price-cleaning change (CLAUDE.md).
 PRESETS["rebuild"] = [c for name in ("export-tickers", "refilter", "corpus", "wordstats",

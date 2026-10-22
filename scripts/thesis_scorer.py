@@ -9,11 +9,23 @@ Pipeline (each step is a job; see jobs.py):
     this module `calibrate`      -> outcome rates per score decile on a split
 
 A thread's quality ``Q`` (0-100) is a weighted sum of the model's grades (argument,
-evidence, tone, falsifiability, balance, comment corroboration) minus a hype penalty. Its
-signed contribution is ``x = stance * (Q/100)^2 * confidence * (1 + log(1 + votes))^gamma``;
-non-theses contribute nothing. A company's score at a cutoff is the sum of its threads'
-contributions decayed with a half-life set by each thread's stated horizon, over the
-threads the point-in-time view shows at that cutoff. Optional, each a ledger parameter:
+evidence, tone, falsifiability, balance, comment discussion) minus a hype penalty. Its
+signed contribution is ``x = stance * (Q/100)^2 * confidence * (1 + log(1 + votes))^gamma``.
+A company's score at a cutoff is the sum of its threads' contributions decayed with a
+half-life set by each thread's stated horizon, over the threads the point-in-time view
+shows at that cutoff.
+
+The weights were tuned on the user's 30 gold ratings (2026-10-22; never on backtest numbers):
+``.25 argument + .15 evidence + .05 tone + .05 falsifiability + .20 balance + .30 discussion
+- 10 * hype``, where ``discussion = (independent_support + independent_opposition +
+strongest_objection_severity) / 3``. Direction lives in ``stance``, so the comment term
+measures how much substantive, independent discussion the thread drew regardless of which
+way it cut; the user rewards a well-argued rebuttal as much as support. Specificity is not
+in Q (it tracked the ratings at about zero). The thesis gate is off by default: a question
+or discussion post with good comments still counts, and its small stance keeps the
+contribution small. Rank agreement with the ratings rose from 0.43 to 0.72 (Jev) and 0.21 to
+0.46 (gpt-5-nano) against the first formula; the optimum is flat over nearby weights.
+Optional, each a ledger parameter:
 
 * ``beta``: the price-since-thesis discount ``(P_thesis / P_now)^beta`` (capped at
   ``discount_cap``), reading prices strictly at or before the cutoff;
@@ -21,7 +33,12 @@ threads the point-in-time view shows at that cutoff. Optional, each a ledger par
   threads shrunk toward the running population mean;
 * ``min_evidence``: a company is a candidate only if a visible thread's evidence grade
   reaches it;
-* ``use_comments``: whether the corroboration term is live.
+* ``use_comments``: whether the discussion term is live;
+* ``corroboration``: ``discussion`` (above) or ``net`` (the first formula's support minus
+  opposition);
+* ``thesis_gate``: ``none`` (default), ``hard`` (a non-thesis contributes nothing) or
+  ``soft`` (multiply by the model's thesis probability where it gave one);
+* ``use_specificity``: average specificity into the argument grade.
 
 Everything evaluative is deterministic given the grades file, so every ablation that only
 changes parameters costs nothing. ``params()`` carries the model, prompt version, variant
@@ -49,8 +66,10 @@ from scorer import Cohort  # noqa: E402
 from thesis_prompt import MATURATION_HOURS, THESIS_PIT  # noqa: E402
 
 DAY = 86400
-WEIGHTS = {"argument": 0.28, "evidence": 0.22, "tone": 0.12, "falsifiability": 0.10,
-           "balance": 0.10, "corroboration": 0.18}
+WEIGHTS = {"argument": 0.25, "evidence": 0.15, "tone": 0.05, "falsifiability": 0.05,
+           "balance": 0.20, "corroboration": 0.30}
+WEIGHTS_V1 = {"argument": 0.28, "evidence": 0.22, "tone": 0.12, "falsifiability": 0.10,
+              "balance": 0.10, "corroboration": 0.18}   # the first formula, for the record
 HALF_LIFE_DAYS = {"days": 14, "weeks": 30, "months": 90, "years": 180, "unclear": 60}
 SERIES_SCHEMA = pa.schema([("cik", pa.string()), ("ticker", pa.string()), ("ts", pa.int64()),
                            ("post_id", pa.string()), ("x", pa.float64()), ("score", pa.float64())])
@@ -67,7 +86,10 @@ class Params:
     min_evidence: int = 0
     exclude_late: bool = False   # drop threads whose graded text holds content written after
                                  # their first decision cutoff (a comment shown, or a late edit)
-    hype_penalty: float = 20.0
+    hype_penalty: float = 10.0
+    corroboration: str = "discussion"   # discussion | net
+    thesis_gate: str = "none"           # none | hard | soft
+    use_specificity: bool = False
     weights: dict = field(default_factory=lambda: dict(WEIGHTS))
     half_life: dict = field(default_factory=lambda: dict(HALF_LIFE_DAYS))
 
@@ -86,28 +108,47 @@ class Params:
 
 # ------------------------------------------------------------------ one thread
 
-def corroboration(g: dict) -> float:
-    """Net independent corroboration from the comment grades, mapped to 0..100 (50 = none)."""
+def corroboration(g: dict, mode: str = "discussion") -> float:
+    """The comment term, 0..100. ``discussion``: how much substantive independent discussion
+    the thread drew, whichever way it cut (mean of support, opposition and the strongest
+    objection's severity). ``net``: support minus opposition mapped to 0..100 (50 = none)."""
     sup = float(g.get("independent_support") or 0)
     opp = float(g.get("independent_opposition") or 0)
-    return (1 + (sup - opp) / 100) / 2 * 100
+    if mode == "net":
+        return (1 + (sup - opp) / 100) / 2 * 100
+    obj = float(g.get("strongest_objection_severity") or 0)
+    return (sup + opp + obj) / 3
+
+
+def thesis_factor(g: dict, p: Params) -> float:
+    """1 for a thesis. A non-thesis: 0 under the hard gate, the model's thesis probability
+    under the soft gate (0.5 when the model gave none), 1 with no gate."""
+    if p.thesis_gate == "none" or g.get("is_thesis", True):
+        return 1.0
+    if p.thesis_gate == "hard":
+        return 0.0
+    prob = g.get("is_thesis_p")
+    if prob is None:
+        prob = (g.get("_jev") or {}).get("is_thesis_p")
+    return float(prob) if prob is not None else 0.5
 
 
 def thread_quality(g: dict, p: Params) -> float:
     """Q in 0..100 for one grade record (flat or nested ``comments``)."""
     if "comments" in g and isinstance(g["comments"], dict):
         g = {**g, **g["comments"]}
-    if not g.get("is_thesis", True):
-        return 0.0
-    arg = (float(g.get("argument_quality") or 0) + float(g.get("specificity") or 0)) / 2
+    arg = float(g.get("argument_quality") or 0)
+    if p.use_specificity:
+        arg = (arg + float(g.get("specificity") or 0)) / 2
+    neutral = 50.0 if p.corroboration == "net" else 0.0
     parts = {"argument": arg, "evidence": float(g.get("evidence_quality") or 0),
              "tone": float(g.get("tone_stability") or 0),
              "falsifiability": float(g.get("falsifiability") or 0),
              "balance": float(g.get("balance") or 0),
-             "corroboration": corroboration(g) if p.use_comments else 50.0}
+             "corroboration": corroboration(g, p.corroboration) if p.use_comments else neutral}
     q = sum(p.weights[k] * parts[k] for k in p.weights)
     q -= p.hype_penalty * float(g.get("hype_risk") or 0) / 100
-    return max(0.0, min(100.0, q))
+    return max(0.0, min(100.0, q)) * thesis_factor(g, p)
 
 
 def is_late(g: dict) -> bool:
@@ -120,8 +161,6 @@ def vote_weight(votes, gamma: float) -> float:
 
 
 def contribution(g: dict, p: Params) -> float:
-    if not g.get("is_thesis", True):
-        return 0.0
     q = thread_quality(g, p)
     return float(g.get("stance") or 0) * (q / 100) ** 2 * float(g.get("confidence") or 0) * \
         vote_weight(g.get("votes"), p.gamma)

@@ -39,14 +39,34 @@ def cohort(rows, cutoff, universe):
 
 def test_quality_weights_and_hype_penalty():
     p = ts.Params()
-    assert ts.thread_quality(grade(q=100), p) == pytest.approx(100 * (1 - 0.18) + 0.18 * 50)
-    assert ts.thread_quality(grade(q=100, hype_risk=100), p) == pytest.approx(82 + 9 - 20)
-    assert ts.thread_quality(grade(is_thesis=False), p) == 0
-    assert ts.thread_quality(grade(q=0), p) == pytest.approx(9.0)   # only neutral corroboration
-    # nested comments dict (raw LLM shape) works too
-    raw = {**grade(q=60), "comments": {"independent_support": 90, "independent_opposition": 10}}
+    # discussion term: (support 50 + opposition 50 + objection 0) / 3 = 33.3, weight .30
+    disc = 0.30 * (50 + 50 + 0) / 3
+    assert ts.thread_quality(grade(q=100), p) == pytest.approx(70 + disc)
+    assert ts.thread_quality(grade(q=100, hype_risk=100), p) == pytest.approx(70 + disc - 10)
+    assert ts.thread_quality(grade(q=0), p) == pytest.approx(disc)
+    assert ts.thread_quality(grade(is_thesis=False, q=100), p) == pytest.approx(70 + disc)   # no gate by default
+    assert ts.thread_quality(grade(is_thesis=False), ts.Params(thesis_gate="hard")) == 0
+    soft = ts.Params(thesis_gate="soft")
+    assert ts.thread_quality(grade(is_thesis=False, q=100), soft) == pytest.approx((70 + disc) * 0.5)
+    assert ts.thread_quality(grade(is_thesis=False, q=100, is_thesis_p=0.2), soft) == pytest.approx((70 + disc) * 0.2)
+    assert ts.thread_quality(grade(is_thesis=True, q=100, is_thesis_p=0.2), soft) == pytest.approx(70 + disc)
+    # specificity is out of Q unless asked for; the first formula is still reachable
+    assert ts.thread_quality(grade(q=100, specificity=0), p) == ts.thread_quality(grade(q=100), p)
+    assert ts.thread_quality(grade(q=100, specificity=0), ts.Params(use_specificity=True)) < ts.thread_quality(grade(q=100), p)
+    v1 = ts.Params(weights=dict(ts.WEIGHTS_V1), corroboration="net", hype_penalty=20, thesis_gate="hard",
+                   use_specificity=True)
+    assert ts.thread_quality(grade(q=100), v1) == pytest.approx(100 * (1 - 0.18) + 0.18 * 50)
+    assert ts.thread_quality(grade(is_thesis=False), v1) == 0
+    # more substantive discussion, either way, raises Q; the raw nested shape works too
+    raw = {**grade(q=60), "comments": {"independent_support": 90, "independent_opposition": 60,
+                                        "strongest_objection_severity": 30}}      # discussion 60 > 33
     assert ts.thread_quality(raw, p) > ts.thread_quality(grade(q=60), p)
-    assert ts.thread_quality(raw, ts.Params(use_comments=False)) == ts.thread_quality(grade(q=60), p)
+    against = {**grade(q=60), "comments": {"independent_support": 10, "independent_opposition": 90,
+                                            "strongest_objection_severity": 90}}   # 63 > 60, though bearish
+    assert ts.thread_quality(against, p) > ts.thread_quality(raw, p)
+    assert ts.thread_quality(raw, ts.Params(use_comments=False)) == pytest.approx(0.7 * 60)
+    assert ts.contribution(grade(is_thesis=False, stance=1), ts.Params(thesis_gate="hard")) == 0
+    assert ts.contribution(grade(is_thesis=False, stance=1), p) > 0
 
 
 def test_contribution_sign_votes_and_decay():

@@ -36,7 +36,10 @@ scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: eval
   volume in `data/logs/`, with a run index in `data/logs/jobs.jsonl`.
 - A `JOB_ID` runs once. A redeploy, for example a push to the branch, does not repeat a finished
   job, but it **kills a running one**, which then re-runs from the start. Do not push while a
-  long job is running.
+  long job is running. Queued deployments all run eventually, each with the variables current
+  at its start, so an older build may pick up a newer `JOB` first; a refused job no longer
+  consumes its `JOB_ID`. With slow queues, bundle steps into one preset (`gold-eval-both`,
+  `pilot`) and change variables with `skipDeploys` before the push that deploys them.
 - **Railway can pause deploys for Hobby accounts** ("Deployments paused - limited access": Pro
   demand is prioritised; seen 2026-10-21). `set-variables`, pushes and `redeploy` then create
   no deployment (redeploy errors with "Deploys have been paused temporarily"); queued deploys run
@@ -430,6 +433,8 @@ Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstrin
 | `thesis-run` (`backtest.py run --scorer scripts/thesis_scorer.py:factory --split dev`) | the backtest; `THESIS_VARIANT`, `THESIS_PARAMS` (JSON), `THESIS_VOTES` select the configuration | no |
 | `thesis-timeline` | per-company score series after every thread event, `thesis_series_<variant>.parquet`, for graphs | no |
 | `calibrate --split dev` | P(5x), P(10x), P(permanent loss) and CAGR quartiles per score decile (`--exclude-late` before `calibrate` for the check) | no |
+| `gold-eval-both` | `gold-eval` on `LLM_MODEL`, then on `jev-1.13.0` (`evaluate --model`), one deployment | cents |
+| `pilot` | `llm-run` 2014+2017 identified and blinded, `llm-collect --years`, `check-blind`, `thesis-run --years 2014 2017` both variants; one deployment, grader = `LLM_MODEL` | yes, about $0.6 on Jev |
 | `script:comment_lag` | how long after a post its comments and edits arrive, per year | no |
 
 **Variables the user sets on the worker:** `LLM_MODEL` (`gpt-5-nano`, or `jev-1.13.0`; `fake`
@@ -490,14 +495,40 @@ best-voted first, two levels deep. Blinded = `entity_resolver.blind_text` on eve
 version is a hash of the prompt text plus a builder version; it is in the cache path and the ledger.
 **Prompt changes are tuned on the gold set only, never on backtest numbers.**
 
-**Scoring** (`thesis_scorer.py`): `Q = 100*(.28 argument(+specificity) + .22 evidence + .12 tone +
-.10 falsifiability + .10 balance + .18 corroboration) - 20*hype`; `x = stance*(Q/100)^2*confidence*
-vote_weight`; company score at a cutoff = sum of visible threads' `x` decayed by half-life per
-stated horizon (days 14, weeks 30, months 90, years 180, unclear 60). Params (all in the ledger):
-`gamma`, `beta` (price-since-thesis discount `(P_thesis/P_now)^beta`, capped at 1, base 0),
-`use_author` (causal shrunk author prior, base off), `min_evidence` gate (base 0), `use_comments`.
-Bear theses push the score down. Expected value is reported as calibrated bucket rates
+**Scoring** (`thesis_scorer.py`, weights tuned on the gold set 2026-10-22, see below): `Q =
+100*(.25 argument + .15 evidence + .05 tone + .05 falsifiability + .20 balance + .30 discussion)
+- 10*hype`, with `discussion = (independent_support + independent_opposition +
+strongest_objection_severity)/3`: how much substantive, independent discussion the thread drew,
+whichever way it cut (direction lives in `stance`). Specificity is out of Q. No thesis gate by
+default (`thesis_gate` none | hard | soft): a question post with educated comments still counts,
+and its small stance keeps its contribution small. `x = stance*(Q/100)^2*confidence*vote_weight`;
+company score at a cutoff = sum of visible threads' `x` decayed by half-life per stated horizon
+(days 14, weeks 30, months 90, years 180, unclear 60). Params (all in the ledger): `gamma`, `beta`
+(price-since-thesis discount `(P_thesis/P_now)^beta`, capped at 1, base 0), `use_author` (causal
+shrunk author prior, base off), `min_evidence` gate (base 0), `use_comments`, `corroboration`
+(`discussion` | `net`), `thesis_gate`, `use_specificity`, `exclude_late`. The first formula
+(`WEIGHTS_V1`, net corroboration, hype 20, hard gate, specificity in) is reachable through those
+params. Bear theses push the score down. Expected value is reported as calibrated bucket rates
 (`calibrate`), not as one number.
+
+**Gold-set evaluation (2026-10-22, 30 threads rated 1-10 by the user, $0.011 total):**
+
+| Grader | Spearman with the ratings, first formula | after retuning | notes |
+|---|---|---|---|
+| gpt-5-nano (reasoning minimal) | 0.21 (Pearson 0.40) | 0.46 | `stance` came back 0 on 27 of 30 threads: unusable as the direction signal |
+| **Jev 1.13 (direct API)** | 0.43 (Pearson 0.48) | **0.72** | decisive stances; `is_thesis` false on 11 of 30, including threads rated 7 (hence no hard gate) |
+
+Per-component rank correlations with the ratings (Jev / nano): balance .74/.35, argument
+.52/.17, strongest objection .51/.38, independent opposition .48/.39, independent support
+.41/.47, evidence .33/.16; specificity, tone, falsifiability, hype all within +-0.17; raw votes
+-0.04. The user's stated basis ("comments are what sanity-check an emotionally biased post")
+is what the numbers show: the comment grades and balance carry the rating, direction does
+not (opposition correlates *positively*). The retuning (`goldset.py evaluate` writes
+`data/gold/eval_<model>.csv`; the grid over weights is flat, mean rho 0.61-0.63 across the top
+dozen combinations, worst 0.42) is on 30 points, so treat the exact weights as a starting
+point, not a result. **Decision: Jev is the grader.** The gold sample matches the planned set
+on comments (median 8; 43% with >= 10, 19-20% with >= 25) and votes; gold posts are longer.
+The corpus, not the sample, is thin on discussion.
 
 **Census of dev (2026-10-18, funnel v3):** 9,429 unique threads over 84 cohorts (662 in 2012
 rising to 1,929 in 2018), 12.1M estimated input tokens; at GPT-5 nano $1.28 per variant, $2.57
@@ -523,9 +554,9 @@ once the gold set is rated. (An earlier claude.ai artifact version of the page,
 https://claude.ai/artifact/S1GTrszHG1kJtAjtxd682y, only saves when its owner is signed in and is
 no longer the path.)
 
-**Budget and order** ($5 total, user decision): census first (no spend) -> gold set rated by
-the user -> `gold-eval` on nano and on Jev, pick by correlation -> pilot `llm-run --years 2014 2017`
-identified and blinded (< $1) -> `thesis-run` next to the ladder -> full dev both variants (< $4)
+**Budget and order** ($5 total, user decision): ~~census -> gold set -> gold-eval -> pick~~ done
+2026-10-22 (Jev; $0.011 spent) -> `pilot` (one job; the cache makes the full run pay only for
+the other years) -> `thesis-run` next to the ladder -> full dev both variants (about $2 on Jev)
 -> free ablations (gamma, beta, use_author, min_evidence, no comments; `gamma=0` is the
 no-votes ablation of the aggregation, though the prompt still showed vote counts) -> validate
 for the one finalist. Holdout untouched. Model choice: GPT-5 nano (about $0.05/M in, $0.40/M out,

@@ -476,15 +476,20 @@ def simulate_portfolio(picks: list[tuple[str, str, str]], store: px.PriceStore, 
 def run(scorer: Scorer, evaluator: Evaluator, corpus, split: str, *, ledger: lg.Ledger,
         top_frac: float = 0.1, horizons=HORIZONS, min_candidates: int = 10, seed: int = 0,
         n_boot: int = 500, n_perm: int = 300, size_q=None, hold_months: int = 36,
-        dedupe_months: int = 0,
+        dedupe_months: int = 0, years=None,
         store: px.PriceStore | None = None, cache_dir: Path | None = Path("data/experiments"),
         accept_contaminated: bool = False, log=print) -> dict:
+    """``years`` restricts the split to those cohort years (a pilot); it is part of the
+    configuration, so a pilot and a full run are different ledger entries."""
     engine = {"top_frac": top_frac, "min_candidates": min_candidates, "seed": seed,
               "horizons": list(horizons), "size_q": list(size_q) if size_q else None,
-              "hold_months": hold_months, "dedupe_months": dedupe_months}
+              "hold_months": hold_months, "dedupe_months": dedupe_months,
+              **({"years": sorted(int(y) for y in years)} if years else {})}
     cid = config_hash(scorer, engine)
     ledger.check(split, cid, accept_contaminated=accept_contaminated)   # before any work
     months = lg.split_months(split, evaluator.months())
+    if years:
+        months = [m for m in months if int(m[:4]) in set(engine["years"])]
     stamp = data_stamp(getattr(corpus, "mentions_path", None), getattr(corpus, "post_features", None),
                        evaluator.dir / "universe.parquet")
     scores = build_scores(scorer, months, corpus, evaluator.con, cache_dir, log, stamp)
@@ -623,6 +628,7 @@ def main(argv=None) -> int:
         s.add_argument("--size-q", type=int, nargs="+")
         s.add_argument("--min-posts", type=int, default=1)
         s.add_argument("--n-perm", type=int, default=300)
+        s.add_argument("--years", type=int, nargs="+", help="only these cohort years (a pilot)")
         s.add_argument("--dedupe-months", type=int, default=0,
                        help="skip a company already selected in the previous N cohort months")
         s.add_argument("--accept-contaminated", action="store_true")
@@ -646,7 +652,7 @@ def main(argv=None) -> int:
         corpus = make_corpus(sc, Path(a.parquet), feats / "mentions.parquet", feats / "post_features.parquet")
         rep = run(sc, ev, corpus, a.split, ledger=led, top_frac=a.top, seed=a.seed,
                   size_q=a.size_q, n_perm=a.n_perm, store=store, dedupe_months=a.dedupe_months,
-                  accept_contaminated=a.accept_contaminated, log=lambda m: None)
+                  years=a.years, accept_contaminated=a.accept_contaminated, log=lambda m: None)
         print(format_report(rep), flush=True)
     return 0
 

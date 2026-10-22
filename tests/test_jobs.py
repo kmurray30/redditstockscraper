@@ -124,6 +124,14 @@ def test_dump_file_round_trip():
         df.reassemble([lines[0].replace("DUMP a.md 1/", "DUMP a.md 1/")[:-4] + "AAAA"] + lines[1:])
 
 
+def test_pilot_chain_covers_both_variants_and_restricts_the_years():
+    cmds = jobs.resolve("pilot")
+    assert len(cmds) == 7 and cmds[0][-3:] == ["--years", "2014", "2017"]
+    assert all("2014" in c and "2017" in c for c in cmds if "check-blind" not in c)
+    assert cmds[-2][:2] == ["env", "THESIS_VARIANT=identified"] and cmds[-1][1] == "THESIS_VARIANT=blinded"
+    assert "--split" in cmds[-1] and "dev" in cmds[-1] and "holdout" not in " ".join(cmds[-1])
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]

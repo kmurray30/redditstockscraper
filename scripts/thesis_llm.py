@@ -46,7 +46,7 @@ GRADED_SCHEMA = pa.schema([
     ("n_companies", pa.int16()), ("first_month", pa.string()),
     ("decided_utc", pa.int64()), ("late_comments", pa.int32()), ("late_shown", pa.int32()),
     ("edited_late", pa.bool_()),
-    ("is_thesis", pa.bool_()), ("stance", pa.float64()), ("horizon", pa.string()),
+    ("is_thesis", pa.bool_()), ("is_thesis_p", pa.float64()), ("stance", pa.float64()), ("horizon", pa.string()),
     ("argument_quality", pa.int16()), ("evidence_quality", pa.int16()), ("specificity", pa.int16()),
     ("tone_stability", pa.int16()), ("falsifiability", pa.int16()), ("balance", pa.int16()),
     ("hype_risk", pa.int16()), ("confidence", pa.float64()),
@@ -118,6 +118,7 @@ def flatten(rec: dict) -> dict:
     out = {k: g.get(k) for k in GRADE_FIELDS}
     c = g.get("comments") or {}
     out.update({k: c.get(k) for k in COMMENT_FIELDS})
+    out["is_thesis_p"] = (g.get("_jev") or {}).get("is_thesis_p")   # Jev only; None for chat models
     out["model"], out["cost"] = rec.get("model"), float(rec.get("cost") or 0)
     return out
 
@@ -125,7 +126,7 @@ def flatten(rec: dict) -> dict:
 def cmd_collect(a) -> int:
     model = a.model or llm.Config.from_env().model
     cache = llm.cache_dir(Path(a.llm_dir), model, prompt_version(model), a.variant)
-    rows = load_threads(Path(a.threads))
+    rows = load_threads(Path(a.threads), a.years)
     out, missing = [], 0
     for r in rows:
         p = cache / f"{r['post_id']}_{r['cik']}.json"
@@ -193,6 +194,8 @@ def main(argv=None) -> int:
     r.set_defaults(fn=cmd_run)
     c = sub.add_parser("collect")
     c.add_argument("--variant", choices=VARIANTS, default="identified")
+    c.add_argument("--years", nargs="+", type=int, help="only these years (a pilot); the output "
+                                                          "file then holds only them")
     c.set_defaults(fn=cmd_collect)
     sub.add_parser("check-blind").set_defaults(fn=cmd_check_blind)
     a = p.parse_args(argv)

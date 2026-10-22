@@ -62,6 +62,9 @@ def test_flatten_and_collect_shapes(tmp_path):
            "model": "fake", "cost": 0.0001}
     flat = tl.flatten(rec)
     assert flat["argument_quality"] == 70 and flat["independent_support"] == 20 and flat["model"] == "fake"
+    assert flat["is_thesis_p"] is None                                   # a chat model gives none
+    rec["result"]["_jev"] = {"is_thesis_p": 0.83}
+    assert tl.flatten(rec)["is_thesis_p"] == 0.83
     assert set(tl.GRADE_FIELDS) <= set(flat) and set(tl.COMMENT_FIELDS) <= set(flat)
     # every flattened field has a column in the graded schema
     names = set(tl.GRADED_SCHEMA.names)
