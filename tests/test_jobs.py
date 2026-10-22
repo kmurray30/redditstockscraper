@@ -140,6 +140,14 @@ def test_pilot_checks_run_the_ladder_and_the_late_exclusion_on_the_same_years():
     assert {c[1] for c in cmds[1:]} == {"THESIS_VARIANT=identified", "THESIS_VARIANT=blinded"}
 
 
+def test_full_dev_chain_grades_collects_backtests_calibrates_then_checks_blinding():
+    cmds = jobs.resolve("full-dev")
+    assert len(cmds) == 10 and not any("--years" in c for c in cmds)
+    assert [c[-1] for c in cmds[:2]] == ["identified", "blinded"] and cmds[-1][-1] == "check-blind"
+    assert sum('THESIS_PARAMS={"exclude_late": true}' in c for c in cmds) == 2
+    assert cmds[-2][-3:] == ["calibrate", "--split", "dev"] and "holdout" not in " ".join(" ".join(c) for c in cmds)
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]

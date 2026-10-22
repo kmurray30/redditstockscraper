@@ -549,6 +549,35 @@ two years are not the ladder's 2012-2018, so compare with `pilot-checks` (every 
 same years, and `exclude_late` both variants), not with the ladder table; (5) Jev called 799
 threads theses when it saw the name and 941 when blinded. 1y rows are empty (no 5x in a year).
 
+**Like-for-like rows on the pilot's years (`pilot-checks`, 2026-10-22; dev 2014+2017, 5y, top
+decile per month; baselines pick from every mentioned company (1,874 company-months), the thesis
+scorer only from companies with a graded thread (538), so its candidate pool is already better
+(5x rate 7.3% vs 5.4% for all mentioned), which is why its "vs mentioned" is lower while its
+plain and size-matched lifts are higher):**
+
+| Scorer, 2014+2017 | lift | size-m | vs mentioned | loss (size-m) | perm p | CAGR vs SPY 12.3% |
+|---|---|---|---|---|---|---|
+| mention count | 2.39 [1.87, 2.96] | 3.04 | 1.99 | 1.14 (1.90) | 0.003 | 12.3% |
+| mentions incl. comments | 2.27 | 2.95 | 1.87 | 0.83 (1.47) | 0.003 | 12.4% |
+| sentiment (lexicon) | 0.88 | 0.99 | 0.64 | 0.83 (1.04) | 1.0 | 7.9% |
+| sentiment x volume | 2.07 | 2.63 | 1.68 | 0.95 (1.55) | 0.003 | 11.3% |
+| DD flair count | 1.40 | 1.60 | 1.07 | 1.29 (1.64) | 0.91 | 8.1% |
+| evidence links | 1.85 | 2.29 | 1.47 | 0.70 (1.08) | 0.003 | 10.8% |
+| structure proxy | 1.97 | 2.46 | 1.58 | 0.65 (1.02) | 0.003 | 11.3% |
+| crowd-penalised structure | 0.87 | 0.95 | 0.64 | 1.00 (1.16) | 1.0 | 7.4% |
+| 12-1 momentum | 1.63 | 1.61 | 1.87 | 1.79 (1.75) | 0.003 | 7.8% |
+| random among mentioned | 1.47 | 1.67 | 1.13 | 1.25 (1.59) | 0.48 | 8.1% |
+| **thesis, identified** | 2.68 [1.96, 3.47] | 3.37 | 1.65 | 0.92 (1.47) | 0.007 | 12.0% |
+| **thesis, blinded** | 2.56 [2.02, 3.12] | 3.21 | 1.56 | 0.95 (1.51) | 0.007 | 12.1% |
+| thesis, identified, late content excluded | 2.96 [2.21, 3.81] | 3.73 | 1.84 | 0.96 (1.54) | 0.003 | 12.1% |
+| thesis, blinded, late content excluded | 2.81 [2.26, 3.34] | 3.50 | 1.73 | 0.92 (1.46) | 0.003 | 12.3% |
+
+Read: the thesis scorer beats mention count on plain and size-matched upside (2.68 vs 2.39,
+intervals overlap) and clearly on ruin (loss 0.92 vs 1.14, size-matched 1.47 vs 1.90); dropping
+the threads that hold late comments *raises* the lift, so hindsight in late discussion is not
+what works; blinded stays within noise of identified; no scorer beats SPY on these two cohort
+years. Decision 2026-10-22: run the full dev (`full-dev` preset, about $2 on Jev).
+
 **Census of dev (2026-10-18, funnel v3):** 9,429 unique threads over 84 cohorts (662 in 2012
 rising to 1,929 in 2018), 12.1M estimated input tokens; at GPT-5 nano $1.28 per variant, $2.57
 for identified + blinded. Rejects per cohort row: passing_mention 85k, not_in_universe 64k,

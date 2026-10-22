@@ -88,6 +88,23 @@ PRESETS: dict[str, list[list[str]]] = {
                                                      "scripts/thesis_scorer.py:factory", "--split", "dev",
                                                      "--years", "2014", "2017")],
               _py("thesis_llm.py", "check-blind")],     # last: a leak flags the job, the reports still print
+    # the full dev run in one deployment: grade every planned thread both ways (the pilot's years
+    # are cached), collect, backtest both variants plain and with late content excluded,
+    # calibrate, and check the blinding last. About $2 on Jev.
+    "full-dev": [_py("thesis_llm.py", "run", "--variant", "identified"),
+                 _py("thesis_llm.py", "run", "--variant", "blinded"),
+                 _py("thesis_llm.py", "collect", "--variant", "identified"),
+                 _py("thesis_llm.py", "collect", "--variant", "blinded"),
+                 ["env", "THESIS_VARIANT=identified", *_py("backtest.py", "run", "--scorer",
+                                                           "scripts/thesis_scorer.py:factory", "--split", "dev")],
+                 ["env", "THESIS_VARIANT=blinded", *_py("backtest.py", "run", "--scorer",
+                                                        "scripts/thesis_scorer.py:factory", "--split", "dev")],
+                 ["env", "THESIS_VARIANT=identified", 'THESIS_PARAMS={"exclude_late": true}',
+                  *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")],
+                 ["env", "THESIS_VARIANT=blinded", 'THESIS_PARAMS={"exclude_late": true}',
+                  *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")],
+                 _py("thesis_scorer.py", "calibrate", "--split", "dev"),
+                 _py("thesis_llm.py", "check-blind")],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),
