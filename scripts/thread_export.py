@@ -33,6 +33,7 @@ GRADE_KEYS = ("argument_quality", "evidence_quality", "specificity", "tone_stabi
               "balance", "hype_risk", "independent_support", "independent_opposition",
               "strongest_objection_severity", "n_independent_voices")
 OUTCOME_KEYS = ("status", "max_mult", "excess", "perm_loss", "cagr")
+GATED = ts.Params(quality="gated")
 
 
 def load_outcomes(path: Path, years: int = 5) -> dict[tuple[str, str], dict]:
@@ -58,6 +59,8 @@ def record(g: dict, user: str | None, outcome: dict | None, params: ts.Params) -
             "is_thesis": g.get("is_thesis"), "is_thesis_p": g.get("is_thesis_p"),
             "stance": g.get("stance"), "horizon": g.get("horizon"), "confidence": g.get("confidence"),
             "q": round(ts.thread_quality(g, params), 1),
+            "q_gated": round(ts.thread_quality(g, GATED), 1),
+            "copies": list(g.get("copies") or [g["post_id"]]), "subreddits": list(g.get("subreddits") or [g.get("subreddit")]),
             "grades": {k: g.get(k) for k in GRADE_KEYS},
             "as_of": msg.get("as_of", ""), "flair": msg.get("flair", ""), "link": msg.get("link", ""),
             "title": msg.get("title", ""), "body": msg.get("body", ""),

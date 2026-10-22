@@ -73,7 +73,7 @@ def get(url, password="pw"):
 def test_pages_need_the_password_and_render_grid_list_and_post(server):
     assert get(server + "/healthz", password=None)[0] == 200
     assert get(server + "/", password=None)[0] == 401 and get(server + "/", password="wrong")[0] == 401
-    code, grid = get(server + "/api/grid")
+    code, grid = get(server + "/api/grid?measure=q")
     g = json.loads(grid)
     counts = g["counts"]
     assert code == 200 and g["measure"] == "q" and len(g["bins"]) == 10
@@ -81,7 +81,7 @@ def test_pages_need_the_password_and_render_grid_list_and_post(server):
     assert counts["strong_bear"][tsv.qbin(74.0)] == 1 and counts["strong_bull"][tsv.qbin(24.0)] == 1
     code, html_ = get(server + "/")
     assert code == 200 and "/list?stance=strong_bear&qbin=" in html_ and "Strong bull" in html_
-    code, lst = get(server + f"/list?stance=strong_bear&qbin={tsv.qbin(74.0)}")
+    code, lst = get(server + f"/list?stance=strong_bear&qbin={tsv.qbin(74.0)}&measure=q")
     assert code == 200 and "Killing Me Softly" in lst and "/post/p1_1" in lst and "reddit.com" not in lst
     code, post = get(server + "/post/p1_1")
     assert code == 200 and "&lt;b&gt;Sell&lt;/b&gt;" in post and "AWS alone" in post and "x5.9" in post

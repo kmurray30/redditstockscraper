@@ -188,6 +188,13 @@ def test_gold_dump_pulls_the_gold_folder_then_prints_the_ratings():
     assert cmds[0][-3:] == ["pull", "--only", "gold"] and cmds[1][1:3] == ["scripts/dump_file.py", "data/gold/ratings.csv"]
 
 
+def test_regrade_chain_runs_census_grading_collect_blind_check_gold_tuning_and_export():
+    cmds = jobs.resolve("regrade")
+    assert cmds[0][1] == "scripts/thesis_funnel.py" and [c[-1] for c in cmds[1:3]] == ["identified", "blinded"]
+    assert cmds[5][-1] == "check-blind" and cmds[6][-2:] == ["evaluate", "--tune"] and cmds[-1][-1] == "--push"
+    assert "holdout" not in " ".join(" ".join(c) for c in cmds)
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]

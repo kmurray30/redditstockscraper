@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import math
 import random
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -70,7 +71,52 @@ THREAD_SCHEMA = pa.schema([
     ("pre_score", pa.float64()), ("first_month", pa.string()), ("n_months", pa.int16()),
     ("est_tokens", pa.int32()), ("decided_utc", pa.int64()), ("late_comments", pa.int32()),
     ("late_shown", pa.int32()), ("edited_late", pa.bool_()),
+    ("copies", pa.list_(pa.string())), ("subreddits", pa.list_(pa.string())), ("n_copies", pa.int16()),
 ])
+MERGE_WINDOW_DAYS = 7     # cross-posts: the same author and title within a week are one thread
+
+
+def norm_title(title: str | None) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).split())
+
+
+def merge_events(rows: list[dict], n_comments: dict[str, int], window_days: int = MERGE_WINDOW_DAYS) -> list[dict]:
+    """Cross-posts become one row: the same author posting the same title about the same
+    company within ``window_days`` (user decision 2026-10-22). The earliest copy is the
+    primary (its post_id, text and subreddit); ``copies`` lists every post_id, ``subreddits``
+    every subreddit, ``votes`` and ``_n_comments`` are summed, so the thread is read with all
+    of its discussion and counted once. Deleted or missing authors are never merged."""
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    singles = []
+    for r in rows:
+        a = r.get("author") or ""
+        if a in BAD_AUTHORS or not norm_title(r.get("title")):
+            singles.append(r)
+        else:
+            groups[(r["cik"], a, norm_title(r.get("title")))].append(r)
+    out = []
+    for g in groups.values():
+        g.sort(key=lambda r: (int(r["created_utc"]), r["post_id"]))
+        event: list[dict] = []
+        for r in g:
+            if event and int(r["created_utc"]) - int(event[0]["created_utc"]) > window_days * 86400:
+                out.append(_event(event, n_comments))
+                event = []
+            event.append(r)
+        out.append(_event(event, n_comments))
+    for r in singles:
+        out.append(_event([r], n_comments))
+    return out
+
+
+def _event(copies: list[dict], n_comments: dict[str, int]) -> dict:
+    primary = dict(copies[0])
+    votes = [r.get("votes") for r in copies if r.get("votes") is not None]
+    primary["votes"] = sum(int(v) for v in votes) if votes else primary.get("votes")
+    primary["copies"] = [r["post_id"] for r in copies]
+    primary["subreddits"] = list(dict.fromkeys(r["subreddit"] for r in copies))
+    primary["_n_comments"] = sum(int(n_comments.get(r["post_id"], 0)) for r in copies)
+    return primary
 
 
 def reject_reason(row: dict, max_companies: int = MAX_COMPANIES, *, post_max_n: int | None = None,
@@ -139,12 +185,12 @@ def select(view, universe: dict | None, top_k: int = TOP_K,
     max_n, n_comments = post_context(view, rows)
     rejects: Counter = Counter()
     cands = []
-    for r in rows:
+    for r in merge_events(rows, n_comments):
         if universe is not None and r["cik"] not in universe:
             rejects["not_in_universe"] += 1
             continue
         why = reject_reason(r, max_companies, post_max_n=max_n.get(r["post_id"]),
-                            n_comments=n_comments.get(r["post_id"], 0))
+                            n_comments=r["_n_comments"])
         if why:
             rejects[why] += 1
         else:
@@ -205,16 +251,17 @@ def plan(corpus: PITCorpus, months: list[str], universe_by_month: dict | None, *
         uni = universe_by_month.get(m) if universe_by_month is not None else None
         sel, rej = select(view, uni, top_k, max_companies)
         rejects_total.update(rej)
-        post_ids = [r["post_id"] for r in sel if (r["post_id"], r["cik"]) not in threads]
+        post_ids = [pid for r in sel if (r["post_id"], r["cik"]) not in threads for pid in r["copies"]]
         by_post: dict[str, list[dict]] = defaultdict(list)
         for c in view.comments_for(post_ids):
             by_post[c["post_id"]].append(c)
-        n_comments = {pid: len(cs) for pid, cs in by_post.items()}
         for r in sel:
             k = (r["post_id"], r["cik"])
             if k in threads:
                 threads[k]["n_months"] += 1
                 continue
+            comments = [c for pid in r["copies"] for c in by_post.get(pid, [])]
+            n_comments = {r["post_id"]: len(comments)}
             chars = r["f_chars"] if r.get("f_chars") is not None else len(r.get("selftext") or "")
             threads[k] = {
                 "post_id": r["post_id"], "cik": r["cik"], "ticker": r["ticker"],
@@ -226,7 +273,8 @@ def plan(corpus: PITCorpus, months: list[str], universe_by_month: dict | None, *
                 "method": r.get("method"), "n": int(r.get("n") or 0), "chars": int(chars), "votes": r.get("votes"), "n_comments": int(n_comments.get(r["post_id"], 0)),
                 "pre_score": float(r["pre_score"]), "first_month": m, "n_months": 1,
                 "est_tokens": est_tokens(r.get("title") or "", int(chars), int(n_comments.get(r["post_id"], 0))),
-                **late_content(r, by_post.get(r["post_id"], [])),
+                **late_content(r, comments),
+                "copies": list(r["copies"]), "subreddits": list(r["subreddits"]), "n_copies": len(r["copies"]),
             }
         yr = m[:4]
         stage[yr]["cohorts"] += 1
@@ -272,6 +320,10 @@ def format_census(threads: list[dict], census: dict, price_in: float, price_out:
                      f"({anyl / n:.0%}) have late comments, {lc:,} of {nc:,} comments ({lc / max(nc, 1):.0%}); "
                      f"{shown:,} ({shown / n:.0%}) show one in the prompt; {ed:,} ({ed / n:.0%}) edited late; "
                      f"exclude_late would drop {either:,} ({either / n:.0%})")
+    if threads and "n_copies" in threads[0]:
+        merged = sum(1 for t in threads if (t.get("n_copies") or 1) > 1)
+        lines.append(f"cross-posts merged: {merged:,} threads hold more than one copy "
+                     f"({sum((t.get('n_copies') or 1) - 1 for t in threads):,} copies folded in)")
     rng = random.Random(seed)
     lines.append("\n10 random selected threads:")
     for t in rng.sample(threads, min(10, len(threads))):

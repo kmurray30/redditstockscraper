@@ -256,15 +256,27 @@ class Thread:
     author: str | None
     votes: int | None
     comments: list[dict]          # view rows: comment_id, parent_id, created_utc, author, body, votes?
+    also_in: tuple = ()           # the other subreddits a merged cross-post appeared in
 
     @classmethod
-    def from_view(cls, post: dict, comments: list[dict], name: str | None = None) -> "Thread":
+    def from_view(cls, post: dict, comments: list[dict], name: str | None = None, *,
+                  votes=None, also_in=()) -> "Thread":
         return cls(post_id=post["post_id"], cik=post["cik"], ticker=post["ticker"], name=name,
                    created_utc=int(post["created_utc"]), subreddit=post["subreddit"],
                    flair=post.get("flair"), title=post.get("title") or "",
                    body=post.get("selftext") or "", url=post.get("url"),
                    is_self=bool(post.get("is_self")), author=post.get("author"),
-                   votes=post.get("votes"), comments=comments)
+                   votes=post.get("votes") if votes is None else votes, comments=comments,
+                   also_in=tuple(s for s in also_in if s and s != post["subreddit"]))
+
+
+def merge_comments(comments: list[dict], primary: str, copies) -> list[dict]:
+    """Comments of a merged cross-post read as one thread: a top-level comment under any
+    copy hangs under the primary post."""
+    others = {f"t3_{pid}" for pid in copies if pid != primary}
+    if not others:
+        return list(comments)
+    return [dict(c, parent_id=f"t3_{primary}") if c.get("parent_id") in others else c for c in comments]
 
 
 # ------------------------------------------------------------------ text assembly
@@ -352,9 +364,10 @@ def user_message(t: Thread, blinded: bool, p: dict = PRUNE) -> str:
     votes = f"   POST VOTES: {t.votes}" if t.votes is not None else ""
     link = "" if t.is_self or not t.url else f"\nLINK: {t.url if not blinded else '[link hidden]'}"
     flair = f"   FLAIR: {t.flair}" if t.flair else ""
+    also = f" (also posted in {', '.join('r/' + s for s in t.also_in)})" if t.also_in else ""
     return (f"AS-OF DATE: {as_of} (UTC). Use nothing from after this date.\n"
             f"COMPANY UNDER EVALUATION: {company}\n"
-            f"SUBREDDIT: r/{t.subreddit}{flair}{votes}{link}\n\n"
+            f"SUBREDDIT: r/{t.subreddit}{also}{flair}{votes}{link}\n\n"
             f"TITLE: {title}\n\nBODY:\n{body or '(no text)'}\n\n{comments}\n")
 
 

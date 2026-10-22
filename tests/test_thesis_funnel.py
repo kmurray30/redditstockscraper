@@ -148,3 +148,20 @@ def test_late_content_is_measured_against_the_first_cutoff():
     assert tf.late_content({**p, "edited_utc": -1}, cs[:1])["edited_late"] is True
     assert tf.late_content({**p, "edited_utc": ts_(2015, 3, 31)}, cs[:1]) == {
         "decided_utc": ts_(2015, 4, 1), "late_comments": 0, "late_shown": 0, "edited_late": False}
+
+
+def test_cross_posts_merge_into_one_event_with_summed_votes_and_comments():
+    row = lambda pid, created, sub="stocks", author="a", title="Big DD on T1", votes=10, cik="1": {  # noqa: E731
+        "post_id": pid, "cik": cik, "subreddit": sub, "author": author, "title": title,
+        "created_utc": created, "votes": votes}
+    rows = [row("p1", 1000, "stocks"), row("p2", 1000 + 86400, "investing", votes=5),
+            row("p3", 1000 + 10 * 86400, "StockMarket"),          # same title, outside the week: its own event
+            row("p4", 1000, "stocks", author="[deleted]"),         # deleted authors never merge
+            row("p5", 1000, "stocks", title="Different title"), row("p6", 1000, "stocks", cik="2")]
+    events = tf.merge_events(rows, {"p1": 3, "p2": 4, "p3": 1, "p4": 0, "p5": 2, "p6": 9})
+    by = {e["post_id"]: e for e in events}
+    assert set(by) == {"p1", "p3", "p4", "p5", "p6"}
+    assert by["p1"]["copies"] == ["p1", "p2"] and by["p1"]["subreddits"] == ["stocks", "investing"]
+    assert by["p1"]["votes"] == 15 and by["p1"]["_n_comments"] == 7 and by["p1"]["subreddit"] == "stocks"
+    assert by["p3"]["copies"] == ["p3"] and by["p6"]["copies"] == ["p6"] and by["p4"]["_n_comments"] == 0
+    assert tf.norm_title(" Big  DD, on T1! ") == "big dd on t1"

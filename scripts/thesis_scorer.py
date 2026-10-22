@@ -39,6 +39,10 @@ Optional, each a ledger parameter:
 * ``thesis_gate``: ``none`` (default), ``hard`` (a non-thesis contributes nothing) or
   ``soft`` (multiply by the model's thesis probability where it gave one);
 * ``use_specificity``: average specificity into the argument grade;
+* ``quality``: ``additive`` (default, the gold-tuned sum above) or ``gated`` (the user's
+  rules of 2026-10-22, see ``gated_quality``: the poster's substance is discounted by
+  ``gate_floor`` until independent discussion tests it, ``op_weight`` splits the score
+  between the gated post and the discussion's own value, ``discussion_agg`` is mean or max);
 * ``direction``: ``signed`` (default; a bear thesis pushes the score down), ``abs`` (the
   stance's size without its sign: conviction either way counts for the company) or ``none``
   (every thread counts as if stance were 1: quality and discussion only);
@@ -76,6 +80,10 @@ from thesis_prompt import MATURATION_HOURS, THESIS_PIT  # noqa: E402
 DAY = 86400
 WEIGHTS = {"argument": 0.25, "evidence": 0.15, "tone": 0.05, "falsifiability": 0.05,
            "balance": 0.20, "corroboration": 0.30}
+# The gated formula (user's rules, 2026-10-22): the poster's own substance ("informed, level,
+# bias": argument and evidence, tone, balance and hype), discounted until independent
+# discussion corroborates or tests it, plus the discussion's own value. See thread_quality.
+OP_WEIGHTS = {"argument": 0.45, "evidence": 0.25, "tone": 0.10, "falsifiability": 0.10, "balance": 0.10}
 WEIGHTS_V1 = {"argument": 0.28, "evidence": 0.22, "tone": 0.12, "falsifiability": 0.10,
               "balance": 0.10, "corroboration": 0.18}   # the first formula, for the record
 HALF_LIFE_DAYS = {"days": 14, "weeks": 30, "months": 90, "years": 180, "unclear": 60}
@@ -100,6 +108,10 @@ class Params:
     use_specificity: bool = False
     direction: str = "signed"           # signed | abs | none
     flat_quality: bool = False          # Q = 100, confidence = 1: the funnel-only control
+    quality: str = "additive"           # additive (the gold-tuned sum) | gated (the user's rules)
+    gate_floor: float = 0.5             # gated: share of OP substance that counts with no discussion
+    op_weight: float = 0.6              # gated: weight of the gated OP term; the rest is the discussion's own value
+    discussion_agg: str = "mean"        # gated: mean | max of support, opposition, strongest objection
     weights: dict = field(default_factory=lambda: dict(WEIGHTS))
     half_life: dict = field(default_factory=lambda: dict(HALF_LIFE_DAYS))
 
@@ -143,10 +155,49 @@ def thesis_factor(g: dict, p: Params) -> float:
     return float(prob) if prob is not None else 0.5
 
 
+def op_substance(g: dict, p: Params) -> float:
+    """The poster's own substance, 0..100: informed (argument, evidence), level (tone),
+    checkable (falsifiability), fair (balance), minus hype. No comment grade enters."""
+    arg = float(g.get("argument_quality") or 0)
+    if p.use_specificity:
+        arg = (arg + float(g.get("specificity") or 0)) / 2
+    parts = {"argument": arg, "evidence": float(g.get("evidence_quality") or 0),
+             "tone": float(g.get("tone_stability") or 0), "falsifiability": float(g.get("falsifiability") or 0),
+             "balance": float(g.get("balance") or 0)}
+    q = sum(OP_WEIGHTS[k] * parts[k] for k in OP_WEIGHTS) - p.hype_penalty * float(g.get("hype_risk") or 0) / 100
+    return max(0.0, min(100.0, q))
+
+
+def discussion_value(g: dict, agg: str = "mean") -> float:
+    """How much substantive independent discussion the thread drew, 0..100, whichever way it
+    cut: the mean (or the max) of independent support, independent opposition and the
+    strongest objection's severity."""
+    parts = [float(g.get(k) or 0) for k in ("independent_support", "independent_opposition",
+                                            "strongest_objection_severity")]
+    return max(parts) if agg == "max" else sum(parts) / 3
+
+
+def gated_quality(g: dict, p: Params) -> float:
+    """The user's rule: the poster came in with a goal, so the post's substance only counts
+    in full once independent commenters have tested it; the discussion itself is worth
+    something even under a thin post.  Q = 100 * (op_weight * OP * (floor + (1 - floor) * D)
+    + (1 - op_weight) * D), OP and D in 0..1.  With no discussion a perfect write-up scores
+    100 * op_weight * floor (30 at the defaults, "a 5 at best"); a great top comment under a
+    thin post scores about 100 * (1 - op_weight) (40 to 50)."""
+    op = op_substance(g, p) / 100
+    d = (discussion_value(g, p.discussion_agg) if p.use_comments else 0.0) / 100
+    q = 100 * (p.op_weight * op * (p.gate_floor + (1 - p.gate_floor) * d) + (1 - p.op_weight) * d)
+    return max(0.0, min(100.0, q))
+
+
 def thread_quality(g: dict, p: Params) -> float:
     """Q in 0..100 for one grade record (flat or nested ``comments``)."""
     if "comments" in g and isinstance(g["comments"], dict):
         g = {**g, **g["comments"]}
+    if p.quality == "gated":
+        return gated_quality(g, p) * thesis_factor(g, p)
+    if p.quality != "additive":
+        raise ValueError(f"quality must be additive or gated, not {p.quality!r}")
     arg = float(g.get("argument_quality") or 0)
     if p.use_specificity:
         arg = (arg + float(g.get("specificity") or 0)) / 2

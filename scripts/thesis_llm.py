@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import llm  # noqa: E402
 from pit import PITConfig, PITCorpus  # noqa: E402
 from thesis_prompt import (MATURATION_HOURS, Thread, blind_leaks, build_request,  # noqa: E402
-                           prompt_version, thesis_pit_config)
+                           merge_comments, prompt_version, thesis_pit_config)
 
 VARIANTS = ("identified", "blinded")
 GRADE_FIELDS = ("is_thesis", "stance", "horizon", "argument_quality", "evidence_quality",
@@ -54,6 +54,7 @@ GRADED_SCHEMA = pa.schema([
     ("strongest_objection_severity", pa.int16()), ("n_independent_voices", pa.int32()),
     ("model", pa.string()), ("prompt_version", pa.string()), ("variant", pa.string()),
     ("cost", pa.float64()),
+    ("copies", pa.list_(pa.string())), ("subreddits", pa.list_(pa.string())), ("n_copies", pa.int16()),
 ])
 
 
@@ -85,8 +86,11 @@ def threads_from_views(corpus: PITCorpus, rows: list[dict], lookback: int, log=p
             if not posts:
                 log(f"  {r['post_id']}/{r['cik']}: not in the view at {m} any more; skipped")
                 continue
-            comments = view.comments_for([r["post_id"]])
-            yield r, Thread.from_view(posts[0], comments, r.get("name"))
+            copies = list(r.get("copies") or [r["post_id"]])
+            comments = merge_comments(view.comments_for(copies), r["post_id"], copies)
+            yield r, Thread.from_view(posts[0], comments, r.get("name"),
+                                      votes=r.get("votes") if len(copies) > 1 else None,
+                                      also_in=r.get("subreddits") or ())
 
 
 def cmd_run(a) -> int:
@@ -137,7 +141,10 @@ def cmd_collect(a) -> int:
         row = {k: r.get(k) for k in ("post_id", "cik", "ticker", "name", "subreddit", "created_utc",
                                      "matured_utc", "author", "votes", "n_comments", "n_companies",
                                      "first_month", "decided_utc", "late_comments", "late_shown",
-                                     "edited_late")}
+                                     "edited_late", "copies", "subreddits", "n_copies")}
+        row["copies"] = list(row["copies"] or [r["post_id"]])
+        row["subreddits"] = list(row["subreddits"] or [r.get("subreddit")])
+        row["n_copies"] = int(row["n_copies"] or 1)
         row.update(flatten(rec))
         row["prompt_version"], row["variant"] = prompt_version(model), a.variant
         out.append(row)

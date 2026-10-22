@@ -229,3 +229,24 @@ def test_calibration_reports_beat_rate_and_prior_momentum_and_samples_are_point_
                            years=5, n=2)
     assert "decile 10" in out and "decile 1" in out and "Short this now" in out
     assert "Told you" not in out and "old" not in out.split("decile 10")[1]
+
+
+def test_gated_quality_follows_the_users_rules():
+    gated = ts.Params(quality="gated")          # floor 0.5, op_weight 0.6, mean
+    perfect_alone = grade(q=100, independent_support=0, independent_opposition=0, strongest_objection_severity=0)
+    assert ts.op_substance(perfect_alone, gated) == pytest.approx(100.0)
+    assert ts.thread_quality(perfect_alone, gated) == pytest.approx(30.0)        # "a 5 at best" with no discussion
+    perfect_backed = grade(q=100, independent_support=100, independent_opposition=100, strongest_objection_severity=100)
+    assert ts.thread_quality(perfect_backed, gated) == pytest.approx(100.0)
+    thin_great_comment = grade(q=0, independent_support=100, independent_opposition=100, strongest_objection_severity=100)
+    assert ts.thread_quality(thin_great_comment, gated) == pytest.approx(40.0)   # the discussion's own value
+    opposed = grade(q=100, independent_support=0, independent_opposition=100, strongest_objection_severity=100)
+    supported = grade(q=100, independent_support=100, independent_opposition=0, strongest_objection_severity=0)
+    assert ts.thread_quality(opposed, gated) > ts.thread_quality(supported, gated)   # opposition tests the post too
+    assert ts.discussion_value(opposed, "max") == 100 and ts.discussion_value(opposed, "mean") == pytest.approx(200 / 3)
+    assert ts.thread_quality(perfect_alone, ts.Params(quality="gated", gate_floor=0.0)) == 0.0
+    assert ts.thread_quality(perfect_alone, ts.Params(quality="gated", use_comments=False)) == pytest.approx(30.0)
+    assert ts.thread_quality(grade(q=100, hype_risk=100), gated) < ts.thread_quality(grade(q=100), gated)
+    assert ts.thread_quality(perfect_backed, ts.Params()) == ts.thread_quality(perfect_backed, ts.Params(quality="additive"))
+    with pytest.raises(ValueError, match="quality"):
+        ts.thread_quality(perfect_backed, ts.Params(quality="multiplicative"))

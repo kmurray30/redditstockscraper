@@ -152,6 +152,18 @@ PRESETS: dict[str, list[list[str]]] = {
     "substantive-checks": [_py("backtest.py", "run", "--baseline", "substantive", "--split", "dev", "--rules", rules)
                            for rules in ('{"drop_deleted": false}', '{"subject": false}',
                                          '{"max_companies": 10}', '{"substance": false}')],
+    # the re-grade after the cross-post merge (user decision 2026-10-22): a new census (threads
+    # with copies), both variants graded (only merged threads are new to the cache), collected,
+    # the blinding checked, the gold set re-evaluated with the gated-formula grid, and the
+    # browser export refreshed. Spends cents (the merged threads only).
+    "regrade": [_py("thesis_funnel.py"),
+                _py("thesis_llm.py", "run", "--variant", "identified"),
+                _py("thesis_llm.py", "run", "--variant", "blinded"),
+                _py("thesis_llm.py", "collect", "--variant", "identified"),
+                _py("thesis_llm.py", "collect", "--variant", "blinded"),
+                _py("thesis_llm.py", "check-blind"),
+                _py("goldset.py", "evaluate", "--tune"),
+                _py("thread_export.py", "--push")],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),

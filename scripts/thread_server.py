@@ -222,7 +222,7 @@ def list_html(store: Store, stance: str, b: int, measure: str, sort: str, pg: in
     base = f"/list?stance={stance}&qbin={b}&measure={measure}"
     items = []
     for r in chunk:
-        subs = esc(r.get("subreddit"))
+        subs = esc(", r/".join(r.get("subreddits") or [r.get("subreddit") or ""]))
         items.append(
             f"<div class=item><a class=t href='/post/{quote(r['key'])}?measure={measure}'>{esc(r.get('title') or '(no title)')}</a>"
             f"<div class=meta>{stance_tag(r)}{q_tags(store, r)}"
@@ -293,7 +293,7 @@ def post_html(store: Store, r: dict, measure: str) -> bytes:
               f"<a href='/list?stance={r['_stance']}&qbin={qbin(store.value(r, measure))}&measure={measure}'>back to the list</a></div>"
               f"<h1>{esc(r.get('title') or '(no title)')}</h1>"
               f"<p class=sub>{stance_tag(r)}{q_tags(store, r)}"
-              f"<b>{esc(r.get('ticker'))}</b> {esc(r.get('name'))} &middot; r/{esc(r.get('subreddit'))}"
+              f"<b>{esc(r.get('ticker'))}</b> {esc(r.get('name'))} &middot; r/{esc(', r/'.join(r.get('subreddits') or [r.get('subreddit') or '']))}"
               + (f" &middot; {esc(r.get('flair'))}" if r.get("flair") else "")
               + f" &middot; posted {day(r.get('created_utc'))} &middot; {int(r.get('votes') or 0)} votes</p>")
     text = (f"<div class=card><div class=body>{esc(r.get('body') or '(no text)')}</div>"

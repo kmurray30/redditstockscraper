@@ -130,3 +130,24 @@ def test_build_request_backends_and_prompt_version(thread=None):
     assert tp.prompt_version().startswith("thesis_v1.") and tp.prompt_version("gpt-5-nano") == tp.prompt_version()
     assert tp.prompt_version("jev-1.13.0") == tp.prompt_version("typesafe/jev-1.13") != tp.prompt_version()
     assert tp.prompt_version("jev-1.13.0").startswith(tp.prompt_version() + ".jev")
+
+
+def test_merged_cross_post_reads_as_one_thread():
+    comments = [{"comment_id": "c1", "parent_id": "t3_p1", "post_id": "p1", "created_utc": 5, "author": "x",
+                 "body": "top-level under the primary, long enough to keep", "votes": 3},
+                {"comment_id": "c2", "parent_id": "t3_p2", "post_id": "p2", "created_utc": 6, "author": "y",
+                 "body": "top-level under the copy, long enough to keep too", "votes": 9},
+                {"comment_id": "c3", "parent_id": "t1_c2", "post_id": "p2", "created_utc": 7, "author": "z",
+                 "body": "a reply under the copy's comment, long enough", "votes": 1}]
+    merged = tp.merge_comments(comments, "p1", ["p1", "p2"])
+    assert [c["parent_id"] for c in merged] == ["t3_p1", "t3_p1", "t1_c2"]
+    assert tp.merge_comments(comments, "p1", ["p1"]) == comments
+    post = {"post_id": "p1", "cik": "1", "ticker": "T1", "created_utc": 1_400_000_000, "subreddit": "stocks",
+            "title": "Big DD", "selftext": "body " * 100, "is_self": True, "author": "a", "votes": 10}
+    t = tp.Thread.from_view(post, merged, "T One Inc", votes=15, also_in=["stocks", "investing"])
+    assert t.votes == 15 and t.also_in == ("investing",)
+    msg = tp.user_message(t, blinded=False)
+    assert "SUBREDDIT: r/stocks (also posted in r/investing)   POST VOTES: 15" in msg
+    assert "[9] u1: top-level under the copy" in msg and "> [1] u2: a reply" in msg
+    plain = tp.Thread.from_view(post, comments[:1], "T One Inc")
+    assert "also posted" not in tp.user_message(plain, blinded=False) and plain.votes == 10

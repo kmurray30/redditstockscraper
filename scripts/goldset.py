@@ -198,7 +198,12 @@ def cmd_evaluate(a) -> int:
         print("no ratings filled in yet")
         return 1
     allrows = tl.load_threads(Path(a.threads))
-    rows = [r for r in allrows if (r["post_id"], r["cik"]) in ratings]
+    rows = []
+    for r in allrows:   # a rated post may now be a merged copy of a cross-post: match any copy
+        hit = next((pid for pid in (r.get("copies") or [r["post_id"]]) if (pid, r["cik"]) in ratings), None)
+        if hit:
+            ratings[(r["post_id"], r["cik"])] = ratings[(hit, r["cik"])]
+            rows.append(r)
     print(coverage(rows, allrows))
     if a.model:
         os.environ["LLM_MODEL"] = a.model
@@ -254,6 +259,20 @@ def cmd_evaluate(a) -> int:
                         "stance": results[key].get("stance"), "is_thesis": results[key].get("is_thesis"),
                         **feats[i]})
     print(f"wrote {out}")
+    if a.tune:
+        print("\nrank correlation of each quality formula with your ratings (tuned on these 30 only):")
+        grid = [("additive (current)", Params())]
+        for floor in (0.3, 0.5, 0.7):
+            for w in (0.4, 0.5, 0.6, 0.7):
+                for agg in ("mean", "max"):
+                    grid.append((f"gated floor {floor} op_weight {w} {agg}",
+                                 Params(quality="gated", gate_floor=floor, op_weight=w, discussion_agg=agg)))
+        scored = []
+        for name, params in grid:
+            qs = [thread_quality(results[key], params) for key in results]
+            scored.append((spearman(xs, qs), name))
+        for rho_, name in sorted(scored, reverse=True):
+            print(f"  {rho_:+.2f}  {name}")
     return 0
 
 
@@ -282,6 +301,7 @@ def main(argv=None) -> int:
     e = sub.add_parser("evaluate")
     e.add_argument("--ratings", default="data/gold/ratings.csv")
     e.add_argument("--model", help="override LLM_MODEL for this evaluation (e.g. jev-1.13.0)")
+    e.add_argument("--tune", action="store_true", help="also print the gated-formula grid against the ratings")
     e.set_defaults(fn=cmd_evaluate)
     a = p.parse_args(argv)
     return a.fn(a)
