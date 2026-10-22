@@ -305,6 +305,12 @@ overlapping-lots portfolio vs SPY, which returned 16.1% in dev and 14.8% in vali
 | 12-1 momentum | 1.65 | 1.65 | 1.55 (1.56) | 0.003 | 13.9% | 1.29 | 1.33 | 1.89 | 8.6% |
 | random among mentioned | 1.37 | 1.56 | 1.25 (1.59) | 0.38 | 14.3% | 1.25 | 1.41 | 1.30 | 13.6% |
 
+A later baseline, `substantive` (2026-10-22): the thesis funnel's structural rules on the
+same 24h-window view with no votes, comments or model (a post counts if the company is its
+subject, it names at most two companies, the author is not deleted, and it is a self post of
+>= 400 characters or a link post with text or a primary source). Its dev row is in "Thesis
+scorer" under the ablations; it is the control for the thesis scorer's funnel.
+
 **Before vs after the survivorship fix** (mention count, dev, 5y): plain lift 2.44 -> 2.25;
 loss-lift **0.65 -> 1.05**. The old "popular companies suffer fewer permanent losses" result was
 mostly the bias; with the dead companies back it is gone. The size-matched loss-lift of 1.84 says
@@ -437,6 +443,7 @@ Design decided with the user in chat. Read `scripts/thesis_scorer.py`'s docstrin
 | `pilot` | `llm-run` 2014+2017 identified and blinded, `llm-collect --years`, `check-blind`, `thesis-run --years 2014 2017` both variants; one deployment, grader = `LLM_MODEL` | yes, about $0.6 on Jev |
 | `full-dev` | `llm-run` both variants on every planned thread, `llm-collect` both, `thesis-run` both plain and with `exclude_late`, `calibrate --split dev`, `check-blind` last; one deployment | yes, about $2 on Jev |
 | `ablations` | 14 `thesis-run`s on the identified grades, one parameter changed at a time (gamma 0 / 1, beta 1, use_author, min_evidence 50, no comments, thesis_gate hard / soft, net corroboration, specificity, direction abs / none, flat_quality, flat_quality + direction none); every row in the ledger | no |
+| `finalist-checks` | the `substantive` baseline (LLM-free, vote-free, 24h control), the ablation winner without votes / late content / both, the graded no-direction run blinded / without late content / without votes, and both calibration tables | no |
 | `script:comment_lag` | how long after a post its comments and edits arrive, per year | no |
 
 **Variables the user sets on the worker:** `LLM_MODEL` (`gpt-5-nano`, or `jev-1.13.0`; `fake`
@@ -636,6 +643,49 @@ the "funnel only, no grades" control. They were added after seeing this table, s
 backtest-informed and count as trials in the deflated Sharpe. (4) Nothing here touches
 validate or the holdout. Decision 2026-10-22: run the free `ablations` preset (14 runs, identified
 variant) before anything else.
+
+**Ablations (2026-10-22, `ablations` preset; identified grades, full dev, 5y, top decile per
+month, one parameter changed per row against the default; trials 29-42 in the ledger):**
+
+| Change | 5y lift (95% CI) | size-m | vs mentioned | 10x lift | loss (size-m) | perm p | CAGR vs SPY 16.1% | IR | DSR |
+|---|---|---|---|---|---|---|---|---|---|
+| default (identified) | 1.96 [1.62, 2.36] | 2.44 | 1.29 | 3.85 | 1.16 (1.80) | 0.003 | 17.6% | 0.18 | 0.17 |
+| gamma 0 (no votes in the weight) | 1.89 [1.52, 2.33] | 2.33 | 1.24 | 3.58 | 1.23 (1.87) | 0.007 | 16.8% | 0.13 | 0.12 |
+| gamma 1 | 1.96 [1.60, 2.39] | 2.45 | 1.29 | 4.01 | 1.18 (1.86) | 0.003 | 18.1% | 0.21 | 0.17 |
+| beta 1 (price-since-thesis discount) | 1.91 [1.56, 2.34] | 2.37 | 1.25 | 3.80 | 1.14 (1.78) | 0.003 | 17.1% | 0.15 | 0.13 |
+| use_author | 1.95 [1.61, 2.35] | 2.42 | 1.28 | 3.79 | 1.16 (1.80) | 0.003 | 17.6% | 0.18 | 0.16 |
+| min_evidence 50 (820 picks, 257 names) | 2.12 [1.54, 2.72] | 2.62 | 1.12 | 4.37 | 1.18 (1.82) | 0.023 | 19.6% | 0.24 | 0.16 |
+| use_comments false | 1.71 [1.38, 2.10] | 2.09 | 1.10 | 3.31 | 1.15 (1.73) | 0.086 | 16.3% | 0.10 | 0.11 |
+| thesis_gate hard | 1.92 [1.55, 2.33] | 2.33 | 1.26 | 3.76 | 1.25 (1.85) | 0.040 | 17.3% | 0.16 | 0.14 |
+| thesis_gate soft | 1.92 [1.57, 2.32] | 2.33 | 1.26 | 3.76 | 1.28 (1.89) | 0.033 | 17.3% | 0.15 | 0.14 |
+| corroboration net (first formula's comment term) | 1.72 [1.36, 2.11] | 2.11 | 1.11 | 3.16 | 1.13 (1.72) | 0.120 | 16.1% | 0.08 | 0.10 |
+| use_specificity | 1.98 [1.62, 2.40] | 2.45 | 1.30 | 3.96 | 1.18 (1.84) | 0.010 | 17.7% | 0.19 | 0.17 |
+| direction abs (418 names) | 2.92 [2.51, 3.39] | 3.72 | 2.07 | 5.13 | 1.07 (1.77) | 0.003 | 21.0% | 0.38 | 0.36 |
+| **direction none** (362 names) | **3.48 [3.07, 3.99]** | 4.53 | 2.59 | 6.92 | **0.76 (1.35)** | 0.003 | 23.4% | 0.59 | 0.64 |
+| flat_quality (signed count, no grades) | 2.21 [1.85, 2.66] | 2.74 | 1.48 | 4.20 | 1.24 (1.94) | 0.003 | 16.2% | 0.08 | 0.09 |
+| **flat_quality + direction none** (279 names) | **3.94 [3.47, 4.45]** | **5.26** | **3.04** | **7.16** | **0.70 (1.33)** | 0.003 | **25.4%** | **0.75** | **0.79** |
+
+Read: (1) **the sign of the stance was the problem.** Every change to the grades, gates,
+votes, author prior or price discount moves the lift by a few hundredths; dropping the sign
+moves it from 1.96 to 3.48, and the permanent-loss lift from 1.16 to 0.76, the first thesis
+row below the universe's loss rate on the full dev. The median pick goes from 34% to 20%
+behind the market. (2) **The grades then add nothing over counting.** `flat_quality +
+direction none`, which is the vote-weighted, horizon-decayed *count* of funnel threads with
+no quality grade and no stance, is the best row of the project: lift 3.94 against mention
+count's 2.25, size-matched 5.26, loss 0.70 (1.33) against 1.05 (1.84), CAGR 25.4% against
+18.3%, deflated Sharpe 0.79 with 42 trials counted, median pick only 9% behind the market.
+The gold-tuned Q, which agrees with the user's ratings at rho 0.72, *lowers* every number when
+it weights those same threads (3.94 -> 3.48). (3) **What is left to rule out before believing
+it** is in the thread *selection*, not in the model: the funnel uses final (six-month) votes
+in its pre-score, in the thin-post rule and in the thread weight, and the no-lock view lets a
+thin post qualify through comments written after the cutoff. Checks, all free
+(`finalist-checks` preset): the `substantive` baseline (the funnel's structural rules on
+the baselines' 24h-window view, no votes, no comments, no model: the clean control), the
+winner with `gamma 0`, with `exclude_late`, and both; the graded no-direction variant
+blinded, without late content and without votes; and the calibration tables of both. If the
+`substantive` baseline matches the winner, the result is "count substantive single-company
+posts", and the LLM layer is a cost without a benefit on this metric. (4) The rows were
+chosen after the calibration table; validate stays unseen until one finalist is named.
 
 **Census of dev (2026-10-18, funnel v3):** 9,429 unique threads over 84 cohorts (662 in 2012
 rising to 1,929 in 2018), 12.1M estimated input tokens; at GPT-5 nano $1.28 per variant, $2.57

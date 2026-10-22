@@ -121,6 +121,25 @@ PRESETS: dict[str, list[list[str]]] = {
                                  '{"corroboration": "net"}', '{"use_specificity": true}',
                                  '{"direction": "abs"}', '{"direction": "none"}',
                                  '{"flat_quality": true}', '{"flat_quality": true, "direction": "none"}')],
+    # the checks on the ablation winner (score = vote-weighted count of graded threads, no
+    # direction, no grades): the LLM-free 24h-window control (`substantive` baseline), then
+    # the winner without votes, without late content, and both; the graded no-direction
+    # variant blinded, without late content and without votes; and the calibration tables
+    # of both no-direction configurations. No spend.
+    "finalist-checks": [_py("backtest.py", "run", "--baseline", "substantive", "--split", "dev"),
+                        *[["env", f"THESIS_VARIANT={variant}", f"THESIS_PARAMS={params}",
+                           *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")]
+                          for variant, params in (
+                              ("identified", '{"flat_quality": true, "direction": "none", "exclude_late": true}'),
+                              ("identified", '{"flat_quality": true, "direction": "none", "gamma": 0}'),
+                              ("identified", '{"flat_quality": true, "direction": "none", "gamma": 0, "exclude_late": true}'),
+                              ("blinded", '{"direction": "none"}'),
+                              ("identified", '{"direction": "none", "exclude_late": true}'),
+                              ("identified", '{"direction": "none", "gamma": 0}'))],
+                        ["env", "THESIS_VARIANT=identified", 'THESIS_PARAMS={"direction": "none"}',
+                         *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
+                        ["env", "THESIS_VARIANT=identified", 'THESIS_PARAMS={"flat_quality": true, "direction": "none"}',
+                         *_py("thesis_scorer.py", "calibrate", "--split", "dev")]],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),

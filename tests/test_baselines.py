@@ -130,3 +130,21 @@ def test_list_posts_naming_many_companies_are_ignored():
             post_row("real", "A", n_companies=1)]
     assert scores(bl.Baseline("mentions"), cohort(rows)) == {"A": 1.0}
     assert scores(bl.Baseline("mentions", max_companies=100), cohort(rows)) == {"A": 2.0, "B": 1.0}
+
+
+def test_substantive_counts_single_subject_posts_with_substance_only():
+    rows = [post_row("p1", "A", f_chars=500),                                   # long self post, in title
+            post_row("p2", "A", f_chars=100),                                   # thin self post
+            post_row("p3", "A", f_chars=500, in_title=False, method="bare_clean", n=1),   # passing mention
+            post_row("p4", "A", f_chars=500, in_title=False, method="bare_clean", n=2),   # named twice
+            post_row("p5", "A", f_chars=500, n_companies=3),                    # too many companies
+            post_row("p6", "A", f_chars=500, author="[deleted]"),
+            post_row("p7", "A", f_chars=10, is_self=False, f_primary_links=1),  # link to a primary source
+            post_row("p8", "A", f_chars=10, is_self=False),                     # bare link
+            post_row("p9", "A", f_chars=500, method="name"),                    # unreliable mention
+            post_row("p10", "B", f_chars=500), post_row("p11", "NOTELIGIBLE", f_chars=500)]
+    c = cohort(rows, universe={"A": {"mom": 0.0}, "B": {"mom": 0.0}})
+    assert bl.substantive_counts(c) == {"A": 3, "B": 1}
+    assert scores(bl.Baseline("substantive"), c) == {"A": 3.0, "B": 1.0}
+    assert set(scores(bl.Baseline("substantive", min_posts=2), c)) == {"A"}
+    assert bl.Baseline("substantive").maturation_hours == 24

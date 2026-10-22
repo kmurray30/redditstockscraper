@@ -160,6 +160,34 @@ def cohort_features(cohort: Cohort, methods=RELIABLE_METHODS,
     return out
 
 
+# The thesis funnel's structural rules (thesis_funnel.py), applied to the baselines' 24h view
+# without votes, comments or any model: a post counts for a company if the mention is reliable
+# and the company is a subject (cashtag, in the title, or named twice), the post names at most
+# two companies, the author is not deleted, and the post has substance (a self post of >= 400
+# characters, or a link post with >= 200 characters of text or a primary-source link).
+SUBSTANTIVE_MAX_COMPANIES = 2
+SUBSTANTIVE_SELF_CHARS = 400
+SUBSTANTIVE_LINK_CHARS = 200
+BAD_AUTHORS = ("[deleted]", "AutoModerator", "None", "")
+
+
+def substantive_counts(cohort: Cohort, methods=RELIABLE_METHODS) -> dict[str, int]:
+    """Distinct substantive, single-subject posts per eligible company in the visible window:
+    the LLM-free, vote-free, 24h-window control for the thesis scorer's funnel."""
+    marks = ",".join("?" * len(methods))
+    bad = ",".join("?" * len(BAD_AUTHORS))
+    rows = cohort.view.query(f"""
+        select cik, count(distinct post_id) n from post_mentions
+        where method in ({marks})
+          and (method = 'cashtag' or in_title or n >= 2)
+          and n_companies <= {SUBSTANTIVE_MAX_COMPANIES}
+          and coalesce(author, '') not in ({bad})
+          and ((is_self and f_chars >= {SUBSTANTIVE_SELF_CHARS})
+               or (not is_self and (f_chars >= {SUBSTANTIVE_LINK_CHARS} or f_primary_links > 0)))
+        group by cik""", list(methods) + list(BAD_AUTHORS))
+    return {r["cik"]: int(r["n"]) for r in rows if r["cik"] in cohort.universe}
+
+
 def percentile_ranks(values: dict[str, float]) -> dict[str, float]:
     """Cross-sectional percentile rank in [0, 1], ties share the average rank."""
     items = sorted(values.items(), key=lambda kv: kv[1])
@@ -179,7 +207,7 @@ class Baseline:
     """One configurable baseline; ``kind`` picks the score."""
 
     KINDS = ("mentions", "mentions_all", "sentiment", "sentiment_volume", "dd", "evidence",
-             "structure", "crowd_penalized", "momentum", "random")
+             "structure", "crowd_penalized", "momentum", "random", "substantive")
 
     def __init__(self, kind: str, *, lookback_days: int = 90, maturation_hours: int = 24,
                  min_posts: int = 1, seed: int = 0, methods=RELIABLE_METHODS,
@@ -198,6 +226,9 @@ class Baseline:
     def score(self, cohort: Cohort) -> dict[str, dict[str, float]]:
         if self.kind == "momentum":
             return {c: {"score": u["mom"]} for c, u in cohort.universe.items() if u.get("mom") is not None}
+        if self.kind == "substantive":
+            counts = substantive_counts(cohort, self.methods)
+            return {c: {"score": float(n), "n_posts": n} for c, n in counts.items() if n >= self.min_posts}
         feats = cohort_features(cohort, self.methods, self.max_companies)
         feats = {c: f for c, f in feats.items() if f["n_posts"] >= self.min_posts}
         if self.kind == "random":

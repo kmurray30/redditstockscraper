@@ -162,6 +162,18 @@ def test_ablations_change_one_parameter_at_a_time_on_the_identified_variant():
         jobs.resolve("ablations", "--years 2014")
 
 
+def test_finalist_checks_cover_the_control_the_leak_checks_and_the_calibrations():
+    import json
+    cmds = jobs.resolve("finalist-checks")
+    assert len(cmds) == 9 and cmds[0][-4:] == ["--baseline", "substantive", "--split", "dev"]
+    params = [json.loads(c[2].split("=", 1)[1]) for c in cmds[1:]]
+    assert all(p["direction"] == "none" for p in params)
+    assert sum(p.get("flat_quality", False) for p in params) == 4
+    assert sum(p.get("exclude_late", False) for p in params) == 3 and sum(p.get("gamma") == 0 for p in params) == 3
+    assert cmds[4][1] == "THESIS_VARIANT=blinded" and all(c[-3:] == ["calibrate", "--split", "dev"] for c in cmds[-2:])
+    assert "holdout" not in " ".join(" ".join(c) for c in cmds)
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]
