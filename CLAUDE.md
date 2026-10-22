@@ -799,11 +799,14 @@ no longer the path.)
 `scripts/thread_server.py` at https://thread-ui-production.up.railway.app behind the same
 HTTP Basic password as `gold-ui` (`GOLD_PASSWORD`). It reads `data/ui/threads.json.zst` from
 the bucket at start (retrying every 30 s until `export-threads` has pushed it) and serves a
-grid of the model's stance (bull at or above +0.25, bear at or below -0.25, neutral between)
-against thread quality (Q at or above a threshold, default 50, adjustable on the page), each
-count linking to a list of titles, each title to the thread rendered from the exported text
-(the post, the comments as the model saw them, the grades, the 5-year outcome). Nothing links
-to Reddit. Service id `5508cca9-db74-47e0-861a-3be0c4cb5ae2`; start command
+grid of the model's stance in its five levels (strong bull at or above +0.75, bull from
++0.25, neutral between, bear from -0.25, strong bear at or below -0.75) against thread
+quality in ten bins of ten (`?measure=q` the gold-tuned sum, `?measure=q_gated` the gated
+formula, switch on the page), each count linking to a list of titles, each title to the
+thread rendered from the exported text (the post, the comments as the model saw them,
+every subreddit it appeared in, the grades under both formulas, the 5-year outcome).
+Nothing links to Reddit. After a new export, `restart-service` on `thread-ui` reloads it
+(the server reads the file once at start). Service id `5508cca9-db74-47e0-861a-3be0c4cb5ae2`; start command
 `python scripts/thread_server.py`, healthcheck `/healthz`, S3 variables are references to
 the bucket's. **This is the second deliberate exception to "no public endpoint"**: it holds
 the 9,681 graded threads (text and comments) behind a password, which is more than the gold
@@ -861,6 +864,33 @@ rule and the gold-tuned sum agree with the ratings about equally on 27 points; b
 reported on dev (`gated-dev` preset), the choice between them is not a backtest decision.
 At the defaults a perfect write-up with no discussion scores 49 ("a 5 at best"), a thin
 post under a great discussion 30. The browser export carries `q` and `q_gated`.
+
+**Gated formula on the full dev (2026-10-22, `gated-dev` preset, merged threads, 9,586
+graded, 17,790 candidate-months, 5y, top decile per month; trials 54-58):**
+
+| Scorer, dev 2012-2018 | 5y lift (95% CI) | size-m | vs mentioned | 10x lift | loss (size-m) | median pick vs market | CAGR vs SPY 16.1% | IR | DSR |
+|---|---|---|---|---|---|---|---|---|---|
+| gated, signed (identified) | 1.98 [1.66, 2.35] | 2.46 | 1.30 | 3.96 | 1.18 (1.84) | -33.5% | 18.0% | 0.20 | 0.02 |
+| gated, direction none (identified) | 3.57 [3.09, 4.09] | 4.68 | 2.67 | 6.89 | 0.85 (1.54) | -18.8% | 23.5% | 0.58 | 0.21 |
+| gated, direction none, blinded | 3.56 [3.08, 4.03] | 4.68 | 2.66 | 6.78 | 0.82 (1.49) | -19.6% | 23.8% | 0.63 | 0.28 |
+| additive, direction none, merged threads | 3.55 [3.12, 4.02] | 4.63 | 2.65 | 7.09 | 0.75 (1.33) | -18.1% | 23.7% | 0.61 | 0.23 |
+| additive, signed, merged threads | 1.98 [1.66, 2.36] | 2.46 | 1.30 | 3.85 | 1.16 (1.81) | -33.2% | 17.7% | 0.18 | 0.02 |
+| substantive count, no deleted-author rule (for reference) | 4.29 [3.90, 4.67] | 5.66 | 3.55 | 9.00 | 0.64 (1.19) | -1.5% | 26.3% | 0.69 | 0.42 |
+
+Calibration (dev, 5y): gated signed is still U-shaped (decile 1 P(5x) 0.126, decile 10
+0.096); gated direction none is monotone at the top (decile 10 0.172, 9 0.102, 8 0.065,
+the rest 0.05-0.07; decile 10 beats the market 44% of the time with mean excess +91%, at 3y
+49% and +41%; decile 1 0.051, P(beat) 0.32).
+
+Read: (1) **the gated formula and the gold-tuned sum are the same scorer on dev**: 3.57 vs
+3.55 without direction, 1.98 vs 1.98 with it; the quality formula is not where the result
+lives. (2) **Direction is still the whole difference** (1.98 signed against 3.57 none, in
+both formulas), and the calibration says why again: with the sign, the most bearish decile
+has the best 5x rate. (3) Blinding changes nothing (3.56 vs 3.57). (4) The cross-post merge
+moved the additive rows by hundredths (3.48 -> 3.55, 1.96 -> 1.98): the triple-counted DDs
+were a visible symptom at the very top, not a driver of the averages. (5) The plain count
+of substantive posts (4.29, loss 0.64) still beats every graded configuration. The DSR
+column keeps falling only because the trial count is now 54-58.
 
 **Budget and order** ($5 total, user decision): ~~census -> gold set -> gold-eval -> pick~~ done
 2026-10-22 (Jev; $0.011 spent) -> `pilot` (one job; the cache makes the full run pay only for
