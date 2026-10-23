@@ -3,6 +3,7 @@
     python scripts/thesis_llm.py run --variant identified [--years 2014 2017] [--limit N] [--dry-run]
     python scripts/thesis_llm.py run --variant blinded
     python scripts/thesis_llm.py collect --variant identified     # cache -> thesis_threads_<variant>.parquet
+    python scripts/thesis_llm.py --prompt thesis_v2 run ...       # a second prompt (or THESIS_PROMPT)
     python scripts/thesis_llm.py check-blind                       # ticker / name leaks in blinded texts
 
 ``run`` rebuilds each thread's text from the point-in-time view at the cutoff where the
@@ -29,13 +30,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import llm  # noqa: E402
 from pit import PITConfig, PITCorpus  # noqa: E402
-from thesis_prompt import (MATURATION_HOURS, Thread, blind_leaks, build_request,  # noqa: E402
-                           merge_comments, prompt_version, thesis_pit_config)
+from thesis_prompt import (MATURATION_HOURS, PROMPTS, Thread, blind_leaks, build_request,  # noqa: E402
+                           derive_levels, merge_comments, prompt_name, prompt_version,
+                           thesis_pit_config)
+from thesis_scorer import grades_path  # noqa: E402
 
 VARIANTS = ("identified", "blinded")
 GRADE_FIELDS = ("is_thesis", "stance", "horizon", "argument_quality", "evidence_quality",
                 "specificity", "tone_stability", "falsifiability", "balance", "hype_risk",
-                "confidence")
+                "confidence",
+                # thesis_v2's two final judgements (null under thesis_v1): the weighted value and
+                # the most probable level
+                "direction", "credibility", "direction_5", "credibility_10")
 COMMENT_FIELDS = ("independent_support", "independent_opposition", "strongest_objection_severity",
                   "n_independent_voices")
 
@@ -52,7 +58,9 @@ GRADED_SCHEMA = pa.schema([
     ("hype_risk", pa.int16()), ("confidence", pa.float64()),
     ("independent_support", pa.int16()), ("independent_opposition", pa.int16()),
     ("strongest_objection_severity", pa.int16()), ("n_independent_voices", pa.int32()),
-    ("model", pa.string()), ("prompt_version", pa.string()), ("variant", pa.string()),
+    ("direction", pa.float64()), ("credibility", pa.float64()),
+    ("direction_5", pa.int16()), ("credibility_10", pa.int16()),
+    ("model", pa.string()), ("prompt", pa.string()), ("prompt_version", pa.string()), ("variant", pa.string()),
     ("cost", pa.float64()),
     ("copies", pa.list_(pa.string())), ("subreddits", pa.list_(pa.string())), ("n_copies", pa.int16()),
 ])
@@ -100,10 +108,10 @@ def cmd_run(a) -> int:
     blinded = a.variant == "blinded"
     requests, meta = [], {}
     for r, t in threads_from_views(corpus, rows, a.lookback):
-        req = build_request(t, blinded=blinded, backend=cfg.backend)
+        req = build_request(t, blinded=blinded, backend=cfg.backend, prompt=a.prompt)
         requests.append(req)
         meta[req.key] = r
-    pv = prompt_version(cfg.model)
+    pv = prompt_version(cfg.model, a.prompt)
     cache = llm.Cache(llm.cache_dir(Path(a.llm_dir), cfg.model, pv, a.variant))
     spend = llm.Spend(Path(a.llm_dir) / "spend.jsonl")
     print(f"[run] {len(requests):,} threads, variant {a.variant}, prompt {pv}, "
@@ -118,7 +126,7 @@ def cmd_run(a) -> int:
 
 
 def flatten(rec: dict) -> dict:
-    g = rec["result"]
+    g = derive_levels(dict(rec["result"]))
     out = {k: g.get(k) for k in GRADE_FIELDS}
     c = g.get("comments") or {}
     out.update({k: c.get(k) for k in COMMENT_FIELDS})
@@ -129,7 +137,8 @@ def flatten(rec: dict) -> dict:
 
 def cmd_collect(a) -> int:
     model = a.model or llm.Config.from_env().model
-    cache = llm.cache_dir(Path(a.llm_dir), model, prompt_version(model), a.variant)
+    pv = prompt_version(model, a.prompt)
+    cache = llm.cache_dir(Path(a.llm_dir), model, pv, a.variant)
     rows = load_threads(Path(a.threads), a.years)
     out, missing = [], 0
     for r in rows:
@@ -146,20 +155,20 @@ def cmd_collect(a) -> int:
         row["subreddits"] = list(row["subreddits"] or [r.get("subreddit")])
         row["n_copies"] = int(row["n_copies"] or 1)
         row.update(flatten(rec))
-        row["prompt_version"], row["variant"] = prompt_version(model), a.variant
+        row["prompt"], row["prompt_version"], row["variant"] = a.prompt, pv, a.variant
         out.append(row)
-    dest = Path(a.features) / f"thesis_threads_{a.variant}.parquet"
+    dest = grades_path(Path(a.features), a.variant, a.prompt)
     pq.write_table(pa.Table.from_pylist(out, schema=GRADED_SCHEMA), dest, compression="zstd")
     spend = llm.Spend(Path(a.llm_dir) / "spend.jsonl").total
     n_thesis = sum(1 for r in out if r["is_thesis"])
     print(f"[collect] {len(out):,} graded, {missing:,} missing of {len(rows):,} planned; "
-          f"{n_thesis:,} judged theses; wrote {dest}; lifetime spend ${spend:.3f}")
+          f"{n_thesis:,} judged theses; prompt {pv}; wrote {dest}; lifetime spend ${spend:.3f}")
     return 0 if not missing else 1
 
 
 def cmd_check_blind(a) -> int:
     model = a.model or llm.Config.from_env().model
-    cache = llm.cache_dir(Path(a.llm_dir), model, prompt_version(model), "blinded")
+    cache = llm.cache_dir(Path(a.llm_dir), model, prompt_version(model, a.prompt), "blinded")
     rows = {(r["post_id"], r["cik"]): r for r in load_threads(Path(a.threads))}
     n = leaks = 0
     examples = []
@@ -192,6 +201,8 @@ def main(argv=None) -> int:
     p.add_argument("--lookback", type=int, default=90)
     p.add_argument("--maturation", type=int, default=MATURATION_HOURS)
     p.add_argument("--model", help="override LLM_MODEL for collect / check-blind")
+    p.add_argument("--prompt", choices=sorted(PROMPTS),
+                   help="which prompt to grade with (default: THESIS_PROMPT, else thesis_v1)")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
     r.add_argument("--variant", choices=VARIANTS, default="identified")
@@ -206,6 +217,7 @@ def main(argv=None) -> int:
     c.set_defaults(fn=cmd_collect)
     sub.add_parser("check-blind").set_defaults(fn=cmd_check_blind)
     a = p.parse_args(argv)
+    a.prompt = a.prompt or prompt_name()
     return a.fn(a)
 
 

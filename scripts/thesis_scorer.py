@@ -39,10 +39,14 @@ Optional, each a ledger parameter:
 * ``thesis_gate``: ``none`` (default), ``hard`` (a non-thesis contributes nothing) or
   ``soft`` (multiply by the model's thesis probability where it gave one);
 * ``use_specificity``: average specificity into the argument grade;
-* ``quality``: ``additive`` (default, the gold-tuned sum above) or ``gated`` (the user's
+* ``quality``: ``additive`` (default, the gold-tuned sum above), ``gated`` (the user's
   rules of 2026-10-22, see ``gated_quality``: the poster's substance is discounted by
   ``gate_floor`` until independent discussion tests it, ``op_weight`` splits the score
-  between the gated post and the discussion's own value, ``discussion_agg`` is mean or max);
+  between the gated post and the discussion's own value, ``discussion_agg`` is mean or max)
+  or ``direct`` (the model's own two final judgements from the ``thesis_v2`` prompt: Q is its
+  1-10 ``credibility`` mapped to 0-100 and the stance is its 1-5 ``direction`` mapped to
+  -1..1, so no formula over the components at all; needs a grades file graded with that
+  prompt, ``THESIS_PROMPT=thesis_v2``);
 * ``direction``: ``signed`` (default; a bear thesis pushes the score down), ``abs`` (the
   stance's size without its sign: conviction either way counts for the company) or ``none``
   (every thread counts as if stance were 1: quality and discussion only);
@@ -75,7 +79,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import prices as px  # noqa: E402
 from scorer import Cohort  # noqa: E402
-from thesis_prompt import MATURATION_HOURS, THESIS_PIT  # noqa: E402
+from thesis_prompt import MATURATION_HOURS, THESIS_PIT, prompt_name, prompt_tag  # noqa: E402
 
 DAY = 86400
 WEIGHTS = {"argument": 0.25, "evidence": 0.15, "tone": 0.05, "falsifiability": 0.05,
@@ -108,7 +112,7 @@ class Params:
     use_specificity: bool = False
     direction: str = "signed"           # signed | abs | none
     flat_quality: bool = False          # Q = 100, confidence = 1: the funnel-only control
-    quality: str = "additive"           # additive (the gold-tuned sum) | gated (the user's rules)
+    quality: str = "additive"           # additive (the gold-tuned sum) | gated (the user's rules) | direct (the model's own 1-10)
     gate_floor: float = 0.7             # gated: share of OP substance that counts with no discussion (gold-tuned 2026-10-22)
     op_weight: float = 0.7              # gated: weight of the gated OP term; the rest is the discussion's own value (gold-tuned)
     discussion_agg: str = "mean"        # gated: mean | max of support, opposition, strongest objection
@@ -193,14 +197,31 @@ def gated_quality(g: dict, p: Params) -> float:
     return max(0.0, min(100.0, q))
 
 
+def direct_value(g: dict, key: str) -> float:
+    """The model's own final judgement (``direction`` 1..5 or ``credibility`` 1..10) from a
+    thesis_v2 grade; a v1 grade has neither."""
+    v = g.get(key)
+    if v is None:
+        raise ValueError(f"quality 'direct' needs the model's {key}: grade the threads with the "
+                         f"thesis_v2 prompt (THESIS_PROMPT=thesis_v2) and use its grades file")
+    return float(v)
+
+
+def direct_quality(g: dict) -> float:
+    """Q from the model's own 1-10 credibility: 1 -> 0, 10 -> 100 (``(c - 1) / 9 * 100``)."""
+    return max(0.0, min(100.0, (direct_value(g, "credibility") - 1) / 9 * 100))
+
+
 def thread_quality(g: dict, p: Params) -> float:
     """Q in 0..100 for one grade record (flat or nested ``comments``)."""
     if "comments" in g and isinstance(g["comments"], dict):
         g = {**g, **g["comments"]}
     if p.quality == "gated":
         return gated_quality(g, p) * thesis_factor(g, p)
+    if p.quality == "direct":
+        return direct_quality(g) * thesis_factor(g, p)
     if p.quality != "additive":
-        raise ValueError(f"quality must be additive or gated, not {p.quality!r}")
+        raise ValueError(f"quality must be additive, gated or direct, not {p.quality!r}")
     arg = float(g.get("argument_quality") or 0)
     if p.use_specificity:
         arg = (arg + float(g.get("specificity") or 0)) / 2
@@ -225,7 +246,10 @@ def vote_weight(votes, gamma: float) -> float:
 
 
 def contribution(g: dict, p: Params) -> float:
-    stance = float(g.get("stance") or 0)
+    if p.quality == "direct":   # the model's own net direction, 1..5 -> -1..1
+        stance = (direct_value(g, "direction") - 3) / 2
+    else:
+        stance = float(g.get("stance") or 0)
     if p.direction == "abs":
         stance = abs(stance)
     elif p.direction == "none":
@@ -471,10 +495,21 @@ def sample_report(cand: dict, grades: list[dict], p: Params, titles: dict[str, s
 
 # ------------------------------------------------------------------ loading and CLI
 
-def load_grades(features: Path, variant: str) -> list[dict]:
-    path = Path(features) / f"thesis_threads_{variant}.parquet"
+def grades_path(features: Path, variant: str, prompt: str | None = None) -> Path:
+    """``thesis_threads_<variant>.parquet`` for the legacy prompt, ``thesis_threads_<variant>.<prompt>.parquet``
+    for any other, so a new prompt never overwrites the first one's grades."""
+    return Path(features) / f"thesis_threads_{variant}{prompt_tag(prompt)}.parquet"
+
+
+def series_path(features: Path, variant: str, prompt: str | None = None) -> Path:
+    return Path(features) / f"thesis_series_{variant}{prompt_tag(prompt)}.parquet"
+
+
+def load_grades(features: Path, variant: str, prompt: str | None = None) -> list[dict]:
+    path = grades_path(features, variant, prompt)
     if not path.exists():
-        raise SystemExit(f"{path} is missing: run the llm-run and llm-collect jobs for {variant}")
+        raise SystemExit(f"{path} is missing: run the llm-run and llm-collect jobs for {variant}"
+                         + (f" with THESIS_PROMPT={prompt}" if prompt else ""))
     return pq.read_table(path).to_pylist()
 
 
@@ -484,7 +519,7 @@ def factory(env: dict | None = None) -> ThesisScorer:
     THESIS_LOOKBACK, THESIS_FEATURES."""
     env = dict(os.environ if env is None else env)
     variant = env.get("THESIS_VARIANT", "identified")
-    grades = load_grades(Path(env.get("THESIS_FEATURES", "data/features")), variant)
+    grades = load_grades(Path(env.get("THESIS_FEATURES", "data/features")), variant, prompt_name(env))
     return ThesisScorer(grades, Params.from_json(env.get("THESIS_PARAMS")), variant=variant,
                         votes=env.get("THESIS_VOTES", "final"),
                         lookback_days=int(env.get("THESIS_LOOKBACK", 90)),
@@ -495,6 +530,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--features", default="data/features")
     p.add_argument("--variant", default="identified")
+    p.add_argument("--prompt", default=os.environ.get("THESIS_PROMPT"),
+                   help="the prompt whose grades file to read (default THESIS_PROMPT, else thesis_v1)")
     p.add_argument("--params", default=os.environ.get("THESIS_PARAMS"), help="JSON overrides")
     p.add_argument("--exclude-late", action="store_true",
                    help="drop threads holding content written after their first cutoff "
@@ -514,10 +551,10 @@ def main(argv=None) -> int:
     params = Params.from_json(a.params)
     if a.exclude_late:
         params.exclude_late = True
-    grades = load_grades(Path(a.features), a.variant)
+    grades = load_grades(Path(a.features), a.variant, a.prompt)
     if a.cmd == "timeline":
         rows = timeline(grades, params)
-        dest = Path(a.features) / f"thesis_series_{a.variant}.parquet"
+        dest = series_path(Path(a.features), a.variant, a.prompt)
         pq.write_table(pa.Table.from_pylist(rows, schema=SERIES_SCHEMA), dest, compression="zstd")
         print(f"wrote {len(rows):,} events for {len({r['cik'] for r in rows}):,} companies to {dest}")
         return 0

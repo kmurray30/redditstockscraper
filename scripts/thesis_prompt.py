@@ -15,14 +15,18 @@ Blinded mode replaces the company's tickers, cashtags and name aliases with ``CO
 (``entity_resolver.blind_text``), so the model cannot grade by remembering the company.
 It still sees the date, the subreddit and everything else.
 
-``PROMPT_VERSION`` changes when the prompt text or this builder changes; it is part of the
-cache path and of the scorer's ledger config, so a prompt change can never reuse old results.
+``prompt_version`` changes when the prompt text, the Jev questions or this builder change; it
+is part of the cache path and of the scorer's ledger config, so a prompt change can never reuse
+old results. Prompts live in a registry (``PROMPTS``): ``thesis_v1`` (component grades and a
+stance) and ``thesis_v2`` (the same plus the model's own final ``direction`` 1-5 and
+``credibility`` 1-10). ``THESIS_PROMPT`` selects one for every job; the default stays v1.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -35,21 +39,46 @@ from entity_resolver import Mention, blind_text  # noqa: E402
 from llm import Request  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-PROMPT_FILE = ROOT / "prompts" / "thesis_v1.md"
+PROMPT_DIR = ROOT / "prompts"
 BUILDER_VERSION = 2   # 2: all comments, final text (no 24h lock)
+DEFAULT_PROMPT = "thesis_v1"   # flipped only after a newer prompt's gold-set numbers are in
+LEGACY_PROMPT = "thesis_v1"    # the one prompt whose output files carry no suffix (a literal, so a
+                               # later default flip never renames them)
 
 
-def prompt_text() -> str:
-    return PROMPT_FILE.read_text()
+def prompt_name(env: dict | None = None) -> str:
+    """The prompt in use: ``THESIS_PROMPT`` or the default. An unknown name is refused."""
+    name = (os.environ if env is None else env).get("THESIS_PROMPT") or DEFAULT_PROMPT
+    if name not in PROMPTS:
+        raise SystemExit(f"unknown prompt {name!r}; prompts: {', '.join(sorted(PROMPTS))}")
+    return name
 
 
-def prompt_version(model: str | None = None) -> str:
-    """Hash of the prompt text plus the builder version; for a Jev model also the rubric, since
-    Jev grades through ``JEV_RUBRIC`` rather than the JSON schema."""
-    tag = hashlib.sha1(prompt_text().encode()).hexdigest()[:6]
-    v = f"{PROMPT_FILE.stem}.{tag}.b{BUILDER_VERSION}"
+def spec(prompt: str | None = None) -> "PromptSpec":
+    name = prompt or prompt_name()
+    if name not in PROMPTS:
+        raise SystemExit(f"unknown prompt {name!r}; prompts: {', '.join(sorted(PROMPTS))}")
+    return PROMPTS[name]
+
+
+def prompt_tag(prompt: str | None = None) -> str:
+    """The suffix output files carry for a prompt other than the legacy one: "" or ".thesis_v2"."""
+    name = spec(prompt).name
+    return "" if name == LEGACY_PROMPT else f".{name}"
+
+
+def prompt_text(prompt: str | None = None) -> str:
+    return spec(prompt).file.read_text()
+
+
+def prompt_version(model: str | None = None, prompt: str | None = None) -> str:
+    """``<prompt>.<hash of its text>.b<builder version>``; for a Jev model also a hash of its
+    questions, since Jev grades through the rubric levels rather than the JSON schema."""
+    s = spec(prompt)
+    tag = hashlib.sha1(s.file.read_text().encode()).hexdigest()[:6]
+    v = f"{s.name}.{tag}.b{BUILDER_VERSION}"
     if model and "jev" in model.lower().split("/")[-1]:
-        v += ".jev" + hashlib.sha1(json.dumps(jev_questions(), sort_keys=True).encode()).hexdigest()[:6]
+        v += ".jev" + hashlib.sha1(json.dumps(s.questions(), sort_keys=True).encode()).hexdigest()[:6]
     return v
 
 
@@ -240,6 +269,114 @@ SCHEMA_WHY["required"].append("why")
 MAX_OUT, MAX_OUT_WHY = 300, 500
 
 
+# ------------------------------------------------------------------ thesis_v2: two final judgements
+#
+# The second prompt (user request 2026-10-23) keeps every component grade and adds two final
+# scalars the model gives itself: the thread's net DIRECTION on a 1-5 scale (the post weighed
+# with the substantive comments) and its CREDIBILITY on a 1-10 scale whose ten levels are the
+# user's own rating rules (the poster is biased until independent commenters test the post; a
+# good write-up with no corroboration is "a 5 at best"; several credible independent voices with
+# their own evidence is a 9). On Jev each is a ``score`` question over those levels; the chat
+# schema takes them as integers. v1's text, schema and questions are not touched.
+
+SCHEMA_V2 = json.loads(json.dumps(SCHEMA))
+SCHEMA_V2["properties"]["direction"] = {"type": "integer", "minimum": 1, "maximum": 5}
+SCHEMA_V2["properties"]["credibility"] = {"type": "integer", "minimum": 1, "maximum": 10}
+SCHEMA_V2["required"] += ["direction", "credibility"]
+SCHEMA_V2_WHY = json.loads(json.dumps(SCHEMA_V2))
+SCHEMA_V2_WHY["properties"]["why"] = {"type": "string"}
+SCHEMA_V2_WHY["required"].append("why")
+
+JEV_DIRECTION_LEVELS = _levels(
+    "Strong bear: a clear, argued case that the company is overvalued or in trouble, and the comments do not undo it.",
+    "Bear: the thread leans against the company, hedged, or with real pushback in the comments.",
+    "Neutral: no direction, a question, mixed views, or bull and bear sides evenly matched.",
+    "Bull: the thread leans in favour of the company, hedged, or with real pushback in the comments.",
+    "Strong bull: a clear, argued case for the company, and the comments do not undo it.")
+JEV_CREDIBILITY_LEVELS = _levels(
+    "Not about the company as an investment, or a bare link, meme or list with nothing to judge.",
+    "A question or a thin remark about the company, and no comment gives a useful answer.",
+    "An opinion with nothing to check: no reasoning, no evidence, and comments that add nothing.",
+    "Price-action talk or vibes with a sketch of a reason or a number here and there; no sources, and the comments do not test it.",
+    "A decent, informed write-up with reasoning and some evidence but no independent corroboration in the comments: the poster's word alone.",
+    "An informed post that the comments test only a little, or post and commenters tear each other apart with substance on both sides and neither is established.",
+    "An informed post and informed, level comments that agree on the facts and add their own reasoning; or a thin post carried by one excellent, informative top comment.",
+    "A strong write-up with evidence and a strong top comment that checks or extends it, both informative and level.",
+    "Several credible, independent commenters corroborate the thread's view with their own evidence; a careful reader would act on it.",
+    "Primary-source research corroborated by several independent voices with their own evidence, the strongest objections answered; nothing is left unchecked.")
+
+
+def jev_questions_v2() -> dict:
+    """v1's questions plus the two final judgements (ids match ``SCHEMA_V2``)."""
+    q = jev_questions()
+    q["direction"] = {"type": "score",
+                      "instructions": "Taking the post and the substantive comments together, which way does "
+                                      "the thread's case on the company named under COMPANY UNDER EVALUATION "
+                                      "point?",
+                      "criteria": JEV_DIRECTION_LEVELS}
+    q["credibility"] = {"type": "score",
+                        "instructions": "How far could a careful reader trust this thread as research on the "
+                                        "company, whichever way it points? The poster came in with a goal and "
+                                        "is assumed biased; independent, substantive comments are what check "
+                                        "the post.",
+                        "criteria": JEV_CREDIBILITY_LEVELS}
+    return q
+
+
+def _level(a: dict) -> int:
+    """The level Jev puts the most probability on (0-based); ``round(score)`` when it gave no
+    distribution (the fake backend). Probabilities are keyed by the level's index as a string."""
+    probs = a.get("probabilities") or {}
+    if probs:
+        return int(max(probs, key=lambda k: float(probs[k])))
+    return int(round(float(a["score"])))
+
+
+def decode_jev_v2(answers: dict) -> dict:
+    """``decode_jev`` plus the two final scalars: ``direction`` 1..5 and ``credibility`` 1..10 as
+    probability-weighted floats (``1 + score``), and ``direction_5`` / ``credibility_10`` as the
+    most probable level (integers, for the grid and the gold table). ``confidence`` now averages
+    twelve score questions."""
+    out = decode_jev(answers)
+    out["direction"] = round(float(answers["direction"]["score"]) + 1, 3)
+    out["credibility"] = round(float(answers["credibility"]["score"]) + 1, 3)
+    out["direction_5"] = _level(answers["direction"]) + 1
+    out["credibility_10"] = _level(answers["credibility"]) + 1
+    return out
+
+
+def derive_levels(g: dict) -> dict:
+    """Fill ``direction_5`` / ``credibility_10`` from ``direction`` / ``credibility`` when a result
+    (a chat model's integers, or an older cache) carries the values but not the levels. Returns
+    ``g`` itself; a v1 result passes through unchanged."""
+    for k, lv, hi in (("direction", "direction_5", 5), ("credibility", "credibility_10", 10)):
+        if g.get(k) is not None and g.get(lv) is None:
+            g[lv] = max(1, min(hi, int(round(float(g[k])))))
+    return g
+
+
+@dataclass(frozen=True)
+class PromptSpec:
+    """One prompt: its text file, the chat schema (with and without ``why``), and the Jev
+    questions and decoder that restate it. ``prompt_version`` hashes the file and the questions,
+    so each prompt has its own cache directory and its own ledger identity."""
+    name: str
+    schema: dict
+    schema_why: dict
+    questions: object       # () -> dict
+    decode: object          # answers -> result
+
+    @property
+    def file(self) -> Path:
+        return PROMPT_DIR / f"{self.name}.md"
+
+
+PROMPTS: dict[str, PromptSpec] = {
+    "thesis_v1": PromptSpec("thesis_v1", SCHEMA, SCHEMA_WHY, jev_questions, decode_jev),
+    "thesis_v2": PromptSpec("thesis_v2", SCHEMA_V2, SCHEMA_V2_WHY, jev_questions_v2, decode_jev_v2),
+}
+
+
 @dataclass
 class Thread:
     post_id: str
@@ -372,16 +509,16 @@ def user_message(t: Thread, blinded: bool, p: dict = PRUNE) -> str:
 
 
 def build_request(t: Thread, blinded: bool, why: bool = False, p: dict = PRUNE,
-                  backend: str = "chat") -> Request:
-    """``backend="jev"`` attaches the rubric questions and decoder (``why`` is then ignored:
-    Jev gives no reasons)."""
+                  backend: str = "chat", prompt: str | None = None) -> Request:
+    """``backend="jev"`` attaches the prompt's rubric questions and decoder (``why`` is then
+    ignored: Jev gives no reasons). ``prompt`` names the prompt; default ``THESIS_PROMPT`` or v1."""
+    s = spec(prompt)
+    key, system, user = f"{t.post_id}_{t.cik}", prompt_text(s.name), user_message(t, blinded, p)
     if backend == "jev":
-        return Request(key=f"{t.post_id}_{t.cik}", system=prompt_text(), user=user_message(t, blinded, p),
-                       schema=SCHEMA, schema_name="thesis_grade", max_out=0,
-                       questions=jev_questions(), decode=decode_jev)
-    return Request(key=f"{t.post_id}_{t.cik}", system=prompt_text(), user=user_message(t, blinded, p),
-                   schema=SCHEMA_WHY if why else SCHEMA, schema_name="thesis_grade",
-                   max_out=MAX_OUT_WHY if why else MAX_OUT)
+        return Request(key=key, system=system, user=user, schema=s.schema, schema_name="thesis_grade",
+                       max_out=0, questions=s.questions(), decode=s.decode)
+    return Request(key=key, system=system, user=user, schema=s.schema_why if why else s.schema,
+                   schema_name="thesis_grade", max_out=MAX_OUT_WHY if why else MAX_OUT)
 
 
 _CASHTAG = re.compile(r"\$[A-Za-z]{1,6}\b")

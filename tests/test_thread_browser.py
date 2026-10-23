@@ -102,4 +102,47 @@ def test_stance_levels_quality_bins_and_the_measure_switch():
     assert store.grid("q_gated")["counts"]["strong_bull"][2] == 1   # b has no q_gated: falls back to its q (45 -> bin 4)
     assert store.grid("q_gated")["counts"]["strong_bull"][4] == 1
     plain = tsv.Store([{"key": "a", "stance": 0, "q": 10}])
-    assert plain.measures == ["q"] and plain.measure("q_gated") == "q"
+    assert plain.measures == ["q"] and plain.measure("q_gated") == "q" and plain.measure("direct") == "q"
+
+
+def v2(post_id, stance, direction_5, credibility_10, **kw):
+    g = grade(post_id=post_id, stance=stance, direction=float(direction_5), credibility=float(credibility_10),
+              direction_5=direction_5, credibility_10=credibility_10, prompt="thesis_v2",
+              prompt_version="thesis_v2.y.b2.jevdef456", variant="identified", **kw)
+    return te.record(g, MSG if post_id == "p1" else None, None, __import__("thesis_scorer").Params())
+
+
+def test_direct_grid_uses_the_model_s_own_levels(tmp_path):
+    import thesis_scorer as ts
+    rows = [v2("p1", -1.0, 4, 7), v2("p2", 1.0, 1, 10), v2("p3", 0.0, 3, 1),
+            te.record(grade(post_id="p4", stance=0.9, q=50), None, None, ts.Params())]   # a v1 grade among them
+    assert rows[0]["q_direct"] == pytest.approx((7 - 1) / 9 * 100, abs=0.05) and rows[0]["prompt"] == "thesis_v2"
+    assert rows[3]["q_direct"] is None and rows[3]["credibility_10"] is None and rows[3]["prompt"] == "thesis_v1"
+    store = tsv.Store.from_bytes(zstd.ZstdCompressor().compress(json.dumps(rows).encode()))
+    assert store.measures == ["q", "q_gated", "direct"] and store.prompt == "thesis_v2"
+    g = store.grid("direct")
+    assert g["bins"] == [str(i) for i in range(1, 11)] and g["rows"] == "direction" and g["total"] == 3
+    assert g["counts"]["bull"][6] == 1 and g["counts"]["strong_bear"][9] == 1 and g["counts"]["neutral"][0] == 1
+    assert sum(sum(v) for v in g["counts"].values()) == 3          # the v1 grade is not in the direct grid
+    assert [r["key"] for r in store.cell("bull", 6, "direct")] == ["p1_1"] and store.cell("strong_bull", 9, "direct") == []
+    q = store.grid("q")
+    assert q["rows"] == "stance" and sum(sum(v) for v in q["counts"].values()) == 4 and q["counts"]["strong_bear"][7] == 1
+    httpd = tsv.serve(store, "pw", 0)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        code, home = get(base + "/")                                    # the direct grid is the landing page
+        assert code == 200 and "direction &darr;" in home and "prompt thesis_v2" in home and "/list?stance=bull&qbin=6&measure=direct" in home
+        code, lst = get(base + "/list?stance=bull&qbin=6&measure=direct")
+        assert code == 200 and "Killing Me Softly" in lst and "cred 7/10" in lst and "dir 4/5" in lst and "credibility 7" in lst
+        assert "Killing Me Softly" not in get(base + "/list?stance=strong_bear&qbin=6&measure=direct")[1]
+        code, post = get(base + "/post/p1_1?measure=direct")
+        assert code == 200 and "credibility (model, 1-10)" in post and "direction (model, 1-5)" in post and "4 (bull" in post
+        assert "/list?stance=bull&qbin=6&measure=direct" in post and "thesis_v2" in post
+        code, post4 = get(base + "/post/p4_1?measure=direct")           # a v1 record falls back to its q cell
+        assert code == 200 and "credibility (model" not in post4 and "/list?stance=strong_bull&qbin=5&measure=q" in post4
+        code, old = get(base + "/?measure=q")
+        assert code == 200 and "stance &darr;" in old and "/list?stance=strong_bull&qbin=5&measure=q" in old
+    finally:
+        httpd.shutdown()

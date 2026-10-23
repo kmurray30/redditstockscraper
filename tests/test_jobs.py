@@ -205,6 +205,27 @@ def test_gated_dev_runs_the_gated_formula_both_ways_plus_controls_calibrations_a
     assert "holdout" not in " ".join(" ".join(c) for c in cmds)
 
 
+def test_v2_presets_carry_the_prompt_on_every_command():
+    import json
+    gold = jobs.resolve("v2-gold")
+    assert len(gold) == 2 and all(c[:2] == ["env", "THESIS_PROMPT=thesis_v2"] for c in gold)
+    assert gold[0][-4:] == ["run", "--variant", "identified", "--dry-run"] and gold[1][-2:] == ["evaluate", "--tune"]
+    full = jobs.resolve("v2-full")
+    assert all(c[:2] == ["env", "THESIS_PROMPT=thesis_v2"] for c in full)
+    assert [c[-1] for c in full[:2]] == ["identified", "blinded"] and [c[-1] for c in full[2:4]] == ["identified", "blinded"]
+    assert [c[4] for c in full[:4]] == ["run", "run", "collect", "collect"]
+    assert full[4][-1] == "check-blind" and full[5][-2:] == ["evaluate", "--tune"]
+    runs = [c for c in full if "scripts/backtest.py" in c]
+    params = [json.loads(c[3].split("=", 1)[1]) for c in runs]
+    assert len(runs) == 5 and all(p["quality"] == "direct" for p in params)
+    assert [c[2] for c in runs] == ["THESIS_VARIANT=identified"] * 2 + ["THESIS_VARIANT=blinded"] * 2 + ["THESIS_VARIANT=identified"]
+    assert sum(p.get("direction") == "none" for p in params) == 2 and params[-1].get("exclude_late") is True
+    assert all(c[-3:] == ["calibrate", "--split", "dev"] for c in full[-3:-1]) and full[-1][-1] == "--push"
+    assert "holdout" not in " ".join(" ".join(c) for c in full)
+    with pytest.raises(jobs.JobError, match="no JOB_ARGS"):
+        jobs.resolve("v2-full", "--years 2014")
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]

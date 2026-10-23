@@ -69,6 +69,44 @@ def test_quality_weights_and_hype_penalty():
     assert ts.contribution(grade(is_thesis=False, stance=1), p) > 0
 
 
+def test_direct_quality_uses_the_model_s_own_two_judgements():
+    d = ts.Params(quality="direct")
+    assert ts.thread_quality(grade(credibility=1, direction=3), d) == 0
+    assert ts.thread_quality(grade(credibility=10, direction=3), d) == 100
+    assert ts.thread_quality(grade(credibility=7.3, direction=3), d) == pytest.approx(70)
+    assert ts.thread_quality(grade(credibility=7.3, direction=3, is_thesis=False), ts.Params(quality="direct", thesis_gate="hard")) == 0
+    # the stance comes from the model's final direction, not the author's stance
+    bull = ts.contribution(grade(credibility=7.3, direction=5, stance=-1.0, votes=0), d)
+    assert bull == pytest.approx(0.7 ** 2 * 0.9) and ts.contribution(grade(credibility=7.3, direction=1, stance=1.0, votes=0), d) == -bull
+    assert ts.contribution(grade(credibility=7.3, direction=3, votes=0), d) == 0
+    assert ts.contribution(grade(credibility=7.3, direction=2, votes=0), ts.Params(quality="direct", direction="none")) == pytest.approx(0.7 ** 2 * 0.9)
+    assert ts.contribution(grade(credibility=7.3, direction=2, votes=0), ts.Params(quality="direct", direction="abs")) == pytest.approx(0.5 * 0.7 ** 2 * 0.9)
+    with pytest.raises(ValueError, match="thesis_v2"):
+        ts.thread_quality(grade(), d)
+    with pytest.raises(ValueError, match="thesis_v2"):
+        ts.contribution(grade(credibility=7.3), d)
+    with pytest.raises(ValueError, match="additive, gated or direct"):
+        ts.thread_quality(grade(), ts.Params(quality="other"))
+
+
+def test_grades_files_are_named_per_prompt(tmp_path, monkeypatch):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    assert ts.grades_path(tmp_path, "identified") == tmp_path / "thesis_threads_identified.parquet"
+    assert ts.grades_path(tmp_path, "blinded", "thesis_v1") == tmp_path / "thesis_threads_blinded.parquet"
+    assert ts.grades_path(tmp_path, "identified", "thesis_v2") == tmp_path / "thesis_threads_identified.thesis_v2.parquet"
+    assert ts.series_path(tmp_path, "identified", "thesis_v2") == tmp_path / "thesis_series_identified.thesis_v2.parquet"
+    pq.write_table(pa.Table.from_pylist([grade(credibility=8.0, direction=4.0, prompt_version="thesis_v2.x.b2")]),
+                   tmp_path / "thesis_threads_identified.thesis_v2.parquet")
+    with pytest.raises(SystemExit, match="llm-collect"):
+        ts.load_grades(tmp_path, "identified")
+    assert ts.load_grades(tmp_path, "identified", "thesis_v2")[0]["credibility"] == 8.0
+    sc = ts.factory({"THESIS_FEATURES": str(tmp_path), "THESIS_PROMPT": "thesis_v2", "THESIS_PARAMS": '{"quality": "direct"}'})
+    assert sc.params()["prompt_version"].startswith("thesis_v2.") and sc.p.quality == "direct"
+    monkeypatch.setenv("THESIS_PROMPT", "thesis_v2")
+    assert ts.load_grades(tmp_path, "identified")[0]["direction"] == 4.0
+
+
 def test_contribution_sign_votes_and_decay():
     p = ts.Params(gamma=0.5)
     bull, bear = ts.contribution(grade(stance=1), p), ts.contribution(grade(stance=-1), p)

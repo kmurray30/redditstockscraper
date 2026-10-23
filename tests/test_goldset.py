@@ -66,9 +66,18 @@ def test_flatten_and_collect_shapes(tmp_path):
     rec["result"]["_jev"] = {"is_thesis_p": 0.83}
     assert tl.flatten(rec)["is_thesis_p"] == 0.83
     assert set(tl.GRADE_FIELDS) <= set(flat) and set(tl.COMMENT_FIELDS) <= set(flat)
+    assert flat["credibility"] is None and flat["credibility_10"] is None     # a thesis_v1 grade
     # every flattened field has a column in the graded schema
     names = set(tl.GRADED_SCHEMA.names)
-    assert set(flat) <= names
+    assert set(flat) <= names and "prompt" in names
+    # a thesis_v2 grade from a chat model (integers, no levels) and from Jev (levels already there)
+    rec["result"].update({"direction": 4, "credibility": 7})
+    flat = tl.flatten(rec)
+    assert flat["direction_5"] == 4 and flat["credibility_10"] == 7 and flat["credibility"] == 7
+    assert "direction_5" not in rec["result"]                                  # flatten does not mutate the cache
+    rec["result"].update({"direction": 3.6, "credibility": 7.4, "direction_5": 5, "credibility_10": 8})
+    flat = tl.flatten(rec)
+    assert flat["direction_5"] == 5 and flat["credibility_10"] == 8 and flat["direction"] == 3.6
 
 
 def test_load_threads_filters_years_and_limits(tmp_path):
@@ -138,6 +147,33 @@ def test_build_and_evaluate_end_to_end_with_the_fake_model(tmp_path, monkeypatch
     assert "2 rated threads" in out and "Spearman rho" in out and "n_comments" in out and "voices" in out
     ev = list(csv.DictReader((tmp_path / "gold" / "eval_fake.csv").open()))
     assert len(ev) == 2 and {e["you"] for e in ev} == {"9.0", "4.0"} and all(e["Q"] for e in ev)
+    assert "credibility" not in ev[0] and "direct credibility" not in out
+    # the second prompt: its own gold cache, its own CSV, the direct credibility in the output
+    monkeypatch.setenv("LLM_MODEL", "fake")
+    monkeypatch.setenv("THESIS_PROMPT", "thesis_v2")
+    assert gs.main([*common, "evaluate", "--ratings", str(tmp_path / "gold" / "ratings.csv"), "--tune"]) == 0
+    out2 = capsys.readouterr().out
+    assert "prompt thesis_v2." in out2 and "direct credibility (the model's own 1-10) rho" in out2
+    assert "direct (the model's own credibility, thesis_v2)" in out2 and "dir cred" in out2
+    ev2 = list(csv.DictReader((tmp_path / "gold" / "eval_fake.thesis_v2.csv").open()))
+    assert len(ev2) == 2 and all(1 <= float(e["credibility"]) <= 10 and 1 <= float(e["direction"]) <= 5 for e in ev2)
+    assert len(list(csv.DictReader((tmp_path / "gold" / "eval_fake.csv").open()))) == 2   # v1's file untouched
+    v2_cache = [d for d in (tmp_path / "llm" / "cache" / "fake").iterdir() if d.name.startswith("thesis_v2.")]
+    assert len(v2_cache) == 1 and (v2_cache[0] / "gold-why").is_dir()
+    # grading and collecting under the second prompt writes the suffixed grades file only
+    monkeypatch.delenv("THESIS_PROMPT")
+    llm_common = ["--threads", str(tmp_path / "threads.parquet"), "--features", str(tmp_path / "feat"),
+                  "--llm-dir", str(tmp_path / "llm"), "--parquet", str(tmp_path),
+                  "--mentions", str(tmp_path / "mentions.parquet"), "--post-features", str(tmp_path / "pf.parquet")]
+    (tmp_path / "feat").mkdir()
+    assert tl.main([*llm_common, "--prompt", "thesis_v2", "run", "--variant", "identified"]) == 0
+    assert tl.main([*llm_common, "--prompt", "thesis_v2", "collect", "--variant", "identified"]) == 0
+    import pyarrow.parquet as pq
+    assert not (tmp_path / "feat" / "thesis_threads_identified.parquet").exists()
+    got = pq.read_table(tmp_path / "feat" / "thesis_threads_identified.thesis_v2.parquet").to_pylist()
+    assert len(got) == 3 and all(1 <= r["credibility_10"] <= 10 and r["prompt"] == "thesis_v2" for r in got)
+    assert all(r["prompt_version"].startswith("thesis_v2.") for r in got)
+    assert "thesis_threads_identified.thesis_v2.parquet" in capsys.readouterr().out
 
 
 def test_coverage_and_min_comments(tmp_path):

@@ -509,6 +509,47 @@ best-voted first, two levels deep. Blinded = `entity_resolver.blind_text` on eve
 version is a hash of the prompt text plus a builder version; it is in the cache path and the ledger.
 **Prompt changes are tuned on the gold set only, never on backtest numbers.**
 
+**Second prompt `thesis_v2` (built 2026-10-23, user request: "a 1-5 score for direction and a
+1-10 score for quality, then a grid").** Prompts live in a registry, `thesis_prompt.PROMPTS`
+(name -> text file `prompts/<name>.md`, chat schema, Jev questions, decoder); `THESIS_PROMPT`
+(`thesis_v1` default, `thesis_v2`) selects one for every job, scorer and export, and the
+`--prompt` option does the same per command. v1's text, schema and questions are untouched,
+so its prompt version, cache, grades files and ledger rows are exactly what they were. v2 asks
+every v1 question and adds two **final judgements the model gives itself**: `direction`, the
+thread's net direction once the substantive comments are weighed with the post (1 strong bear,
+2 bear, 3 neutral or no view, 4 bull, 5 strong bull; the author's own `stance` stays as a
+component), and `credibility`, how far a careful reader could trust the thread as research
+whichever way it points, ten levels written from the user's rating reasons (1 not a stock or a
+bare link; 2 a question with no useful answer; 3 nothing to check; 4 price-action talk with a
+sketch of a reason; 5 a good write-up with no independent corroboration, "a 5 at best"; 6 post
+and comments tear each other apart; 7 informed post and informed comments agreeing, or a thin
+post carried by a great top comment; 8 great write-up plus great top comment; 9 several credible
+independent voices with their own evidence, the reader would act; 10 primary sources on both
+sides, objections answered). A new rule 7 in the text states the user's model (the poster came
+in with a goal and is biased until independent commenters test the post). On Jev each is a
+`score` question over those levels: the grades file carries the probability-weighted value
+(`direction` 1..5, `credibility` 1..10) and the most probable level (`direction_5`,
+`credibility_10`, from Jev's per-level probabilities; `round` when it gives none); a chat model
+returns the integers and `derive_levels` fills the levels. **Files are named per prompt**:
+`thesis_threads_<variant>.thesis_v2.parquet`, `thesis_series_<variant>.thesis_v2.parquet`,
+`data/gold/eval_<model>.thesis_v2.csv`, cache under `data/llm/cache/<model>/thesis_v2.<hash>.b2.jev<hash>/`;
+v1 keeps its unsuffixed names. **Scorer**: `quality = "direct"` (`THESIS_PARAMS`) builds the
+score from the two final numbers alone, `Q = (credibility - 1) / 9 * 100` and stance
+`(direction - 3) / 2`, the `direction` param (signed | abs | none) still applying on top; no
+new `Params` field, so the 58 earlier config hashes stand. **Gold**: `goldset.py evaluate`
+prints the model's `dir` and `cred` per rated thread and the Spearman of the direct credibility
+next to the formulas; `--tune` lists it with the additive and gated rows. **Browser**: a v2
+export adds `q_direct`, the four fields and `prompt`; the thread browser then opens on a third
+measure, `direct`, whose grid is exact levels (rows = `direction_5`, columns = `credibility_10`,
+5 x 10, no bins, no formula), with the old two measures still selectable. **Presets**: `v2-gold`
+(no spend: the dry-run cost estimate of the full set, then the 30 gold threads on v2, cents)
+and `v2-full` (both variants graded, collected, check-blind, gold table, `direct` backtests
+signed and direction none on both variants plus signed without late content, two calibration
+tables, the export; about $3.4 on Jev, cap raised to 7 by user decision 2026-10-23). Both
+presets carry `THESIS_PROMPT=thesis_v2` on every command, so no service variable is needed
+(and `tests/conftest.py` clears the variable for the suite). Default stays `thesis_v1`
+until v2's gold numbers are in. Results: see "Thesis v2 results" below once run.
+
 **Scoring** (`thesis_scorer.py`, weights tuned on the gold set 2026-10-22, see below): `Q =
 100*(.25 argument + .15 evidence + .05 tone + .05 falsifiability + .20 balance + .30 discussion)
 - 10*hype`, with `discussion = (independent_support + independent_opposition +

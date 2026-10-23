@@ -2,7 +2,7 @@
 
     python scripts/thread_export.py [--variant identified] [--push]
 
-For each row of ``data/features/thesis_threads_<variant>.parquet`` the user message is read
+For each row of ``data/features/thesis_threads_<variant>[.<prompt>].parquet`` the user message is read
 back from the LLM cache (``data/llm/cache/<model>/<prompt>/<variant>/<post>_<cik>.json``
 keeps it under ``user``), parsed into title, body and comments with ``gold_page.parse_message``,
 and written next to the grades, the thread quality ``Q`` of the default scorer, and the
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import gold_page as gp  # noqa: E402
 import llm  # noqa: E402
+import thesis_prompt as tp  # noqa: E402
 import thesis_scorer as ts  # noqa: E402
 
 KEY = "data/ui/threads.json.zst"
@@ -34,6 +36,7 @@ GRADE_KEYS = ("argument_quality", "evidence_quality", "specificity", "tone_stabi
               "strongest_objection_severity", "n_independent_voices")
 OUTCOME_KEYS = ("status", "max_mult", "excess", "perm_loss", "cagr")
 GATED = ts.Params(quality="gated")
+DIRECT = ts.Params(quality="direct")   # thesis_v2 only: Q from the model's own 1-10 credibility
 
 
 def load_outcomes(path: Path, years: int = 5) -> dict[tuple[str, str], dict]:
@@ -51,7 +54,11 @@ def load_outcomes(path: Path, years: int = 5) -> dict[tuple[str, str], dict]:
 def record(g: dict, user: str | None, outcome: dict | None, params: ts.Params) -> dict:
     """One browser record from a grade row and the cached message."""
     msg = gp.parse_message(user) if user else {}
+    g = tp.derive_levels(dict(g))
+    direct = g.get("credibility") is not None
     return {"key": f"{g['post_id']}_{g['cik']}", "post_id": g["post_id"], "cik": g["cik"],
+            "prompt": g.get("prompt") or (g.get("prompt_version") or "").split(".")[0] or None,
+            "variant": g.get("variant"),
             "ticker": g.get("ticker"), "name": g.get("name"), "subreddit": g.get("subreddit"),
             "created_utc": g.get("created_utc"), "first_month": g.get("first_month"),
             "votes": g.get("votes"), "n_comments": g.get("n_comments"), "n_companies": g.get("n_companies"),
@@ -60,6 +67,9 @@ def record(g: dict, user: str | None, outcome: dict | None, params: ts.Params) -
             "stance": g.get("stance"), "horizon": g.get("horizon"), "confidence": g.get("confidence"),
             "q": round(ts.thread_quality(g, params), 1),
             "q_gated": round(ts.thread_quality(g, GATED), 1),
+            "q_direct": round(ts.thread_quality(g, DIRECT), 1) if direct else None,
+            "direction": g.get("direction"), "credibility": g.get("credibility"),
+            "direction_5": g.get("direction_5"), "credibility_10": g.get("credibility_10"),
             "copies": list(g.get("copies") or [g["post_id"]]), "subreddits": list(g.get("subreddits") or [g.get("subreddit")]),
             "grades": {k: g.get(k) for k in GRADE_KEYS},
             "as_of": msg.get("as_of", ""), "flair": msg.get("flair", ""), "link": msg.get("link", ""),
@@ -95,12 +105,15 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--features", default="data/features")
     p.add_argument("--variant", default="identified")
+    p.add_argument("--prompt", default=os.environ.get("THESIS_PROMPT"),
+                   help="the prompt whose grades file to export (default THESIS_PROMPT, else thesis_v1)")
     p.add_argument("--llm-dir", default="data/llm")
     p.add_argument("--labels", default="data/features/labels.parquet")
     p.add_argument("--out", default=KEY)
     p.add_argument("--push", action="store_true", help="copy the file to the bucket under the same key")
     a = p.parse_args(argv)
-    grades = ts.load_grades(Path(a.features), a.variant)
+    grades = ts.load_grades(Path(a.features), a.variant, a.prompt)
+    print(f"[export] {len(grades):,} grades, variant {a.variant}, prompt {a.prompt or 'thesis_v1'}", flush=True)
     rows = export(grades, Path(a.llm_dir), a.variant, load_outcomes(Path(a.labels)))
     data = zstd.ZstdCompressor(level=9).compress(json.dumps(rows, ensure_ascii=False).encode())
     out = Path(a.out)

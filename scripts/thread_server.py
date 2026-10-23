@@ -27,6 +27,7 @@ import html
 import json
 import os
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,8 +40,18 @@ PAGE_SIZE = 150
 STANCES = (("strong_bull", "Strong bull", 0.75), ("bull", "Bull", 0.25), ("neutral", "Neutral", -0.25),
            ("bear", "Bear", -0.75), ("strong_bear", "Strong bear", None))
 STANCE_LABEL = {k: v for k, v, _ in STANCES}
-QBINS = 10               # quality 0-100 in ten bins of ten
-MEASURES = (("q", "Q, current formula"), ("q_gated", "Q, corroboration-gated"))
+QBINS = 10               # quality 0-100 in ten bins of ten; also the ten credibility levels
+# the quality measures a record can carry: the two formulas over the component grades, and
+# (thesis_v2 exports) the model's own final judgements, where the grid is exact levels: rows
+# = direction_5 (1 strong bear .. 5 strong bull), columns = credibility_10 (1..10)
+MEASURES = (("q", "Q, current formula"), ("q_gated", "Q, corroboration-gated"),
+            ("direct", "the model's own direction x credibility"))
+MEASURE_FIELD = {"q": "q", "q_gated": "q_gated", "direct": "credibility_10"}   # a record has the measure if this is set
+MEASURE_TAG = {"q": "Q", "q_gated": "Qg", "direct": "cred"}
+DIRECTION_CLASS = {5: "strong_bull", 4: "bull", 3: "neutral", 2: "bear", 1: "strong_bear"}
+CREDIBILITY_NOTE = ("Credibility 1 is not a stock or a bare link, 5 a good write-up nobody independent "
+                    "corroborated, 7 an informed post and informed comments that agree, 10 primary-source "
+                    "research several independent voices corroborate with their own evidence.")
 
 
 def stance_class(stance) -> str:
@@ -64,6 +75,10 @@ def qbin_label(b: int) -> str:
     return f"{b * 10}-{(b + 1) * 10}"
 
 
+def col_label(b: int, measure: str) -> str:
+    return str(b + 1) if measure == "direct" else qbin_label(b)
+
+
 def esc(x) -> str:
     return html.escape("" if x is None else str(x), quote=True)
 
@@ -79,17 +94,38 @@ class Store:
     def __init__(self, records: list[dict]):
         self.records = records
         self.by_key = {r["key"]: r for r in records}
-        self.measures = [m for m, _ in MEASURES if any(r.get(m) is not None for r in records)] or ["q"]
+        self.measures = [m for m, _ in MEASURES
+                         if any(r.get(MEASURE_FIELD[m]) is not None for r in records)] or ["q"]
         for r in records:
             r["_stance"] = stance_class(r.get("stance"))
             r["_q"] = float(r.get("q") or 0)
+            d = r.get("direction_5")
+            r["_dir"] = DIRECTION_CLASS.get(int(d)) if d is not None else None
+        prompts = Counter(r.get("prompt") for r in records if r.get("prompt"))
+        variants = Counter(r.get("variant") for r in records if r.get("variant"))
+        self.prompt = prompts.most_common(1)[0][0] if prompts else None
+        self.variant = variants.most_common(1)[0][0] if variants else "identified"
 
     def measure(self, name: str) -> str:
         return name if name in self.measures else self.measures[0]
 
     def value(self, r: dict, measure: str) -> float:
+        if measure == "direct":
+            v = r.get("q_direct")
+            return float(v) if v is not None else 0.0
         v = r.get(measure)
         return float(v if v is not None else r.get("q") or 0)
+
+    def row_key(self, r: dict, measure: str) -> str | None:
+        """The grid row: the model's final direction level in direct mode, else its stance class."""
+        return r["_dir"] if measure == "direct" else r["_stance"]
+
+    def col(self, r: dict, measure: str) -> int | None:
+        """The grid column: the credibility level (0-based) in direct mode, else the quality bin."""
+        if measure == "direct":
+            c = r.get("credibility_10")
+            return None if c is None else max(0, min(QBINS - 1, int(c) - 1))
+        return qbin(self.value(r, measure))
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "Store":
@@ -105,14 +141,20 @@ class Store:
         return cls.from_bytes(bucket.get_bytes(key))
 
     def cell(self, stance: str, b: int, measure: str) -> list[dict]:
-        return [r for r in self.records if r["_stance"] == stance and qbin(self.value(r, measure)) == b]
+        return [r for r in self.records if self.row_key(r, measure) == stance and self.col(r, measure) == b]
 
     def grid(self, measure: str) -> dict:
         counts = {s: [0] * QBINS for s, _, _ in STANCES}
+        total = 0
         for r in self.records:
-            counts[r["_stance"]][qbin(self.value(r, measure))] += 1
-        return {"measure": measure, "bins": [qbin_label(b) for b in range(QBINS)],
-                "total": len(self.records), "counts": counts}
+            k, b = self.row_key(r, measure), self.col(r, measure)
+            if k is None or b is None:   # no final judgement on this record (a v1 grade): not in the direct grid
+                continue
+            counts[k][b] += 1
+            total += 1
+        return {"measure": measure, "bins": [col_label(b, measure) for b in range(QBINS)],
+                "rows": "direction" if measure == "direct" else "stance",
+                "total": total, "counts": counts, "prompt": self.prompt, "variant": self.variant}
 
 
 # ------------------------------------------------------------------ pages
@@ -174,17 +216,25 @@ def stance_tag(r: dict) -> str:
 def q_tags(store: Store, r: dict) -> str:
     out = []
     for m, label in MEASURES:
-        if m in store.measures:
-            out.append(f"<span class=tag title='{esc(label)}'>{'Q' if m == 'q' else 'Qg'} {fmt_q(store.value(r, m))}</span>")
+        if m not in store.measures:
+            continue
+        if m == "direct":
+            if r.get("credibility_10") is not None:
+                out.append(f"<span class=tag title='{esc(label)}'>cred {int(r['credibility_10'])}/10 &middot; "
+                           f"dir {int(r.get('direction_5') or 0)}/5</span>")
+            continue
+        out.append(f"<span class=tag title='{esc(label)}'>{MEASURE_TAG[m]} {fmt_q(store.value(r, m))}</span>")
     return "".join(out)
 
 
 def grid_html(store: Store, measure: str) -> bytes:
     g = store.grid(measure)
+    direct = measure == "direct"
     peak = max((n for row in g["counts"].values() for n in row), default=1) or 1
-    cells = ["<div class=gridwrap><div class=grid><div class=corner>stance &darr; &nbsp; quality &rarr;</div>"]
+    corner = "direction &darr; &nbsp; credibility &rarr;" if direct else "stance &darr; &nbsp; quality &rarr;"
+    cells = [f"<div class=gridwrap><div class=grid><div class=corner>{corner}</div>"]
     for b in range(QBINS):
-        cells.append(f"<div class=head>{qbin_label(b)}</div>")
+        cells.append(f"<div class=head>{col_label(b, measure)}</div>")
     for s, label, _ in STANCES:
         row = g["counts"][s]
         cells.append(f"<div class='row {s}'>{label}<span class=tot>{sum(row):,}</span></div>")
@@ -197,12 +247,20 @@ def grid_html(store: Store, measure: str) -> bytes:
     measure_label = dict(MEASURES)[measure]
     switch = " &middot; ".join(f"<b>{lbl}</b>" if m == measure else f"<a href='/?measure={m}'>{lbl}</a>"
                                for m, lbl in MEASURES if m in store.measures)
-    body = (f"<h1>Graded threads</h1><p class=sub>{g['total']:,} threads graded by the model, identified variant. "
-            f"Rows are the model's stance in its five levels (the decoded value runs from &minus;1 to +1, cut at "
-            f"&plusmn;0.25 and &plusmn;0.75); columns are thread quality in ten bins of ten. Quality shown: "
-            f"{measure_label}. Click a count to see those threads.</p>"
-            f"<p class=sub>Quality measure: {switch}</p>" + "".join(cells)
-            + "<p class=axis>Q 0 is worthless, 100 is a fully argued, sourced, level thread with strong independent discussion.</p>")
+    who = f"{store.variant} variant" + (f", prompt {esc(store.prompt)}" if store.prompt else "")
+    if direct:
+        axes = ("Rows are the model's own final direction of the whole thread, post weighed with the substantive "
+                "comments, in its five levels; columns are its own final credibility, 1 to 10, exact levels, "
+                "no formula.")
+        note = CREDIBILITY_NOTE
+    else:
+        axes = ("Rows are the model's stance in its five levels (the decoded value runs from &minus;1 to +1, cut at "
+                "&plusmn;0.25 and &plusmn;0.75); columns are thread quality in ten bins of ten.")
+        note = "Q 0 is worthless, 100 is a fully argued, sourced, level thread with strong independent discussion."
+    body = (f"<h1>Graded threads</h1><p class=sub>{g['total']:,} threads graded by the model, {who}. {axes} "
+            f"Shown: {measure_label}. Click a count to see those threads.</p>"
+            f"<p class=sub>Measure: {switch}</p>" + "".join(cells)
+            + f"<p class=axis>{note}</p>")
     return page("Graded threads", body)
 
 
@@ -219,6 +277,7 @@ def list_html(store: Store, stance: str, b: int, measure: str, sort: str, pg: in
     pg = min(max(pg, 1), pages)
     chunk = rows[(pg - 1) * PAGE_SIZE: pg * PAGE_SIZE]
     label = STANCE_LABEL[stance]
+    direct = measure == "direct"
     base = f"/list?stance={stance}&qbin={b}&measure={measure}"
     items = []
     for r in chunk:
@@ -235,12 +294,17 @@ def list_html(store: Store, stance: str, b: int, measure: str, sort: str, pg: in
     pager = (f"<div class=pager>" + (f"<a href='{base}&sort={sort}&page={pg - 1}'>&larr; previous page</a>" if pg > 1 else "")
              + f"<span>page {pg} of {pages}</span>"
              + (f"<a href='{base}&sort={sort}&page={pg + 1}'>next page &rarr;</a>" if pg < pages else "") + "</div>")
+    if direct:
+        head, what = (f"{label} (model's direction), credibility {b + 1}",
+                      f"the model's own final direction {label.lower()} and credibility {b + 1} of 10")
+    else:
+        head, what = (f"{label}, quality {qbin_label(b)}",
+                      f"the model's stance {label.lower()} and {dict(MEASURES)[measure]} in {qbin_label(b)}")
     body = (f"<div class=crumbs><a href='/?measure={measure}'>&larr; grid</a></div>"
-            f"<h1><span class='{stance}'>{label}</span>, quality {qbin_label(b)}</h1>"
-            f"<p class=sub>{n:,} threads with the model's stance {label.lower()} and {dict(MEASURES)[measure]} "
-            f"in {qbin_label(b)}. Sort: {sorts}</p>"
+            f"<h1><span class='{stance}'>{label}</span>, {'credibility ' + str(b + 1) if direct else 'quality ' + qbin_label(b)}</h1>"
+            f"<p class=sub>{n:,} threads with {what}. Sort: {sorts}</p>"
             f"<div class=card>{''.join(items) or '<p class=sub>Nothing here.</p>'}</div>{pager}")
-    return page(f"{label}, quality {qbin_label(b)}", body)
+    return page(head, body)
 
 
 def kv(label: str, value, bar: float | None = None) -> str:
@@ -277,9 +341,19 @@ def post_html(store: Store, r: dict, measure: str) -> bytes:
     thesis = "yes" if r.get("is_thesis") else "no"
     if r.get("is_thesis_p") is not None:
         thesis += f" ({float(r['is_thesis_p']):.0%})"
+    final = ""
+    if r.get("credibility_10") is not None:
+        d5 = r.get("direction_5")
+        final = (kv("direction (model, 1-5)", f"{int(d5)} ({STANCE_LABEL[DIRECTION_CLASS[int(d5)]].lower()}"
+                    + (f", weighted {float(r['direction']):.2f})" if r.get("direction") is not None else ")"))
+                 + kv("credibility (model, 1-10)", f"{int(r['credibility_10'])}"
+                      + (f" (weighted {float(r['credibility']):.2f})" if r.get("credibility") is not None else ""),
+                      store.value(r, "direct")))
     grades = ("<h2>The model's grades</h2><div class=card><div class=kv>"
+              + final
               + kv("stance", f"{float(r.get('stance') or 0):+.2f} ({STANCE_LABEL[r['_stance']].lower()})")
-              + "".join(kv(label, fmt_q(store.value(r, m)), store.value(r, m)) for m, label in MEASURES if m in store.measures)
+              + "".join(kv(label, fmt_q(store.value(r, m)), store.value(r, m))
+                        for m, label in MEASURES if m in store.measures and m != "direct")
               + kv("is a thesis", thesis)
               + kv("horizon", r.get("horizon") or "?")
               + kv("confidence", f"{float(r.get('confidence') or 0):.2f}")
@@ -288,9 +362,13 @@ def post_html(store: Store, r: dict, measure: str) -> bytes:
                          "balance", "hype_risk", "independent_support", "independent_opposition",
                          "strongest_objection_severity"))
               + kv("independent voices", g.get("n_independent_voices"))
+              + (kv("prompt", r.get("prompt")) if r.get("prompt") else "")
               + "</div>" + (f"<p class=sub style='margin:8px 0 0'>Note: {'; '.join(late)}.</p>" if late else "") + "</div>")
+    row_key, col = store.row_key(r, measure), store.col(r, measure)
+    if row_key is None or col is None:   # a record outside the direct grid: back to its stance cell under q
+        row_key, col, measure = r["_stance"], qbin(store.value(r, "q")), "q"
     header = (f"<div class=crumbs><a href='/?measure={measure}'>&larr; grid</a> &middot; "
-              f"<a href='/list?stance={r['_stance']}&qbin={qbin(store.value(r, measure))}&measure={measure}'>back to the list</a></div>"
+              f"<a href='/list?stance={row_key}&qbin={col}&measure={measure}'>back to the list</a></div>"
               f"<h1>{esc(r.get('title') or '(no title)')}</h1>"
               f"<p class=sub>{stance_tag(r)}{q_tags(store, r)}"
               f"<b>{esc(r.get('ticker'))}</b> {esc(r.get('name'))} &middot; r/{esc(', r/'.join(r.get('subreddits') or [r.get('subreddit') or '']))}"

@@ -37,7 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gold_page  # noqa: E402
 import llm  # noqa: E402
 import thesis_llm as tl  # noqa: E402
-from thesis_prompt import MATURATION_HOURS, build_request, prompt_version, user_message  # noqa: E402,F401
+from thesis_prompt import (MATURATION_HOURS, PROMPTS, build_request, derive_levels,  # noqa: E402,F401
+                           prompt_name, prompt_tag, prompt_version, user_message)
 from thesis_scorer import Params, thread_quality  # noqa: E402
 
 
@@ -208,15 +209,17 @@ def cmd_evaluate(a) -> int:
     if a.model:
         os.environ["LLM_MODEL"] = a.model
     cfg = llm.Config.from_env()
+    name = a.prompt or prompt_name()
     corpus = tl.open_corpus(a)
     requests, meta = [], {}
     for r, t in tl.threads_from_views(corpus, rows, a.lookback):
-        req = build_request(t, blinded=False, why=True, backend=cfg.backend)
+        req = build_request(t, blinded=False, why=True, backend=cfg.backend, prompt=name)
         requests.append(req)
         meta[req.key] = (r, t)
-    cache = llm.Cache(llm.cache_dir(Path(a.llm_dir), cfg.model, prompt_version(cfg.model), "gold-why"))
+    cache = llm.Cache(llm.cache_dir(Path(a.llm_dir), cfg.model, prompt_version(cfg.model, name), "gold-why"))
     spend = llm.Spend(Path(a.llm_dir) / "spend.jsonl")
-    results = llm.run(requests, cfg, cache, spend)
+    results = {k: derive_levels(dict(v)) for k, v in llm.run(requests, cfg, cache, spend).items()}
+    has_direct = any(g.get("credibility") is not None for g in results.values())
     params = Params()
     table, xs, ys, feats = [], [], [], []
     for key, g in results.items():
@@ -224,8 +227,9 @@ def cmd_evaluate(a) -> int:
         q = thread_quality(g, params)
         user = ratings[(r["post_id"], r["cik"])]
         c = g.get("comments") or {}
-        table.append((user["rating"], q, g.get("stance"), g.get("is_thesis"), t.ticker,
-                      len(t.comments), (g.get("why") or "")[:90], user.get("reason", "")[:60]))
+        table.append((user["rating"], q, g.get("stance"), g.get("is_thesis"), g.get("direction_5"),
+                      g.get("credibility_10"), t.ticker, len(t.comments), (g.get("why") or "")[:90],
+                      user.get("reason", "")[:60]))
         xs.append(user["rating"])
         ys.append(q)
         feats.append({"argument": g.get("argument_quality"), "specificity": g.get("specificity"),
@@ -234,22 +238,28 @@ def cmd_evaluate(a) -> int:
                       "hype_risk": g.get("hype_risk"), "confidence": g.get("confidence"),
                       "support": c.get("independent_support"), "opposition": c.get("independent_opposition"),
                       "objection": c.get("strongest_objection_severity"), "voices": c.get("n_independent_voices"),
+                      **({"direction": g.get("direction"), "credibility": g.get("credibility")} if has_direct else {}),
                       "n_comments": len(t.comments), "votes": t.votes or 0, "chars": len(t.body),
                       "year": t.created_utc // 31_557_600 + 1970})
     table.sort(key=lambda row: (-row[0], -row[1]))
-    print(f"model {cfg.model}, prompt {prompt_version(cfg.model)}, {len(table)} rated threads"
+    print(f"model {cfg.model}, prompt {prompt_version(cfg.model, name)}, {len(table)} rated threads"
           + (" (Jev gives no reasons)" if cfg.backend == "jev" else ""))
-    print("you  Q    stance thesis ticker  cmts  model's reason | your reason")
-    for u, q, s, th, tick, nc, why, reason in table:
-        print(f"{u:3.0f} {q:5.1f} {s:+6.2f} {'y' if th else 'n':6s} {tick:7s} {nc:4d}  {why} | {reason}")
+    print("you  Q    stance thesis dir cred ticker  cmts  model's reason | your reason")
+    for u, q, s, th, d5, c10, tick, nc, why, reason in table:
+        print(f"{u:3.0f} {q:5.1f} {s:+6.2f} {'y' if th else 'n':6s} {d5 if d5 is not None else '-':>3} "
+              f"{c10 if c10 is not None else '-':>4} {tick:7s} {nc:4d}  {why} | {reason}")
     rho = spearman(xs, ys)
     pear = float(np.corrcoef(xs, ys)[0, 1]) if len(xs) > 2 else float("nan")
     print(f"\nSpearman rho {rho:.2f}, Pearson r {pear:.2f}; lifetime spend ${spend.total:.3f}")
+    if has_direct:
+        cred = [float(f["credibility"] or 0) for f in feats]
+        print(f"direct credibility (the model's own 1-10) rho {spearman(xs, cred):.2f}, "
+              f"Pearson r {float(np.corrcoef(xs, cred)[0, 1]) if len(xs) > 2 else float('nan'):.2f}")
     print("\nrank correlation of each component with your rating (n = %d):" % len(xs))
     for k in feats[0]:
         v = [float(f[k] or 0) for f in feats]
         print(f"  {k:14s} {spearman(xs, v):+.2f}   median {float(np.median(v)):g}")
-    out = Path(a.gold) / f"eval_{cfg.model.replace('/', '_')}.csv"
+    out = Path(a.gold) / f"eval_{cfg.model.replace('/', '_')}{prompt_tag(name)}.csv"
     with out.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["ticker", "you", "Q", "stance", "is_thesis", *feats[0]])
         w.writeheader()
@@ -262,6 +272,8 @@ def cmd_evaluate(a) -> int:
     if a.tune:
         print("\nrank correlation of each quality formula with your ratings (tuned on these 30 only):")
         grid = [("additive (current)", Params())]
+        if has_direct:
+            grid.insert(0, (f"direct (the model's own credibility, {name})", Params(quality="direct")))
         for floor in (0.3, 0.5, 0.7):
             for w in (0.4, 0.5, 0.6, 0.7):
                 for agg in ("mean", "max"):
@@ -301,6 +313,8 @@ def main(argv=None) -> int:
     e = sub.add_parser("evaluate")
     e.add_argument("--ratings", default="data/gold/ratings.csv")
     e.add_argument("--model", help="override LLM_MODEL for this evaluation (e.g. jev-1.13.0)")
+    e.add_argument("--prompt", choices=sorted(PROMPTS),
+                   help="the prompt to grade with (default: THESIS_PROMPT, else thesis_v1)")
     e.add_argument("--tune", action="store_true", help="also print the gated-formula grid against the ratings")
     e.set_defaults(fn=cmd_evaluate)
     a = p.parse_args(argv)

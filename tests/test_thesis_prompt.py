@@ -83,10 +83,89 @@ def test_blinded_message_has_no_ticker_cashtag_or_name():
 
 def test_prompt_version_changes_with_prompt_text(monkeypatch, tmp_path):
     v1 = tp.prompt_version()
-    f = tmp_path / "thesis_v1.md"
-    f.write_text(tp.prompt_text() + "\nextra rule")
-    monkeypatch.setattr(tp, "PROMPT_FILE", f)
+    (tmp_path / "thesis_v1.md").write_text(tp.prompt_text() + "\nextra rule")
+    monkeypatch.setattr(tp, "PROMPT_DIR", tmp_path)
     assert tp.prompt_version() != v1 and tp.prompt_version().endswith(f".b{tp.BUILDER_VERSION}")
+
+
+def test_prompt_registry_selects_by_name_or_environment(monkeypatch):
+    assert tp.prompt_name({}) == "thesis_v1" and tp.prompt_name({"THESIS_PROMPT": "thesis_v2"}) == "thesis_v2"
+    with pytest.raises(SystemExit, match="unknown prompt"):
+        tp.prompt_name({"THESIS_PROMPT": "thesis_v9"})
+    with pytest.raises(SystemExit, match="unknown prompt"):
+        tp.spec("nope")
+    assert tp.prompt_tag() == "" and tp.prompt_tag("thesis_v1") == "" and tp.prompt_tag("thesis_v2") == ".thesis_v2"
+    assert set(tp.PROMPTS) == {"thesis_v1", "thesis_v2"} and all(s.file.is_file() for s in tp.PROMPTS.values())
+    v1, v1j = tp.prompt_version(), tp.prompt_version("jev-1.13.0")
+    assert v1.startswith("thesis_v1.") and tp.prompt_version(prompt="thesis_v2").startswith("thesis_v2.")
+    assert tp.prompt_version("jev-1.13.0", "thesis_v2") != v1j
+    monkeypatch.setenv("THESIS_PROMPT", "thesis_v2")
+    assert tp.prompt_name() == "thesis_v2" and tp.prompt_version().startswith("thesis_v2.")
+    assert tp.prompt_version(prompt="thesis_v1") == v1 and tp.prompt_version("jev-1.13.0", "thesis_v1") == v1j
+    assert "credibility" in tp.prompt_text() and "credibility" not in tp.prompt_text("thesis_v1")
+
+
+def test_v2_questions_add_the_two_final_judgements_and_leave_v1_alone():
+    q1, q2 = tp.jev_questions(), tp.jev_questions_v2()
+    assert set(q2) == set(q1) | {"direction", "credibility"}
+    assert {k: v for k, v in q2.items() if k in q1} == q1
+    assert len(q2["direction"]["criteria"]) == 5 and len(q2["credibility"]["criteria"]) == 10
+    assert q2["direction"]["type"] == q2["credibility"]["type"] == "score"
+    assert all(2 <= len(x["criteria"]) <= 10 for x in q2.values() if x["type"] == "score")
+    props = tp.SCHEMA_V2["properties"]
+    assert props["direction"] == {"type": "integer", "minimum": 1, "maximum": 5}
+    assert props["credibility"] == {"type": "integer", "minimum": 1, "maximum": 10}
+    assert {"direction", "credibility"} <= set(tp.SCHEMA_V2["required"])
+    assert "direction" not in tp.SCHEMA["properties"] and "why" in tp.SCHEMA_V2_WHY["properties"]
+    # the chat path's fake filler stays inside the bounds
+    import llm
+    for seed in range(5):
+        g = llm._fill(tp.SCHEMA_V2, bytes([seed] * 20))
+        assert 1 <= g["direction"] <= 5 and 1 <= g["credibility"] <= 10
+
+
+def test_decode_v2_gives_weighted_values_and_most_probable_levels():
+    answers = {k: {"type": "score", "score": 3.0, "confidence": 0.6} for k in tp.JEV_SCORES}
+    answers["stance"] = {"type": "score", "score": 4.0, "confidence": 0.9}
+    answers["n_independent_voices"] = {"type": "score", "score": 2.4, "confidence": 0.5}
+    answers["is_thesis"] = {"type": "noul", "noul": 0.8}
+    answers["horizon"] = {"type": "choice", "choice": "years"}
+    answers["direction"] = {"type": "score", "score": 2.9, "confidence": 0.7,
+                            "probabilities": {"0": 0.1, "1": 0.1, "2": 0.1, "3": 0.1, "4": 0.6}}   # string keys
+    answers["credibility"] = {"type": "score", "score": 6.3, "confidence": 0.8}                   # no distribution
+    g = tp.decode_jev_v2(answers)
+    assert g["direction"] == pytest.approx(3.9) and g["direction_5"] == 5         # argmax, not round(score)
+    assert g["credibility"] == pytest.approx(7.3) and g["credibility_10"] == 7    # round(score) fallback
+    assert g["stance"] == 1.0 and g["argument_quality"] == 75 and g["_jev"]["probabilities"]["direction"]["4"] == 0.6
+    assert set(tp.SCHEMA_V2["required"]) <= set(g)
+    from thesis_scorer import Params, contribution, thread_quality
+    assert thread_quality(g, Params(quality="direct")) == pytest.approx(70)
+    assert contribution({**g, "votes": 0}, Params(quality="direct")) == pytest.approx(0.45 * 0.49 * g["confidence"])
+    # a chat model's integers get their levels filled in; a v1 result passes through
+    chat = tp.derive_levels({"direction": 2, "credibility": 9, "stance": 0.1})
+    assert chat["direction_5"] == 2 and chat["credibility_10"] == 9
+    assert tp.derive_levels({"stance": 0.1}) == {"stance": 0.1}
+    assert tp.derive_levels({"direction": 4.4, "credibility": 10.6, "direction_5": 3})["direction_5"] == 3
+    assert tp.derive_levels({"direction": 4.4, "credibility": 10.6})["credibility_10"] == 10
+
+
+def test_build_request_with_the_second_prompt(monkeypatch):
+    import llm
+    t = tp.Thread(post_id="p", cik="1", ticker="ACM", name="Acme", created_utc=1_400_000_000,
+                  subreddit="stocks", flair=None, title="t", body="b", url=None, is_self=True,
+                  author="op", votes=3, comments=[])
+    jev = tp.build_request(t, blinded=False, backend="jev", prompt="thesis_v2")
+    assert jev.questions == tp.jev_questions_v2() and jev.decode is tp.decode_jev_v2 and jev.schema is tp.SCHEMA_V2
+    assert jev.system == tp.prompt_text("thesis_v2") and jev.user == tp.user_message(t, False)
+    assert jev.sha != tp.build_request(t, blinded=False, backend="jev").sha
+    chat = tp.build_request(t, blinded=False, why=True, prompt="thesis_v2")
+    assert chat.schema is tp.SCHEMA_V2_WHY and chat.questions is None
+    result, _ = llm.FakeClient().complete(jev)
+    assert 1 <= result["direction_5"] <= 5 and 1 <= result["credibility_10"] <= 10
+    assert 1 <= result["direction"] <= 5 and 1 <= result["credibility"] <= 10
+    monkeypatch.setenv("THESIS_PROMPT", "thesis_v2")
+    assert tp.build_request(t, blinded=False, backend="jev").decode is tp.decode_jev_v2
+    assert tp.build_request(t, blinded=False, backend="jev", prompt="thesis_v1").decode is tp.decode_jev
 
 
 def test_no_usernames_in_the_message():

@@ -40,6 +40,9 @@ def _py(script: str, *args: str) -> list[str]:
     return [PY, f"scripts/{script}", *args]
 
 
+_V2 = ("env", "THESIS_PROMPT=thesis_v2")   # the second prompt, carried by every v2 preset command
+
+
 PRESETS: dict[str, list[list[str]]] = {
     "tests": [[PY, "-m", "pytest", "-q"]],
     "du": [["du", "-sh", "data"], ["sh", "-c", "du -sh data/* data/*/* 2>/dev/null | sort -h"]],
@@ -179,6 +182,35 @@ PRESETS: dict[str, list[list[str]]] = {
                   ["env", "THESIS_VARIANT=identified", 'THESIS_PARAMS={"quality": "gated", "direction": "none"}',
                    *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
                   _py("thread_export.py", "--push")],
+    # thesis_v2 (user request 2026-10-23): the grader returns its own final direction (1-5) and
+    # credibility (1-10) next to the component grades. Every command carries THESIS_PROMPT so the
+    # presets are right whether or not the service variable is set, and nothing of v1 is touched
+    # (its own cache dir, grades files with a .thesis_v2 suffix, its own ledger prompt version).
+    # v2-gold first (cents): the cost estimate of the full set, then the 30 gold threads against
+    # the user's ratings with the direct credibility next to the formulas. v2-full (about $3.4 on
+    # Jev): both variants graded, collected, blinding checked, gold table again, the direct
+    # scorer signed and without direction on both variants, signed without late content, the two
+    # calibration tables, and the browser export (the browser then opens on the 5 x 10 grid).
+    "v2-gold": [[*_V2, *_py("thesis_llm.py", "run", "--variant", "identified", "--dry-run")],
+                [*_V2, *_py("goldset.py", "evaluate", "--tune")]],
+    "v2-full": [[*_V2, *_py("thesis_llm.py", "run", "--variant", "identified")],
+                [*_V2, *_py("thesis_llm.py", "run", "--variant", "blinded")],
+                [*_V2, *_py("thesis_llm.py", "collect", "--variant", "identified")],
+                [*_V2, *_py("thesis_llm.py", "collect", "--variant", "blinded")],
+                [*_V2, *_py("thesis_llm.py", "check-blind")],
+                [*_V2, *_py("goldset.py", "evaluate", "--tune")],
+                *[[*_V2, f"THESIS_VARIANT={variant}", f"THESIS_PARAMS={params}",
+                   *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")]
+                  for variant, params in (("identified", '{"quality": "direct"}'),
+                                          ("identified", '{"quality": "direct", "direction": "none"}'),
+                                          ("blinded", '{"quality": "direct"}'),
+                                          ("blinded", '{"quality": "direct", "direction": "none"}'),
+                                          ("identified", '{"quality": "direct", "exclude_late": true}'))],
+                [*_V2, "THESIS_VARIANT=identified", 'THESIS_PARAMS={"quality": "direct"}',
+                 *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
+                [*_V2, "THESIS_VARIANT=identified", 'THESIS_PARAMS={"quality": "direct", "direction": "none"}',
+                 *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
+                [*_V2, *_py("thread_export.py", "--push")]],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),
