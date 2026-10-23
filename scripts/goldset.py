@@ -255,6 +255,17 @@ def cmd_evaluate(a) -> int:
         cred = [float(f["credibility"] or 0) for f in feats]
         print(f"direct credibility (the model's own 1-10) rho {spearman(xs, cred):.2f}, "
               f"Pearson r {float(np.corrcoef(xs, cred)[0, 1]) if len(xs) > 2 else float('nan'):.2f}")
+        used = sorted({g.get("credibility_10") for g in results.values() if g.get("credibility_10") is not None})
+        print(f"credibility levels used (most probable): {used}")
+        dist = [(ratings[(meta[key][0]["post_id"], meta[key][0]["cik"])]["rating"], meta[key][1].ticker,
+                 ((g.get("_jev") or {}).get("probabilities") or {}).get("credibility"))
+                for key, g in results.items()]
+        if any(d[2] for d in dist):   # Jev gives the whole distribution: show where the mass sits
+            print("\ncredibility distribution per rated thread (you, ticker, then P of levels 1..10 in %):")
+            for u, tick, probs in sorted(dist, key=lambda d: -d[0]):
+                if probs:
+                    cells = " ".join(f"{int(round(float(probs.get(str(i), 0)) * 100)):3d}" for i in range(10))
+                    print(f"  {u:3.0f} {tick:7s} {cells}")
     print("\nrank correlation of each component with your rating (n = %d):" % len(xs))
     for k in feats[0]:
         v = [float(f[k] or 0) for f in feats]

@@ -293,17 +293,21 @@ JEV_DIRECTION_LEVELS = _levels(
     "Neutral: no direction, a question, mixed views, or bull and bear sides evenly matched.",
     "Bull: the thread leans in favour of the company, hedged, or with real pushback in the comments.",
     "Strong bull: a clear, argued case for the company, and the comments do not undo it.")
+# Ten levels, each named by countable features (how many informed comments, whether numbers
+# or sources are present), in order of how much independent, checkable support the thread
+# holds. The first wording (2026-10-23, judgement phrases such as "a decent write-up") made Jev
+# answer 4 or 6 on 24 of 27 gold threads; countable levels are the one re-wording tried.
 JEV_CREDIBILITY_LEVELS = _levels(
-    "Not about the company as an investment, or a bare link, meme or list with nothing to judge.",
-    "A question or a thin remark about the company, and no comment gives a useful answer.",
-    "An opinion with nothing to check: no reasoning, no evidence, and comments that add nothing.",
-    "Price-action talk or vibes with a sketch of a reason or a number here and there; no sources, and the comments do not test it.",
-    "A decent, informed write-up with reasoning and some evidence but no independent corroboration in the comments: the poster's word alone.",
-    "An informed post that the comments test only a little, or post and commenters tear each other apart with substance on both sides and neither is established.",
-    "An informed post and informed, level comments that agree on the facts and add their own reasoning; or a thin post carried by one excellent, informative top comment.",
-    "A strong write-up with evidence and a strong top comment that checks or extends it, both informative and level.",
-    "Several credible, independent commenters corroborate the thread's view with their own evidence; a careful reader would act on it.",
-    "Primary-source research corroborated by several independent voices with their own evidence, the strongest objections answered; nothing is left unchecked.")
+    "Level 1: the post is not about this company as an investment, or it is a bare link, meme or list with no text to judge.",
+    "Level 2: the post is a question or a one-line remark, and no comment answers it with anything checkable.",
+    "Level 3: the post states an opinion with no reason behind it, and no comment adds a reason, a number or a source.",
+    "Level 4: the post gives reasons but no numbers and no sources, and no informed comment tests them.",
+    "Level 5: the post gives reasons with numbers or sources, but no informed comment tests them: the poster's word alone.",
+    "Level 6: the post gives reasons with numbers or sources, and one informed comment tests them without settling the matter, or informed comments split evenly.",
+    "Level 7: the post gives reasons, and one or two informed comments with their own reasons or numbers settle the read, confirming or correcting it; or a thin post is carried by one excellent comment with evidence.",
+    "Level 8: the post cites sources or data, and the top comment adds its own sources or data, each supplying what the other lacks.",
+    "Level 9: the post cites sources or data, and three or more independent commenters add their own sources or data that corroborate the read.",
+    "Level 10: primary sources on both the post's side and the commenters' side, the strongest objection raised and answered with evidence; nothing is left unchecked.")
 
 
 def jev_questions_v2() -> dict:
@@ -318,7 +322,9 @@ def jev_questions_v2() -> dict:
                         "instructions": "How far could a careful reader trust this thread as research on the "
                                         "company, whichever way it points? The poster came in with a goal and "
                                         "is assumed biased; independent, substantive comments are what check "
-                                        "the post.",
+                                        "the post. Pick the single level whose description fits the thread "
+                                        "best; the levels run from no checkable content (1) to primary "
+                                        "sources corroborated by several independent commenters (10).",
                         "criteria": JEV_CREDIBILITY_LEVELS}
     return q
 
