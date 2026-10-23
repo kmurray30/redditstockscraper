@@ -211,6 +211,27 @@ PRESETS: dict[str, list[list[str]]] = {
                 [*_V2, "THESIS_VARIANT=identified", 'THESIS_PARAMS={"quality": "direct", "direction": "none"}',
                  *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
                 [*_V2, *_py("thread_export.py", "--push")]],
+    # v2-full's identified half and blinded half as separate jobs: the first full run graded the
+    # identified variant and then hit TypeSafe's "no available API credits" (HTTP 402) on the
+    # blinded one (2026-10-23), so the identified results are produced now (no spend: the grades
+    # are cached) and the blinded half runs once the user has topped the TypeSafe account up.
+    "v2-identified": [[*_V2, *_py("thesis_llm.py", "collect", "--variant", "identified")],
+                      [*_V2, *_py("goldset.py", "evaluate", "--tune")],
+                      *[[*_V2, "THESIS_VARIANT=identified", f"THESIS_PARAMS={params}",
+                         *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")]
+                        for params in ('{"quality": "direct"}', '{"quality": "direct", "direction": "none"}',
+                                       '{"quality": "direct", "exclude_late": true}')],
+                      [*_V2, "THESIS_VARIANT=identified", 'THESIS_PARAMS={"quality": "direct"}',
+                       *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
+                      [*_V2, "THESIS_VARIANT=identified", 'THESIS_PARAMS={"quality": "direct", "direction": "none"}',
+                       *_py("thesis_scorer.py", "calibrate", "--split", "dev")],
+                      [*_V2, *_py("thread_export.py", "--push")]],
+    "v2-blinded": [[*_V2, *_py("thesis_llm.py", "run", "--variant", "blinded")],
+                   [*_V2, *_py("thesis_llm.py", "collect", "--variant", "blinded")],
+                   [*_V2, *_py("thesis_llm.py", "check-blind")],
+                   *[[*_V2, "THESIS_VARIANT=blinded", f"THESIS_PARAMS={params}",
+                      *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")]
+                     for params in ('{"quality": "direct"}', '{"quality": "direct", "direction": "none"}')]],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),

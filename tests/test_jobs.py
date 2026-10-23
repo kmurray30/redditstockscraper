@@ -226,6 +226,21 @@ def test_v2_presets_carry_the_prompt_on_every_command():
         jobs.resolve("v2-full", "--years 2014")
 
 
+def test_v2_halves_split_the_full_run_by_variant():
+    import json
+    ident = jobs.resolve("v2-identified")
+    assert all(c[:2] == ["env", "THESIS_PROMPT=thesis_v2"] for c in ident) and "run" not in [c[4] for c in ident]
+    assert ident[0][4:] == ["collect", "--variant", "identified"] and ident[1][-2:] == ["evaluate", "--tune"]
+    runs = [json.loads(c[3].split("=", 1)[1]) for c in ident if "scripts/backtest.py" in c]
+    assert len(runs) == 3 and all(p["quality"] == "direct" for p in runs) and runs[1]["direction"] == "none"
+    assert all(c[2] == "THESIS_VARIANT=identified" for c in ident if "THESIS_VARIANT" in " ".join(c))
+    assert all(c[-3:] == ["calibrate", "--split", "dev"] for c in ident[-3:-1]) and ident[-1][-1] == "--push"
+    blind = jobs.resolve("v2-blinded")
+    assert blind[0][4:] == ["run", "--variant", "blinded"] and blind[1][4:] == ["collect", "--variant", "blinded"]
+    assert blind[2][-1] == "check-blind" and all(c[2] == "THESIS_VARIANT=blinded" for c in blind[3:])
+    assert len(blind) == 5 and "holdout" not in " ".join(" ".join(c) for c in ident + blind)
+
+
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]
