@@ -547,8 +547,57 @@ and `v2-full` (both variants graded, collected, check-blind, gold table, `direct
 signed and direction none on both variants plus signed without late content, two calibration
 tables, the export; about $3.4 on Jev, cap raised to 7 by user decision 2026-10-23). Both
 presets carry `THESIS_PROMPT=thesis_v2` on every command, so no service variable is needed
-(and `tests/conftest.py` clears the variable for the suite). Default stays `thesis_v1`
-until v2's gold numbers are in. Results: see "Thesis v2 results" below once run.
+(and `tests/conftest.py` clears the variable for the suite). Default stays `thesis_v1`.
+`v2-identified` / `v2-blinded` are the two halves as separate jobs (see the results below).
+
+**Thesis v2 results (2026-10-23).** Gold set first (`v2-gold`, 27 rated threads, cents): the
+model's own credibility against the user's ratings, Spearman **0.65**, Pearson **0.76** (the
+best Pearson of any measure); the additive formula on the same v2 grades 0.71, gated 0.69; the
+thread direction correlates with the rating at -0.17, as it should. But the model used only
+four of the ten levels as its most probable answer (1 on 2 threads, 4 on 14, 5 on 1, 6 on 10):
+the user's 8 got a 6, the 7s split 6 / 4, the 2 and 3s got 4, the two 1s got 1. One rewording
+round was tried (levels named by countable features: numbers or sources in the post, how many
+informed comments test it): it spread the answers over 1, 2, 4-7 but agreed worse (rho 0.48,
+Pearson 0.64; "reasons with numbers but no informed comment" swallowed thin price-talk posts, so
+the rated 2s and 3s landed on 5), so the first wording stays (`thesis_v2.8d8714.b2.jevfe0e23`).
+The per-level probabilities (now printed by `goldset.py evaluate`) show Jev is decisive, often
+80-95% on one level, so the compression is in how the level texts read, not hedging. The net
+direction does what it was meant to: MFRM ("good comments that make me not think this is a
+solid buy") has the author's stance +0.96 and the thread direction 2 (bear); CLD, WTW, AMRS
+likewise. **Full dev, identified variant** (`v2-full` graded it: 9,586 threads in 341 s, $1.78
+actual against a $1.74 "upper bound" estimate, lifetime $4.861; 2,318 judged theses; 892 hold
+late content; then TypeSafe answered the blinded run with HTTP 402 "no available API credits",
+so the blinded half waits for the user to top the TypeSafe account up (about $1.78 more, lifetime
+about $6.64 of the $7 cap) and `v2-blinded` runs it; `v2-identified` produced the rest from the
+cache; trials 59-61):
+
+| Scorer, dev 2012-2018, 5y, top decile per month | 5y lift (95% CI) | size-m | vs mentioned | 10x lift | loss (size-m) | perm p | median pick vs market | CAGR vs SPY 16.1% | IR | DSR |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **direct, signed** (the model's own credibility and net direction; 503 names) | 2.02 [1.65, 2.51] | 2.52 | 1.34 | 3.57 | 0.95 (1.51) | 0.007 | -30.6% | 16.5% | 0.11 | 0.02 |
+| **direct, direction none** (credibility only; 382 names) | 3.69 [3.23, 4.25] | 4.85 | 2.79 | 7.45 | 0.83 (1.50) | 0.003 | -17.7% | 24.7% | 0.67 | 0.33 |
+| direct, signed, late content excluded (482 names) | 2.00 [1.64, 2.49] | 2.49 | 1.31 | 3.58 | 0.87 (1.40) | 0.010 | -29.7% | 16.3% | 0.09 | 0.02 |
+| v1 additive, signed (for reference) | 1.98 | 2.46 | 1.30 | 3.85 | 1.16 (1.81) | | -33.2% | 17.7% | 0.18 | 0.02 |
+| v1 graded, direction none (for reference) | 3.55-3.57 | 4.63-4.68 | 2.65-2.67 | 6.89-7.09 | 0.75-0.85 | 0.003 | -18% | 23.5-23.7% | 0.58-0.61 | 0.21-0.23 |
+| substantive count, no deleted-author rule (for reference) | 4.29 [3.90, 4.67] | 5.66 | 3.55 | 9.00 | 0.64 (1.19) | 0.003 | -1.5% | 26.3% | 0.69 | 0.42 |
+
+Calibration (dev, 5y, decile 10 = highest): **direct signed is U-shaped again**, decile 1 (the
+model's own bearish direction) P(5x) 0.141, P(10x) 0.061, mean excess +51%, decile 10 0.099 /
+0.038 / +21.5%, the middle deciles negative; direct direction none is monotone at the top,
+decile 10 P(5x) 0.181, P(10x) 0.080, P(loss) 0.052, beats the market 44.6% of the time with
+mean excess +95% and median CAGR 10.2% (3y: 0.067 / 0.024 / 0.032, P(beat) 0.501, +45.6%),
+decile 9 0.092, 8 0.068, the rest 0.04-0.07, decile 1 0.040.
+
+Read: (1) **Asking the model for one credibility number instead of a formula changes little
+on dev**: 3.69 against 3.55-3.57 without direction, 2.02 against 1.98 with it; the plain count
+of substantive posts (4.29, loss 0.64) still beats it. (2) **Direction inverts even when the
+model judges the whole thread**: the net direction after the comments, which flipped the right
+gold threads to bear, still puts the best multibagger decile at the bearish end on 2012-2018.
+This is now a result about the period, not about the grader: a well-discussed Reddit bear
+case marked a contested name that kept going up. (3) The model's credibility is a compressed
+scale (four live columns in the browser grid); the backtest ranks on the probability-weighted
+value, which has full resolution. (4) The blinded check for v2 is pending the TypeSafe top-up;
+on v1 blinding changed nothing. (5) The thread browser now opens on the 5 x 10 direct grid
+(prompt `thesis_v2`, identified).
 
 **Scoring** (`thesis_scorer.py`, weights tuned on the gold set 2026-10-22, see below): `Q =
 100*(.25 argument + .15 evidence + .05 tone + .05 falsifiability + .20 balance + .30 discussion)
@@ -965,6 +1014,9 @@ same for this workload; the gold set decides.
    votes, no model) reaches 4.29-4.38 with loss 0.64 and is the recommended finalist (see "Rule
    decomposition"). **Waiting on the user: which finalist(s) get the validate look**
    (`backtest.py run --baseline substantive --split validate --rules '{"drop_deleted": false}'`,
-   and optionally the graded no-direction thesis scorer as the one LLM row).
+   and optionally the graded no-direction thesis scorer as the one LLM row). **thesis_v2 (the
+   model's own 1-5 direction and 1-10 credibility, 2026-10-23)** reaches 3.69 without direction
+   and 2.02 with it on dev, the same picture; its blinded half waits for TypeSafe credits
+   (`JOB=v2-blinded`, about $1.78).
 4. Phase 2 (later): fundamental-resilience gate (SEC XBRL), forward data from non-Reddit
    sources, Postgres/pgvector, alerts, dashboard.
