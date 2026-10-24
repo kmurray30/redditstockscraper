@@ -151,3 +151,33 @@ def test_direct_grid_uses_the_model_s_own_levels(tmp_path):
         assert old.index("<div class=row>90-100</div>") < old.index("<div class=row>0-10</div>")
     finally:
         httpd.shutdown()
+
+
+def test_stock_filter_narrows_the_grid_lists_and_dropdown(tmp_path):
+    import thesis_scorer as ts
+    rows = [v2("p1", -1.0, 4, 7), v2("p2", 1.0, 1, 10), v2("p3", 0.0, 4, 7, ticker="MSFT", name="Microsoft"),
+            v2("p4", 0.0, 4, 7, ticker="MSFT", name="Microsoft"), v2("p5", 0.0, 2, 3, ticker="MSFT", name="Microsoft")]
+    store = tsv.Store.from_bytes(zstd.ZstdCompressor().compress(json.dumps(rows).encode()))
+    assert store.tickers == [["MSFT", "Microsoft", 3], ["AMZN", "Amazon.com", 2]]     # most threads first
+    assert store.ticker("msft") == "MSFT" and store.ticker("NOPE") is None and store.ticker("") is None
+    assert store.grid("direct", "MSFT")["counts"]["bull"][6] == 2 and store.grid("direct")["counts"]["bull"][6] == 3
+    assert store.grid("direct", "MSFT")["total"] == 3 and store.grid("direct", "AMZN")["counts"]["bull"][6] == 1
+    httpd = tsv.serve(store, "pw", 0)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        code, home = get(base + "/?measure=direct&ticker=MSFT")
+        assert code == 200 and "Showing only <b>MSFT</b>" in home and "3 threads about MSFT" in home
+        assert "/list?stance=bull&qbin=6&measure=direct&ticker=MSFT'>2<" in home
+        assert 'id=stockdata>[["MSFT", "Microsoft", 3], ["AMZN", "Amazon.com", 2]]' in home and "id=stocklist" in home
+        code, lst = get(base + "/list?stance=bull&qbin=6&measure=direct&ticker=MSFT")
+        assert code == 200 and "2 threads about <b>MSFT</b>" in lst and "/post/p3_1?measure=direct&ticker=MSFT" in lst
+        assert "/post/p1_1" not in lst and "/?measure=direct&ticker=MSFT" in lst
+        code, post = get(base + "/post/p3_1?measure=direct&ticker=MSFT")
+        assert code == 200 and "/list?stance=bull&qbin=6&measure=direct&ticker=MSFT" in post
+        code, allg = get(base + "/?measure=direct&ticker=BOGUS")             # unknown ticker: no filter
+        assert code == 200 and "Showing only" not in allg and "/list?stance=bull&qbin=6&measure=direct'>3<" in allg
+        assert json.loads(get(base + "/api/stocks")[1])[0] == ["MSFT", "Microsoft", 3]
+    finally:
+        httpd.shutdown()

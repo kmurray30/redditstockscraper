@@ -105,6 +105,24 @@ class Store:
         variants = Counter(r.get("variant") for r in records if r.get("variant"))
         self.prompt = prompts.most_common(1)[0][0] if prompts else None
         self.variant = variants.most_common(1)[0][0] if variants else "identified"
+        # the stock filter's options: every ticker with its most common name and thread count,
+        # most-discussed first
+        per: dict[str, Counter] = {}
+        for r in records:
+            t = r.get("ticker")
+            if t:
+                per.setdefault(t, Counter())[r.get("name") or ""] += 1
+        self.tickers = sorted(([t, c.most_common(1)[0][0], sum(c.values())] for t, c in per.items()),
+                              key=lambda x: (-x[2], x[0]))
+        self.ticker_set = set(per)
+
+    def ticker(self, t: str | None) -> str | None:
+        """A requested stock filter, or None when it is empty or not a known ticker."""
+        t = (t or "").strip().upper()
+        return t if t in self.ticker_set else None
+
+    def _rows(self, ticker: str | None) -> list[dict]:
+        return self.records if not ticker else [r for r in self.records if r.get("ticker") == ticker]
 
     def measure(self, name: str) -> str:
         return name if name in self.measures else self.measures[0]
@@ -140,13 +158,13 @@ class Store:
     def from_bucket(cls, bucket, key: str = KEY) -> "Store":
         return cls.from_bytes(bucket.get_bytes(key))
 
-    def cell(self, stance: str, b: int, measure: str) -> list[dict]:
-        return [r for r in self.records if self.row_key(r, measure) == stance and self.col(r, measure) == b]
+    def cell(self, stance: str, b: int, measure: str, ticker: str | None = None) -> list[dict]:
+        return [r for r in self._rows(ticker) if self.row_key(r, measure) == stance and self.col(r, measure) == b]
 
-    def grid(self, measure: str) -> dict:
+    def grid(self, measure: str, ticker: str | None = None) -> dict:
         counts = {s: [0] * QBINS for s, _, _ in STANCES}
         total = 0
-        for r in self.records:
+        for r in self._rows(ticker):
             k, b = self.row_key(r, measure), self.col(r, measure)
             if k is None or b is None:   # no final judgement on this record (a v1 grade): not in the direct grid
                 continue
@@ -154,7 +172,8 @@ class Store:
             total += 1
         return {"measure": measure, "bins": [col_label(b, measure) for b in range(QBINS)],
                 "rows": "direction" if measure == "direct" else "stance",
-                "total": total, "counts": counts, "prompt": self.prompt, "variant": self.variant}
+                "total": total, "counts": counts, "prompt": self.prompt, "variant": self.variant,
+                "ticker": ticker}
 
 
 # ------------------------------------------------------------------ pages
@@ -192,6 +211,14 @@ border:1px solid currentColor;margin-right:6px}
 color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.03em}
 .bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:3px}.bar i{display:block;height:100%;background:var(--accent)}
 .crumbs{font-size:14px;color:var(--muted);margin-bottom:10px}
+.filter{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 16px}.filter label{font-weight:600;font-size:14px}
+.combo{position:relative;flex:1;min-width:220px;max-width:420px}
+.combo input{width:100%;padding:8px 10px;font-size:16px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.dropdown{display:none;position:absolute;z-index:10;left:0;right:0;top:100%;margin-top:4px;max-height:340px;overflow-y:auto;
+background:var(--card);border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.12)}
+.dropdown .opt{padding:8px 10px;cursor:pointer;font-size:14px;display:flex;gap:6px;align-items:baseline;border-bottom:1px solid var(--line)}
+.dropdown .opt:hover{background:var(--bg)}.dropdown .opt .n{margin-left:auto;color:var(--muted);font-size:13px}
+.dropdown .opt.none{color:var(--muted);cursor:default}.filter .cur{font-size:14px;color:var(--muted)}
 @media(max-width:600px){.grid{grid-template-columns:64px repeat(5,1fr);gap:3px}.cell{padding:8px 2px}.cell a{font-size:15px}.grid .head{font-size:11px}.grid .row{font-size:12px}}
 """
 
@@ -228,8 +255,55 @@ def q_tags(store: Store, r: dict) -> str:
     return "".join(out)
 
 
-def grid_html(store: Store, measure: str) -> bytes:
-    g = store.grid(measure)
+def tq(ticker: str | None) -> str:
+    """The stock filter as a query-string suffix, carried through every link."""
+    return f"&ticker={quote(ticker)}" if ticker else ""
+
+
+FILTER_JS = """
+(function(){
+var opts=JSON.parse(document.getElementById('stockdata').textContent),inp=document.getElementById('stock'),
+box=document.getElementById('stocklist'),measure=inp.dataset.measure;
+function go(t){location.href='/?measure='+encodeURIComponent(measure)+(t?'&ticker='+encodeURIComponent(t):'');}
+function esc(x){return String(x).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function render(){
+  var q=inp.value.trim().toLowerCase(),list=opts;
+  if(q){list=opts.filter(function(o){return o[0].toLowerCase().indexOf(q)===0||o[1].toLowerCase().indexOf(q)>=0;});
+    list.sort(function(a,b){var ea=a[0].toLowerCase()===q,eb=b[0].toLowerCase()===q;
+      var pa=a[0].toLowerCase().indexOf(q)===0,pb=b[0].toLowerCase().indexOf(q)===0;
+      return (eb-ea)||(pb-pa)||(b[2]-a[2])||(a[0]<b[0]?-1:1);});}
+  var h='<div class=opt data-t="">All stocks</div>';
+  for(var i=0;i<list.length;i++){var o=list[i];
+    h+='<div class=opt data-t="'+esc(o[0])+'"><b>'+esc(o[0])+'</b> '+esc(o[1])+'<span class=n>'+o[2]+'</span></div>';}
+  if(!list.length)h+='<div class="opt none">No stock matches</div>';
+  box.innerHTML=h;box.style.display='block';}
+inp.addEventListener('focus',render);inp.addEventListener('input',render);
+box.addEventListener('mousedown',function(e){var el=e.target.closest('.opt');if(el&&el.dataset.t!==undefined&&!el.classList.contains('none')){e.preventDefault();go(el.dataset.t);}});
+inp.addEventListener('blur',function(){setTimeout(function(){box.style.display='none';},150);});
+inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();var first=box.querySelector('.opt[data-t]:not([data-t=""])');
+  var v=inp.value.trim().toUpperCase();var exact=opts.filter(function(o){return o[0]===v;})[0];
+  if(exact)go(exact[0]);else if(first)go(first.dataset.t);else if(!v)go('');}
+  if(e.key==='Escape'){inp.blur();}});
+})();
+"""
+
+
+def filter_html(store: Store, measure: str, ticker: str | None) -> str:
+    data = json.dumps(store.tickers, ensure_ascii=False).replace("</", "<\\/")
+    current = ""
+    if ticker:
+        name = next((n for t, n, _ in store.tickers if t == ticker), "")
+        current = (f"<span class=cur>Showing only <b>{esc(ticker)}</b> {esc(name)} &middot; "
+                   f"<a href='/?measure={measure}'>clear</a></span>")
+    return (f"<div class=filter><label for=stock>Stock</label>"
+            f"<div class=combo><input id=stock type=text autocomplete=off spellcheck=false "
+            f"placeholder='Filter by ticker or name ({len(store.tickers):,} stocks)' value='{esc(ticker or '')}' "
+            f"data-measure='{esc(measure)}'><div id=stocklist class=dropdown></div></div>{current}</div>"
+            f"<script type=application/json id=stockdata>{data}</script><script>{FILTER_JS}</script>")
+
+
+def grid_html(store: Store, measure: str, ticker: str | None = None) -> bytes:
+    g = store.grid(measure, ticker)
     direct = measure == "direct"
     peak = max((n for row in g["counts"].values() for n in row), default=1) or 1
     corner = "credibility &darr; direction &rarr;" if direct else "quality &darr; stance &rarr;"
@@ -244,10 +318,10 @@ def grid_html(store: Store, measure: str) -> bytes:
             alpha = 0.08 + 0.72 * (n / peak) ** 0.5 if n else 0
             style = f" style='background:rgba(37,99,235,{alpha:.2f})'" if n else ""
             cells.append(f"<div class='cell{'' if n else ' z'}'{style}>"
-                         f"<a href='/list?stance={s}&qbin={b}&measure={measure}'>{n:,}</a></div>")
+                         f"<a href='/list?stance={s}&qbin={b}&measure={measure}{tq(ticker)}'>{n:,}</a></div>")
     cells.append("</div></div>")
     measure_label = dict(MEASURES)[measure]
-    switch = " &middot; ".join(f"<b>{lbl}</b>" if m == measure else f"<a href='/?measure={m}'>{lbl}</a>"
+    switch = " &middot; ".join(f"<b>{lbl}</b>" if m == measure else f"<a href='/?measure={m}{tq(ticker)}'>{lbl}</a>"
                                for m, lbl in MEASURES if m in store.measures)
     who = f"{store.variant} variant" + (f", prompt {esc(store.prompt)}" if store.prompt else "")
     if direct:
@@ -259,15 +333,17 @@ def grid_html(store: Store, measure: str) -> bytes:
         axes = ("Columns are the model's stance in its five levels (the decoded value runs from &minus;1 to +1, cut at "
                 "&plusmn;0.25 and &plusmn;0.75); rows are thread quality in ten bins of ten, best at the top.")
         note = "Q 0 is worthless, 100 is a fully argued, sourced, level thread with strong independent discussion."
-    body = (f"<h1>Graded threads</h1><p class=sub>{g['total']:,} threads graded by the model, {who}. {axes} "
+    scope = f" about {esc(ticker)}" if ticker else ""
+    body = (f"<h1>Graded threads</h1><p class=sub>{g['total']:,} threads{scope} graded by the model, {who}. {axes} "
             f"Shown: {measure_label}. Click a count to see those threads.</p>"
-            f"<p class=sub>Measure: {switch}</p>" + "".join(cells)
+            f"<p class=sub>Measure: {switch}</p>" + filter_html(store, measure, ticker) + "".join(cells)
             + f"<p class=axis>{note}</p>")
     return page("Graded threads", body)
 
 
-def list_html(store: Store, stance: str, b: int, measure: str, sort: str, pg: int) -> bytes:
-    rows = store.cell(stance, b, measure)
+def list_html(store: Store, stance: str, b: int, measure: str, sort: str, pg: int,
+              ticker: str | None = None) -> bytes:
+    rows = store.cell(stance, b, measure, ticker)
     if sort == "date":
         rows.sort(key=lambda r: -(r.get("created_utc") or 0))
     elif sort == "votes":
@@ -280,12 +356,12 @@ def list_html(store: Store, stance: str, b: int, measure: str, sort: str, pg: in
     chunk = rows[(pg - 1) * PAGE_SIZE: pg * PAGE_SIZE]
     label = STANCE_LABEL[stance]
     direct = measure == "direct"
-    base = f"/list?stance={stance}&qbin={b}&measure={measure}"
+    base = f"/list?stance={stance}&qbin={b}&measure={measure}{tq(ticker)}"
     items = []
     for r in chunk:
         subs = esc(", r/".join(r.get("subreddits") or [r.get("subreddit") or ""]))
         items.append(
-            f"<div class=item><a class=t href='/post/{quote(r['key'])}?measure={measure}'>{esc(r.get('title') or '(no title)')}</a>"
+            f"<div class=item><a class=t href='/post/{quote(r['key'])}?measure={measure}{tq(ticker)}'>{esc(r.get('title') or '(no title)')}</a>"
             f"<div class=meta>{stance_tag(r)}{q_tags(store, r)}"
             f"<b>{esc(r.get('ticker'))}</b> {esc(r.get('name'))} &middot; r/{subs} &middot; "
             f"{day(r.get('created_utc'))} &middot; {int(r.get('votes') or 0)} votes &middot; "
@@ -302,9 +378,11 @@ def list_html(store: Store, stance: str, b: int, measure: str, sort: str, pg: in
     else:
         head, what = (f"{label}, quality {qbin_label(b)}",
                       f"the model's stance {label.lower()} and {dict(MEASURES)[measure]} in {qbin_label(b)}")
-    body = (f"<div class=crumbs><a href='/?measure={measure}'>&larr; grid</a></div>"
-            f"<h1><span class='{stance}'>{label}</span>, {'credibility ' + str(b + 1) if direct else 'quality ' + qbin_label(b)}</h1>"
-            f"<p class=sub>{n:,} threads with {what}. Sort: {sorts}</p>"
+    scope = f" about <b>{esc(ticker)}</b>" if ticker else ""
+    body = (f"<div class=crumbs><a href='/?measure={measure}{tq(ticker)}'>&larr; grid</a></div>"
+            f"<h1><span class='{stance}'>{label}</span>, {'credibility ' + str(b + 1) if direct else 'quality ' + qbin_label(b)}"
+            f"{' &middot; ' + esc(ticker) if ticker else ''}</h1>"
+            f"<p class=sub>{n:,} threads{scope} with {what}. Sort: {sorts}</p>"
             f"<div class=card>{''.join(items) or '<p class=sub>Nothing here.</p>'}</div>{pager}")
     return page(head, body)
 
@@ -316,7 +394,7 @@ def kv(label: str, value, bar: float | None = None) -> str:
     return f"<div>{inner}</div>"
 
 
-def post_html(store: Store, r: dict, measure: str) -> bytes:
+def post_html(store: Store, r: dict, measure: str, ticker: str | None = None) -> bytes:
     g = r.get("grades") or {}
     o = r.get("outcome")
     comments = []
@@ -369,8 +447,8 @@ def post_html(store: Store, r: dict, measure: str) -> bytes:
     row_key, col = store.row_key(r, measure), store.col(r, measure)
     if row_key is None or col is None:   # a record outside the direct grid: back to its stance cell under q
         row_key, col, measure = r["_stance"], qbin(store.value(r, "q")), "q"
-    header = (f"<div class=crumbs><a href='/?measure={measure}'>&larr; grid</a> &middot; "
-              f"<a href='/list?stance={row_key}&qbin={col}&measure={measure}'>back to the list</a></div>"
+    header = (f"<div class=crumbs><a href='/?measure={measure}{tq(ticker)}'>&larr; grid</a> &middot; "
+              f"<a href='/list?stance={row_key}&qbin={col}&measure={measure}{tq(ticker)}'>back to the list</a></div>"
               f"<h1>{esc(r.get('title') or '(no title)')}</h1>"
               f"<p class=sub>{stance_tag(r)}{q_tags(store, r)}"
               f"<b>{esc(r.get('ticker'))}</b> {esc(r.get('name'))} &middot; r/{esc(', r/'.join(r.get('subreddits') or [r.get('subreddit') or '']))}"
@@ -423,10 +501,13 @@ def make_handler(store: Store, password: str):
                 return self._send(401, b"password required", "text/plain",
                                   {"WWW-Authenticate": 'Basic realm="graded threads", charset="UTF-8"'})
             measure = store.measure(qs.get("measure", store.measures[-1]))
+            ticker = store.ticker(qs.get("ticker"))
             if u.path == "/":
-                return self._send(200, grid_html(store, measure))
+                return self._send(200, grid_html(store, measure, ticker))
             if u.path == "/api/grid":
-                return self._send(200, json.dumps(store.grid(measure)).encode(), "application/json; charset=utf-8")
+                return self._send(200, json.dumps(store.grid(measure, ticker)).encode(), "application/json; charset=utf-8")
+            if u.path == "/api/stocks":
+                return self._send(200, json.dumps(store.tickers).encode(), "application/json; charset=utf-8")
             if u.path == "/list":
                 stance = qs.get("stance", "bull")
                 try:
@@ -435,12 +516,12 @@ def make_handler(store: Store, password: str):
                     return self._send(404, b"no such cell", "text/plain")
                 if stance not in STANCE_LABEL or not 0 <= b < QBINS:
                     return self._send(404, b"no such cell", "text/plain")
-                return self._send(200, list_html(store, stance, b, measure, qs.get("sort", "q"), pg))
+                return self._send(200, list_html(store, stance, b, measure, qs.get("sort", "q"), pg, ticker))
             if u.path.startswith("/post/"):
                 r = store.by_key.get(u.path[len("/post/"):])
                 if r is None:
                     return self._send(404, b"no such thread", "text/plain")
-                return self._send(200, post_html(store, r, measure))
+                return self._send(200, post_html(store, r, measure, ticker))
             self._send(404, b"not found", "text/plain")
 
         def log_message(self, fmt, *args):  # no auth headers, no bodies
