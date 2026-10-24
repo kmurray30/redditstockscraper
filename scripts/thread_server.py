@@ -168,16 +168,17 @@ CSS = """
 .sub{color:var(--muted);margin:0 0 18px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
 margin:0 0 14px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
 .gridwrap{overflow-x:auto;padding-bottom:6px}
-.grid{display:grid;grid-template-columns:110px repeat(10,minmax(58px,1fr));gap:4px;align-items:stretch;min-width:720px}
+.grid{display:grid;grid-template-columns:84px repeat(5,minmax(44px,1fr));gap:4px;align-items:stretch}
 .grid .head{font-weight:600;color:var(--muted);font-size:12px;text-align:center;align-self:end;padding:0 2px 4px}
 .grid .corner{font-size:12px;color:var(--muted);align-self:end;padding-bottom:4px}
 .grid .row{font-weight:600;display:flex;align-items:center;padding-left:4px;font-size:14px}
+.grid .head .tot{display:block;margin:0}
 .grid .tot{color:var(--muted);font-weight:400;font-size:12px;margin-left:6px}
 .cell{border-radius:8px;padding:10px 4px;text-align:center;border:1px solid var(--line);background:var(--card)}
 .cell a{display:block;font-size:17px;font-weight:700;line-height:1.2;color:var(--ink)}
 .cell.z a{color:var(--muted);font-weight:400}
 .bull,.strong_bull{color:var(--bull)}.bear,.strong_bear{color:var(--bear)}.neutral{color:var(--neutral)}
-.axis{color:var(--muted);font-size:13px;margin:6px 0 0 114px}
+.axis{color:var(--muted);font-size:13px;margin:8px 0 0}
 form.ctl{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 16px}form.ctl input[type=number]{width:80px;padding:6px 8px;
 font-size:16px;border:1px solid var(--line);border-radius:8px}form.ctl button{padding:7px 14px;border:0;border-radius:8px;background:var(--accent);
 color:#fff;font-size:15px}
@@ -191,7 +192,7 @@ border:1px solid currentColor;margin-right:6px}
 color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.03em}
 .bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:3px}.bar i{display:block;height:100%;background:var(--accent)}
 .crumbs{font-size:14px;color:var(--muted);margin-bottom:10px}
-@media(max-width:600px){.grid{grid-template-columns:90px 1fr 1fr;gap:6px}.cell a{font-size:26px}.cell{padding:12px 8px}}
+@media(max-width:600px){.grid{grid-template-columns:64px repeat(5,1fr);gap:3px}.cell{padding:8px 2px}.cell a{font-size:15px}.grid .head{font-size:11px}.grid .row{font-size:12px}}
 """
 
 
@@ -231,14 +232,15 @@ def grid_html(store: Store, measure: str) -> bytes:
     g = store.grid(measure)
     direct = measure == "direct"
     peak = max((n for row in g["counts"].values() for n in row), default=1) or 1
-    corner = "direction &darr; &nbsp; credibility &rarr;" if direct else "stance &darr; &nbsp; quality &rarr;"
+    corner = "credibility &darr; direction &rarr;" if direct else "quality &darr; stance &rarr;"
     cells = [f"<div class=gridwrap><div class=grid><div class=corner>{corner}</div>"]
-    for b in range(QBINS):
-        cells.append(f"<div class=head>{col_label(b, measure)}</div>")
-    for s, label, _ in STANCES:
-        row = g["counts"][s]
-        cells.append(f"<div class='row {s}'>{label}<span class=tot>{sum(row):,}</span></div>")
-        for b, n in enumerate(row):
+    order = list(reversed(STANCES))   # strong bear on the left, strong bull on the right
+    for s, label, _ in order:
+        cells.append(f"<div class='head {s}'>{label}<span class=tot>{sum(g['counts'][s]):,}</span></div>")
+    for b in reversed(range(QBINS)):  # best credibility / quality at the top
+        cells.append(f"<div class=row>{col_label(b, measure)}</div>")
+        for s, _, _ in order:
+            n = g["counts"][s][b]
             alpha = 0.08 + 0.72 * (n / peak) ** 0.5 if n else 0
             style = f" style='background:rgba(37,99,235,{alpha:.2f})'" if n else ""
             cells.append(f"<div class='cell{'' if n else ' z'}'{style}>"
@@ -249,13 +251,13 @@ def grid_html(store: Store, measure: str) -> bytes:
                                for m, lbl in MEASURES if m in store.measures)
     who = f"{store.variant} variant" + (f", prompt {esc(store.prompt)}" if store.prompt else "")
     if direct:
-        axes = ("Rows are the model's own final direction of the whole thread, post weighed with the substantive "
-                "comments, in its five levels; columns are its own final credibility, 1 to 10, exact levels, "
-                "no formula.")
+        axes = ("Columns are the model's own final direction of the whole thread, post weighed with the substantive "
+                "comments, strong bear to strong bull; rows are its own final credibility, 10 at the top down to 1, "
+                "exact levels, no formula.")
         note = CREDIBILITY_NOTE
     else:
-        axes = ("Rows are the model's stance in its five levels (the decoded value runs from &minus;1 to +1, cut at "
-                "&plusmn;0.25 and &plusmn;0.75); columns are thread quality in ten bins of ten.")
+        axes = ("Columns are the model's stance in its five levels (the decoded value runs from &minus;1 to +1, cut at "
+                "&plusmn;0.25 and &plusmn;0.75); rows are thread quality in ten bins of ten, best at the top.")
         note = "Q 0 is worthless, 100 is a fully argued, sourced, level thread with strong independent discussion."
     body = (f"<h1>Graded threads</h1><p class=sub>{g['total']:,} threads graded by the model, {who}. {axes} "
             f"Shown: {measure_label}. Click a count to see those threads.</p>"

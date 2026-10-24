@@ -133,7 +133,11 @@ def test_direct_grid_uses_the_model_s_own_levels(tmp_path):
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
     try:
         code, home = get(base + "/")                                    # the direct grid is the landing page
-        assert code == 200 and "direction &darr;" in home and "prompt thesis_v2" in home and "/list?stance=bull&qbin=6&measure=direct" in home
+        assert code == 200 and "credibility &darr; direction &rarr;" in home and "prompt thesis_v2" in home and "/list?stance=bull&qbin=6&measure=direct" in home
+        # 5 columns (strong bear .. strong bull) by 10 rows (credibility 10 at the top)
+        heads = [home.index(f"<div class='head {k}'>") for k in ("strong_bear", "bear", "neutral", "bull", "strong_bull")]
+        assert heads == sorted(heads) and heads[-1] < home.index("<div class=row>10</div>") < home.index("<div class=row>1</div>")
+        assert home.count("<div class=row>") == 10 and home.count("<div class='cell") == 50
         code, lst = get(base + "/list?stance=bull&qbin=6&measure=direct")
         assert code == 200 and "Killing Me Softly" in lst and "cred 7/10" in lst and "dir 4/5" in lst and "credibility 7" in lst
         assert "Killing Me Softly" not in get(base + "/list?stance=strong_bear&qbin=6&measure=direct")[1]
@@ -143,6 +147,7 @@ def test_direct_grid_uses_the_model_s_own_levels(tmp_path):
         code, post4 = get(base + "/post/p4_1?measure=direct")           # a v1 record falls back to its q cell
         assert code == 200 and "credibility (model" not in post4 and "/list?stance=strong_bull&qbin=5&measure=q" in post4
         code, old = get(base + "/?measure=q")
-        assert code == 200 and "stance &darr;" in old and "/list?stance=strong_bull&qbin=5&measure=q" in old
+        assert code == 200 and "quality &darr; stance &rarr;" in old and "/list?stance=strong_bull&qbin=5&measure=q" in old
+        assert old.index("<div class=row>90-100</div>") < old.index("<div class=row>0-10</div>")
     finally:
         httpd.shutdown()
