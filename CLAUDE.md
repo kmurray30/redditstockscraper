@@ -13,7 +13,10 @@ scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: eval
   there is almost no risk of error. No walls of commands.
 - The user's machine is macOS, Homebrew, pyenv Python 3.11, repo at `~/Repos/redditstockscraper`.
   It may still hold an old copy of `data/`; the Railway volume is the source of truth.
-- Work on branch `claude/confident-gates-n5noak`. **Do not open a PR** unless asked. Commit
+- **Work on `main` only** (user decision 2026-10-25): commit to `main` and push with
+  `git push --force origin main`; no feature branches, no PRs. The Railway services (worker,
+  thread-ui, gold-ui) deploy from `main`. The old branch `claude/confident-gates-n5noak` is
+  merged and no longer used. Commit
   messages end with the `Co-Authored-By: Claude ...` trailer the harness specifies.
 - Never print or commit API keys; they live in the gitignored `.env`. Do not send the user's
   email or any contact string to a service unless they ask (the SEC wants one: see Next steps).
@@ -22,7 +25,7 @@ scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: eval
 
 ## Hosted worker (Railway)
 
-- Railway project `redditstockscraper`, service `worker`, built from this repo and branch with
+- Railway project `redditstockscraper`, service `worker`, built from this repo's `main` branch with
   the `Dockerfile` (Python 3.11). One volume is mounted at `/app/data`, so every script's
   default `data/...` path lands on it. The service has **no public domain and no TCP proxy**.
   Keep it that way: the Reddit data must never be on a public endpoint.
