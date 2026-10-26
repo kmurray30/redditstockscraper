@@ -244,3 +244,10 @@ def test_v2_halves_split_the_full_run_by_variant():
 def test_gold_eval_both_runs_nano_then_jev():
     cmds = jobs.resolve("gold-eval-both")
     assert len(cmds) == 2 and cmds[0][-1] == "evaluate" and cmds[1][-2:] == ["--model", "jev-1.13.0"]
+
+
+def test_darlings_preset_reads_the_v2_grades_and_takes_args():
+    cmds = jobs.resolve("darlings", "--inspect ASML")
+    assert cmds == [["env", "THESIS_PROMPT=thesis_v2", jobs.PY, "scripts/darlings.py", "run", "--inspect", "ASML"]]
+    with pytest.raises(jobs.JobError, match="holdout"):
+        jobs.resolve("darlings", "--split holdout")

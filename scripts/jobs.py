@@ -232,6 +232,10 @@ PRESETS: dict[str, list[list[str]]] = {
                    *[[*_V2, "THESIS_VARIANT=blinded", f"THESIS_PARAMS={params}",
                       *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")]
                      for params in ('{"quality": "direct"}', '{"quality": "direct", "direction": "none"}')]],
+    # Reddit darlings (user decision 2026-10-26): only companies with an informed bull case that
+    # independent commenters backed; counts per year first, then outcomes vs the S&P and a
+    # liquidity x momentum matched control, once. From the thesis_v2 grades already paid for.
+    "darlings": [[*_V2, *_py("darlings.py", "run")]],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),
@@ -248,7 +252,8 @@ PRESETS["rebuild"] = [c for name in ("export-tickers", "refilter", "corpus", "wo
                                      "ladder-dev", "ladder-validate") for c in PRESETS[name]]
 # Presets that accept JOB_ARGS (appended to their single command).
 TAKES_ARGS = {"run", "ladder-dev", "ladder-validate", "pull-data", "census", "llm-run", "llm-collect",
-              "gold-build", "gold-eval", "thesis-timeline", "calibrate", "thesis-run", "export-threads"}
+              "gold-build", "gold-eval", "thesis-timeline", "calibrate", "thesis-run", "export-threads",
+              "darlings"}
 
 
 class JobError(ValueError):
