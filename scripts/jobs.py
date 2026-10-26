@@ -236,6 +236,8 @@ PRESETS: dict[str, list[list[str]]] = {
     # independent commenters backed; counts per year first, then outcomes vs the S&P and a
     # liquidity x momentum matched control, once. From the thesis_v2 grades already paid for.
     "darlings": [[*_V2, *_py("darlings.py", "run")]],
+    # where the darlings are: counts per year across 2012-2024, no model, no returns (free)
+    "darling-census": [_py("darling_census.py")],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),
@@ -253,7 +255,7 @@ PRESETS["rebuild"] = [c for name in ("export-tickers", "refilter", "corpus", "wo
 # Presets that accept JOB_ARGS (appended to their single command).
 TAKES_ARGS = {"run", "ladder-dev", "ladder-validate", "pull-data", "census", "llm-run", "llm-collect",
               "gold-build", "gold-eval", "thesis-timeline", "calibrate", "thesis-run", "export-threads",
-              "darlings"}
+              "darlings", "darling-census"}
 
 
 class JobError(ValueError):
