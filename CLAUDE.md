@@ -617,6 +617,20 @@ darling phenomenon the user means is not in these five subreddits before 2019; i
 and in wallstreetbets, i.e. the validate, holdout and forward years, which have no grades yet
 and whose 2023-24 outcomes are censored.
 
+**Darling census (2026-10-26, `darling_census.py`, preset `darling-census`; counts only, no
+model, no prices or labels, 2012-2024).** Per company, the substantive-baseline subject posts in
+a rolling three months: distinct authors and the comments they drew (final counts). Candidates
+per year at level C (>= 4 authors, >= 200 comments): 2 / 6 / 3 / 7 / 10 / 16 / 21 in 2012-2018,
+16 in 2019, 86 / 105 / 69 / 44 / 65 in 2020-2024 (substantive posts per year grow from 848 to
+6-8k after 2020, so part of that is more Reddit). Level D (>= 5 authors, >= 400 comments) reaches
+five a year only from 2017; level E only from 2019. The candidates are attention, not quality:
+mostly mega-caps (AAPL, TSLA, AMZN, NVDA), ETFs that slipped through the mention filter (SPY, VOO,
+SLV, BRZU) and crash or meme stories (HTZ, SIVB, GME, AMC). ASML's peak windows: one author a
+year until 2019, 7 authors / 297 comments in 2021, 13 / 1,389 in 2024. RKLB: 2 authors in
+2021-2023, 8 authors / 490 comments in 2024. Read: by crowd attention, the five-a-year floor is
+met only from about 2017 and comfortably from 2020; the darlings the user means (smaller names
+with an informed bull case the crowd backed) need the grades on top of this attention filter.
+
 **Scoring** (`thesis_scorer.py`, weights tuned on the gold set 2026-10-22, see below): `Q =
 100*(.25 argument + .15 evidence + .05 tone + .05 falsifiability + .20 balance + .30 discussion)
 - 10*hype`, with `discussion = (independent_support + independent_opposition +
