@@ -602,6 +602,21 @@ value, which has full resolution. (4) The blinded check for v2 is pending the Ty
 on v1 blinding changed nothing. (5) The thread browser now opens on the 5 x 10 direct grid
 (prompt `thesis_v2`, identified).
 
+**Reddit darlings (2026-10-26, user decision: act only on darlings, an informed bull case that
+independent commenters backed, heavy informed opposition rules a pick out, false negatives are
+fine, at least five a year; `darlings.py`, preset `darlings`, free, from the v2 grades).** Result
+on dev: **no rule level reaches five a year.** The loosest (argument >= 50, evidence >= 25,
+independent support >= 25, one voice, five comments, bullish post and thread, no strong
+opposition) gives 19 darlings in seven years (2/0/3/1/1/5/7), every one a single thread with a
+median of 14 comments; level 2 gives 4, levels 4-5 none. Those 19 show no edge: at 5y 26% beat
+the S&P against 34% for size x momentum matched peers (gap CI -26 to +14 points), 5x 10.5%
+against 5.0% (two names: TTWO, GME); without the opposition rule 46 darlings, also no edge. ASML
+had two graded threads in 2012-2018, a beginner's question and a contested valuation thread;
+RKLB has 30 posts in 2022, 43 in 2023 and 204 in 2024 (posts naming it, counts only). Read: the
+darling phenomenon the user means is not in these five subreddits before 2019; it lives in 2020+
+and in wallstreetbets, i.e. the validate, holdout and forward years, which have no grades yet
+and whose 2023-24 outcomes are censored.
+
 **Scoring** (`thesis_scorer.py`, weights tuned on the gold set 2026-10-22, see below): `Q =
 100*(.25 argument + .15 evidence + .05 tone + .05 falsifiability + .20 balance + .30 discussion)
 - 10*hype`, with `discussion = (independent_support + independent_opposition +
