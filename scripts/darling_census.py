@@ -118,6 +118,25 @@ def candidates(roll: dict, tickers: dict, authors_min: int, comments_min: int, y
     return sorted(out, key=lambda e: (e["month"], -e["comments"]))
 
 
+def chip_report(con, universe: Path, months: list[str], tickers: list[str], top: int = BLUE_CHIP_TOP, log=print):
+    """For a check by eye: the most traded eligible stocks in each month, and the dollar-volume
+    rank of each ticker that month and twelve months before."""
+    con.execute(f"""create or replace temp table rk as
+        select month, cik, ticker, adv60, rank() over (partition by month order by adv60 desc) rk,
+               count(*) over (partition by month) n
+        from read_parquet('{universe}') where eligible and adv60 is not null""")
+    for m in months:
+        rows = con.execute("select ticker, adv60, n from rk where month = ? order by rk limit 12", [m]).fetchall()
+        log(f"\n{m}: {rows[0][2] if rows else 0:,} eligible; most traded: "
+            + ", ".join(f"{t} ${a / 1e6:,.0f}M" for t, a, _ in rows))
+        for t in tickers:
+            got = con.execute("""select a.ticker, a.rk, a.adv60, b.rk from rk a left join rk b on b.cik = a.cik
+                                   and cast(b.month as date) = cast(a.month as date) - interval 12 month
+                                 where a.month = ? and upper(a.ticker) = ?""", [m, t.upper()]).fetchall()
+            log(f"  {t}: " + ("; ".join(f"rank {r} (${a / 1e6:,.1f}M), a year before {rb}" for _, r, a, rb in got)
+                              or "not eligible that month"))
+
+
 def write_candidates(roll: dict, level: str, years, universe: Path, out: Path, con, log=print,
                      blue_chip_top: int = 0) -> int:
     """Every company-month at or above ``level`` (no cooldown, so a long darling run is graded at
@@ -169,8 +188,13 @@ def main(argv=None) -> int:
     p.add_argument("--blue-chip-top", type=int, default=0,
                    help=f"with --write: drop blue chips (top N by dollar volume now and a year before; "
                         f"{BLUE_CHIP_TOP} is the darling study's choice, 0 = keep them)")
+    p.add_argument("--chip-report", nargs="*", metavar="MONTH",
+                   help="print the dollar-volume ranks for these months (YYYY-MM-01) and --tickers, then stop")
     a = p.parse_args(argv)
     import duckdb
+    if a.chip_report:
+        chip_report(duckdb.connect(), Path(a.universe), a.chip_report, a.tickers)
+        return 0
     years = (a.years[0], a.years[1])
     con = duckdb.connect()
     rows = monthly(con, Path(a.parquet), Path(a.mentions), Path(a.features), years)

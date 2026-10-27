@@ -75,3 +75,12 @@ def test_blue_chips_are_top_traded_now_and_a_year_before(tmp_path):
     chips = dc.blue_chips(duckdb.connect(), tmp_path / "u.parquet", 2)
     assert chips == {("2021-01-01", "0")}            # cik 1: top 2 in 2020 but third in 2021; cik 4: new
     assert dc.blue_chips(duckdb.connect(), tmp_path / "u.parquet", 0) == set()
+
+
+def test_chip_report_prints_ranks(tmp_path, capsys):
+    uni = [{"month": m, "cik": str(i), "ticker": "T" + str(i), "eligible": True, "adv60": float(100 - i)}
+           for m in ("2020-01-01", "2021-01-01") for i in range(3)]
+    pq.write_table(pa.Table.from_pylist(uni), tmp_path / "u.parquet")
+    assert dc.main(["--universe", str(tmp_path / "u.parquet"), "--chip-report", "2021-01-01", "--tickers", "T1", "X"]) == 0
+    out = capsys.readouterr().out
+    assert "T0 $0M" in out and "T1: rank 2" in out and "a year before 2" in out and "X: not eligible" in out
