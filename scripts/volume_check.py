@@ -55,12 +55,50 @@ def factor(splits: list[tuple[str, float]], month: str) -> float:
     return f
 
 
+def split_jumps(market: Path, spl: dict, n: int, seed: int = 0, log=print) -> None:
+    """Does EODHD adjust volume for each kind of split? For a sample of split events, the median
+    share volume over the 20 bars after the split over the 20 bars before. Adjusted volume shows
+    no jump (about 1); raw volume jumps by the ratio (2 for a 2:1 split, 0.1 for a 1:10 reverse
+    split). The same for raw close x volume and adjusted close x volume, the two dollar-volume
+    candidates: the right one shows no jump."""
+    rng = np.random.default_rng(seed)
+    evs = [(c, d, r) for c, ss in spl.items() for d, r in ss if r > 0 and abs(np.log(r)) > 0.2]
+    for kind, sel in (("forward", [e for e in evs if e[2] > 1]), ("reverse", [e for e in evs if e[2] < 1])):
+        pick = [sel[i] for i in rng.permutation(len(sel))[:n]]
+        rows = []
+        for code, d, r in pick:
+            path = market / "eod" / (quote(code, safe="") + ".parquet")
+            if not path.exists():
+                continue
+            t = pq.read_table(path, columns=["date", "close", "adjusted_close", "volume"]).to_pydict()
+            dates = [str(x)[:10] for x in t["date"]]
+            i = int(np.searchsorted(np.array(dates), d))
+            if i < 20 or i + 20 > len(dates):
+                continue
+            vol, raw, adj = (np.array(t[k], float) for k in ("volume", "close", "adjusted_close"))
+            def jump(x):
+                a, b = np.median(x[i - 20:i]), np.median(x[i:i + 20])
+                return b / a if a > 0 else np.nan
+            rows.append((r, jump(vol), jump(raw * vol), jump(adj * vol)))
+        if not rows:
+            log(f"  {kind} splits: none sampled")
+            continue
+        a = np.array(rows)
+        # the jump as a power of the split ratio: 0 = no jump, 1 = jumps by the ratio (what raw share volume does)
+        rel = lambda col: np.nanmedian(np.log(a[:, col]) / np.log(a[:, 0]))
+        log(f"  {kind} splits, {len(a)} sampled (median ratio {np.median(a[:, 0]):.3g}): share volume after/before "
+              f"{np.nanmedian(a[:, 1]):.3g} (as a power of the ratio {rel(1):+.2f}; 0 = adjusted, 1 = raw); "
+              f"raw close x volume {np.nanmedian(a[:, 2]):.3g} ({rel(2):+.2f}); adjusted close x volume "
+              f"{np.nanmedian(a[:, 3]):.3g} ({rel(3):+.2f}); 0 = no jump = consistent")
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--features", default="data/features")
     p.add_argument("--market", default="data/market/eodhd")
     p.add_argument("--tickers", nargs="*", default=["AMZN", "NVDA", "BKNG", "JPM", "AAPL", "GME"])
     p.add_argument("--month", default="2020-07-01")
+    p.add_argument("--split-sample", type=int, default=300, help="split events per kind for the jump check")
     a = p.parse_args(argv)
     feats = Path(a.features)
     uni = pq.read_table(feats / "universe.parquet",
@@ -86,6 +124,8 @@ def main(argv=None) -> int:
             flips_out.append(r)
         elif not r["eligible"] and fixed and now is False:
             flips_in.append(r)
+    print("does the volume jump at a split? (the 20 bars after over the 20 bars before, median over events)")
+    split_jumps(Path(a.market), spl, a.split_sample)
     for k, v in moved.items():
         print(f"  {k}: {v:,} company-months ({v / len(uni):.1%})")
     print(f"eligibility flips: {len(flips_out):,} eligible rows fall below ${MIN_ADV:,.0f} when corrected "

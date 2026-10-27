@@ -29,3 +29,20 @@ def test_later_splits_scale_the_stored_volume(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "1 eligible rows fall below" in out and "1 ineligible rows rise above" in out
     assert "corrected $0.1M" in out and "in             dev" in out
+
+
+def test_split_jump_check_tells_adjusted_from_raw_volume(tmp_path, capsys):
+    import numpy as np
+    (tmp_path / "eod").mkdir()
+    dates = [f"2020-01-{d:02d}" for d in range(1, 31)] + [f"2020-02-{d:02d}" for d in range(1, 21)]
+    for code, ratio in (("FWD", 2.0), ("REV", 0.1)):
+        k = 30
+        raw = [10.0] * k + [10.0 / ratio] * 20          # the quoted price moves at the split
+        adj = [10.0 / ratio] * 50                       # adjusted: continuous
+        vol = [1000.0 * ratio] * 50                     # volume adjusted for the split: continuous
+        pq.write_table(pa.table({"date": dates, "close": raw, "adjusted_close": adj, "volume": vol}),
+                       tmp_path / "eod" / f"{code}.parquet")
+    vc.split_jumps(tmp_path, {"FWD": [("2020-01-31", 2.0)], "REV": [("2020-01-31", 0.1)]}, 10)
+    out = capsys.readouterr().out
+    assert "share volume after/before 1 (as a power of the ratio -0.00" in out or "+0.00" in out
+    assert out.count("adjusted close x volume 1 (") == 2
