@@ -117,7 +117,7 @@ read it before designing the scorer, backtest or validation):
 |---|---|
 | 2012-2018 | develop (full 5y labels) |
 | 2019-2020 | validate |
-| 2021-2022 | sealed holdout (spans the GME regime shift) |
+| 2021-2022 | ~~sealed holdout~~ **seen 2026-10-27** (user decision: given up for the darling study; the ledger's holdout state records it, so a one-look evaluation is refused) |
 | 2023-2025 | LLM-hindsight check and early forward test (labels censored) |
 
 ## Decisions already made
@@ -630,6 +630,27 @@ year until 2019, 7 authors / 297 comments in 2021, 13 / 1,389 in 2024. RKLB: 2 a
 2021-2023, 8 authors / 490 comments in 2024. Read: by crowd attention, the five-a-year floor is
 met only from about 2017 and comfortably from 2020; the darlings the user means (smaller names
 with an informed bull case the crowd backed) need the grades on top of this attention filter.
+
+**Darling study on 2019-2024 (2026-10-27, preset `darlings-recent`; user decisions: TypeSafe
+topped up, the sealed 2021-2022 holdout given up for it).** The census's level-C company-months
+(>= 4 authors, >= 200 comments over three months) on eligible stocks only: 1,420 company-months,
+182 companies (506 dropped as funds, ETFs or delisted). `thesis_funnel.py --only` took the top 3
+threads at each: 2,425 threads, graded with thesis_v2 both ways into `data/features/darlings/`
+($1.02, lifetime $5.886 of the $7 cap; check-blind 0 of 2,425). The darling rule (bullish post
+and thread, informed post, independent support, no strong informed opposition) still **does not
+reach five a year at any level**: loosest 16 darlings identified (0/1/9/1/2/3 in 2019-2024), 22
+blinded; level 2 gives 2. Outcomes, identified, strict: 3y beat the S&P 46% against 30% for
+matched peers (n 13, gap CI -9 to +44 points), 5y 40% against 25% (n 10); without the opposition
+rule 46 darlings, 3y 40% against 32% (CI -7 to +24). Not distinguishable from luck; mostly
+mega-caps (GOOGL, AMZN, MSFT, META, DIS, TSM), each on a single thread. **ASML** had 21 graded
+threads in 2021-2024 and none qualifies: the bull threads score argument 36-50 and draw heavy
+informed opposition ("ASML: An unbeatable monopoly?", 165 comments, opposition 70). **RKLB**
+(three threads, Dec 2024) neither: "How we feeling about RKLB" (262 comments) has argument 25,
+opposition 70, yet thread direction 4 on all three. Read: the user's darlings do not look like
+one great DD the crowd affirms; they look like a crowd that is broadly, repeatedly bullish across
+many threads despite pushback. A company-level rule (many authors, most threads net bullish, a
+credibility floor) fits them better than a thread-level one; proposed, not run, as it would be
+one more look at the only recent data.
 
 **Scoring** (`thesis_scorer.py`, weights tuned on the gold set 2026-10-22, see below): `Q =
 100*(.25 argument + .15 evidence + .05 tone + .05 falsifiability + .20 balance + .30 discussion)
