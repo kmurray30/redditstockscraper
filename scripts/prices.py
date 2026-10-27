@@ -59,7 +59,7 @@ class Series:
     raw_close: np.ndarray   # as quoted at the time
     volume: np.ndarray      # EODHD's: adjusted for every split up to the download date
     bad_days: np.ndarray = None  # days of unexplained >6x one-day moves (see clean_series)
-    split_factor: np.ndarray = None  # per bar, product of 1/ratio over later splits; None = no split data
+    volume_factor: np.ndarray = None  # per bar, undoes EODHD's later split adjustment of volume; None = no split data
 
     def __post_init__(self):
         if self.bad_days is None:
@@ -201,8 +201,27 @@ def clean_series(s: Series, splits: list[tuple[int, float]] | None = None) -> Se
         s, _ = fix_unadjusted_splits(s, splits)
     s = mark_bad_days(s, inconsistent_adjustment_days(s, splits))
     if splits is not None:
-        object.__setattr__(s, "split_factor", split_factors(s.days, splits))
+        object.__setattr__(s, "volume_factor", volume_factors(s, splits))
     return s
+
+
+def volume_adjusted_for(s: Series, day: int, ratio: float, n: int = 20) -> bool:
+    """Did EODHD adjust this series' volume for the split on ``day``? Raw share volume jumps by
+    the ratio at a split (twice the shares after a 2:1), adjusted volume does not. Most splits
+    are adjusted (volume_check, 2026-10-27), so too few bars or a ratio near 1 count as adjusted.
+    A split after the series' last bar belongs to a later holder of the code, not to this
+    series (SUNE read $665B a day in 2015 through one), so it is never undone."""
+    i = int(np.searchsorted(s.days, day))
+    if i >= len(s.days):
+        return False
+    if ratio <= 0 or abs(np.log(ratio)) < 0.2:
+        return True
+    if i < n or i + n > len(s.days):
+        return True
+    before, after = np.median(s.volume[i - n:i]), np.median(s.volume[i:i + n])
+    if before <= 0 or after <= 0:
+        return True
+    return np.log(after / before) / np.log(ratio) < 0.5
 
 
 class PriceStore:
@@ -305,24 +324,31 @@ def outcome(s: Series, entry_i: int, years: float, data_end: int, *,
 
 # ---------------------------------------------------------------- features at a date
 
+def volume_factors(s: Series, splits: list[tuple[int, float]]) -> np.ndarray:
+    """Per bar, the product of 1/ratio over the later splits EODHD adjusted the volume for:
+    volume times it is the share volume as traded that day."""
+    vf = np.ones(len(s.days))
+    for day, ratio in splits:
+        if ratio > 0 and volume_adjusted_for(s, day, ratio):
+            vf[s.days < day] *= 1.0 / ratio
+    return vf
+
+
 def dollar_volume(s: Series) -> np.ndarray:
     """Dollar volume per bar as traded at the time, with no knowledge of later splits.
 
-    EODHD's volume is adjusted for every split up to the download date (checked 2026-10-27 by
-    ``volume_check.py``: share volume shows no jump across forward or reverse splits), so the
-    raw close times it is wrong by the later splits' ratio: AMZN in July 2020 read $207B a day
-    instead of about $10B, and a company that later reverse-split 1:20 read 20 times too small.
-    Winners split and dying companies reverse-split, so that was look-ahead in the eligibility
-    floor and the liquidity quintiles. The adjusted close times the volume is consistent across
-    splits; it still carries the dividend adjustment, which is divided out where the split data
-    explains the adjustment (dividend factor in [0.2, 1.05]); elsewhere it is left in."""
-    base = s.close * s.volume
-    if s.split_factor is None:
-        return base
-    with np.errstate(divide="ignore", invalid="ignore"):
-        div = s.close_adj_over_raw / s.split_factor
-    ok = np.isfinite(div) & (div >= 0.2) & (div <= DIV_FACTOR_MAX)
-    return np.where(ok, base / np.where(ok, div, 1.0), base)
+    EODHD adjusts volume for the splits up to the download date (volume_check, 2026-10-27:
+    share volume shows no jump across most forward and reverse splits), so the raw close times
+    it was wrong by the later splits' ratio: AMZN in July 2020 read $207B a day instead of about
+    $10B, and a company that later reverse-split 1:20 read 20 times too small. Winners split and
+    dying companies reverse-split, so that was look-ahead in the eligibility floor and the
+    liquidity quintiles. But not every split is adjusted in the volume (a first fix that assumed
+    so put dying pennies such as VNTR at $80B a day), so each split is tested on the series
+    itself (``volume_adjusted_for``) and only the adjusted ones are undone. Without split data
+    the raw close times the volume is all there is."""
+    if s.volume_factor is None:
+        return s.raw_close * s.volume
+    return s.raw_close * s.volume * s.volume_factor
 
 
 def trailing_dollar_volume(s: Series, i: int, n: int = 60) -> float | None:

@@ -46,3 +46,19 @@ def test_split_jump_check_tells_adjusted_from_raw_volume(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "share volume after/before 1 (as a power of the ratio -0.00" in out or "+0.00" in out
     assert out.count("adjusted close x volume 1 (") == 2
+
+
+def test_compare_prints_both_builds(tmp_path, capsys):
+    for name, elig in (("old", [True, False]), ("new", [True, True])):
+        d = tmp_path / name
+        d.mkdir()
+        pq.write_table(pa.Table.from_pylist([{"month": "2015-01-01", "cik": c, "eligible": e}
+                                             for c, e in zip("12", elig)]), d / "universe.parquet")
+        pq.write_table(pa.Table.from_pylist([{"month": "2015-01-01", "cik": c, "years": 5, "status": "complete",
+                                              "max_mult": 1.0, "perm_loss": c == "2"} for c in "12"]),
+                       d / "labels.parquet")
+    assert vc.main(["--features", str(tmp_path / "new"), "--compare", str(tmp_path / "old" / "universe.parquet"),
+                    str(tmp_path / "old" / "labels.parquet")]) == 0
+    out = capsys.readouterr().out
+    assert "before eligible company-months 1" in out and "after  eligible company-months 2" in out
+    assert "P(permanent loss) 0.5000" in out

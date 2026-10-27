@@ -279,8 +279,9 @@ PRESETS: dict[str, list[list[str]]] = {
     # printed for a check by eye; then the baseline ladders, the recommended finalist
     # (substantive, dev only: validate stays unseen), the v2 credibility row without direction,
     # and the darling crowd rule (round two) both ways. No model spend.
-    "fix-rebuild": [["cp", "data/features/universe.parquet", "data/features/universe_before_fix.parquet"],
-                    ["cp", "data/features/labels.parquet", "data/features/labels_before_fix.parquet"],
+    "fix-rebuild": [*[["sh", "-c", f"[ -e data/features/{f}_before_fix.parquet ] || "
+                                  f"cp data/features/{f}.parquet data/features/{f}_before_fix.parquet"]
+                      for f in ("universe", "labels")],   # the build before any fix, kept once
                     _py("universe.py"),
                     # a missing split file only skips the dividend correction for that code, so a
                     # failed pull (no EODHD key any more) must not stop the rebuild
@@ -288,6 +289,8 @@ PRESETS: dict[str, list[list[str]]] = {
                                                 "data/features/universe.parquet"))
                      + " || echo '[fix-rebuild] splits pull failed; codes without a split file keep the dividend factor'"],
                     _py("universe.py"),
+                    _py("volume_check.py", "--compare", "data/features/universe_before_fix.parquet",
+                        "data/features/labels_before_fix.parquet"),
                     _py("darling_census.py", "--chip-report", "2015-07-01", "2020-07-01", "2021-12-01",
                         "--tickers", "JPM", "AMZN", "NVDA", "AAPL", "ASML", "GE", "BP", "GME", "RKLB"),
                     _py("backtest.py", "ladder", "--split", "dev"),

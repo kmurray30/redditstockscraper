@@ -275,7 +275,7 @@ def test_darlings_anytime_grades_identified_first_and_checks_the_blinding():
 
 def test_fix_rebuild_keeps_the_old_universe_and_rebuilds_around_the_splits_pull():
     cmds = jobs.resolve("fix-rebuild")
-    assert cmds[0][0] == "cp" and cmds[0][-1].endswith("universe_before_fix.parquet")
+    assert cmds[0][:2] == ["sh", "-c"] and "[ -e data/features/universe_before_fix.parquet ] ||" in cmds[0][2]
     names = [" ".join(c) for c in cmds]
     u = [i for i, n in enumerate(names) if "universe.py" in n]
     sp = [i for i, n in enumerate(names) if "market_data.py splits" in n]

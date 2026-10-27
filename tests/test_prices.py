@@ -201,22 +201,30 @@ def test_corrupt_series_makes_every_overlapping_outcome_bad_data():
 
 
 def test_dollar_volume_has_no_knowledge_of_later_splits():
-    # 10 bars before a 20:1 split and 10 after; the stock trades 1,000 shares at $2,000 before
-    # (= 20,000 at $100 after): $2M a day throughout. EODHD's volume is split-adjusted
-    # (20,000 before), its adjusted close too ($100), with a 0.9 dividend factor before the split.
-    days = np.arange(20, dtype=np.int64)
-    raw = np.r_[np.full(10, 2000.0), np.full(10, 100.0)]
-    adj = np.r_[np.full(10, 100.0 * 0.9), np.full(10, 100.0)]
-    vol = np.full(20, 20000.0)
+    # 25 bars before a 20:1 split and 25 after; the stock trades 1,000 shares at $2,000 before
+    # (= 20,000 at $100 after): $2M a day throughout. EODHD's volume is split-adjusted (20,000
+    # before), so the raw close times it read $40M.
+    days = np.arange(50, dtype=np.int64)
+    raw = np.r_[np.full(25, 2000.0), np.full(25, 100.0)]
+    adj = np.full(50, 100.0)
+    vol = np.full(50, 20000.0)
     s = px.Series("X", days, adj, adj, adj, adj, raw, vol)
-    assert px.trailing_dollar_volume(s, 9, 10) == pytest.approx(2e6 * 0.9)    # no split data: dividend left in
-    s = px.clean_series(s, [(10, 20.0)])
-    assert px.trailing_dollar_volume(s, 9, 10) == pytest.approx(2e6)            # the old formula read $40M
-    assert px.trailing_dollar_volume(s, 19, 10) == pytest.approx(2e6)
-    # a later 1:20 reverse split: the old formula read 20 times too small
-    raw = np.r_[np.full(10, 1.0), np.full(10, 20.0)]
-    adj = np.full(20, 20.0)
-    vol = np.full(20, 5000.0)                                                   # 100,000 shares a day before, adjusted
-    s = px.clean_series(px.Series("Y", days, adj, adj, adj, adj, raw, vol), [(10, 0.05)])
-    assert px.trailing_dollar_volume(s, 9, 10) == pytest.approx(1e5)
-    assert float(np.median(raw[:10] * vol[:10])) == pytest.approx(5e3)
+    assert px.trailing_dollar_volume(s, 24, 20) == pytest.approx(40e6)          # no split data: the old reading
+    s = px.clean_series(s, [(25, 20.0)])
+    assert px.trailing_dollar_volume(s, 24, 20) == pytest.approx(2e6)
+    assert px.trailing_dollar_volume(s, 49, 20) == pytest.approx(2e6)
+    # a later 1:20 reverse split, volume adjusted: the old formula read 20 times too small
+    raw = np.r_[np.full(25, 1.0), np.full(25, 20.0)]
+    adj = np.full(50, 20.0)
+    s = px.clean_series(px.Series("Y", days, adj, adj, adj, adj, raw, np.full(50, 5000.0)), [(25, 0.05)])
+    assert px.trailing_dollar_volume(s, 24, 20) == pytest.approx(1e5)            # 100,000 shares at $1
+    # the same split with the volume left raw (100,000 shares before, 5,000 after): nothing to undo
+    vol = np.r_[np.full(25, 100000.0), np.full(25, 5000.0)]
+    s = px.clean_series(px.Series("Z", days, adj, adj, adj, adj, raw, vol), [(25, 0.05)])
+    assert not px.volume_adjusted_for(s, 25, 0.05)
+    assert px.trailing_dollar_volume(s, 24, 20) == pytest.approx(1e5)
+    assert px.trailing_dollar_volume(s, 49, 20) == pytest.approx(1e5)
+    # a split after the series ended belongs to a later holder of the code: nothing to undo
+    s = px.clean_series(px.Series("W", days, adj, adj, adj, adj, raw, vol), [(80, 0.001)])
+    assert not px.volume_adjusted_for(s, 80, 0.001)
+    assert px.trailing_dollar_volume(s, 24, 20) == pytest.approx(1e5)

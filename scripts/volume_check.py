@@ -92,6 +92,22 @@ def split_jumps(market: Path, spl: dict, n: int, seed: int = 0, log=print) -> No
               f"{np.nanmedian(a[:, 3]):.3g} ({rel(3):+.2f}); 0 = no jump = consistent")
 
 
+def compare(before: Path, before_labels: Path, feats: Path, log=print) -> None:
+    """The eligible universe before and after the fix: rows, and the 5y base rates in dev."""
+    import duckdb
+    con = duckdb.connect()
+    for name, u, l in (("before", before, before_labels),
+                       ("after", feats / "universe.parquet", feats / "labels.parquet")):
+        n, = con.execute(f"select count(*) from read_parquet('{u}') where eligible").fetchone()
+        r = con.execute(f"""select count(*), avg(case when l.max_mult >= 5 then 1.0 else 0 end),
+                                   avg(case when l.perm_loss then 1.0 else 0 end)
+                            from read_parquet('{l}') l join read_parquet('{u}') u using (month, cik)
+                            where u.eligible and l.years = 5 and l.status in ('complete', 'delisted')
+                              and substr(l.month, 1, 4) between '2012' and '2018'""").fetchone()
+        log(f"  {name:6s} eligible company-months {n:,}; dev 5y labels {r[0]:,}, P(5x) {r[1]:.4f}, "
+            f"P(permanent loss) {r[2]:.4f}")
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--features", default="data/features")
@@ -99,7 +115,13 @@ def main(argv=None) -> int:
     p.add_argument("--tickers", nargs="*", default=["AMZN", "NVDA", "BKNG", "JPM", "AAPL", "GME"])
     p.add_argument("--month", default="2020-07-01")
     p.add_argument("--split-sample", type=int, default=300, help="split events per kind for the jump check")
+    p.add_argument("--compare", nargs=2, metavar=("UNIVERSE", "LABELS"),
+                   help="compare the eligible universe with an older build of it, then stop")
     a = p.parse_args(argv)
+    if a.compare:
+        print("eligible universe, before and after the dollar-volume fix:")
+        compare(Path(a.compare[0]), Path(a.compare[1]), Path(a.features))
+        return 0
     feats = Path(a.features)
     uni = pq.read_table(feats / "universe.parquet",
                         columns=["month", "cik", "ticker", "code", "price", "adv60", "eligible", "size_q"]).to_pylist()
