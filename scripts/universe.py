@@ -113,7 +113,7 @@ def build(master: SecurityMaster, store: px.PriceStore, months: list[str], *, ho
             log(f"  {n:,}/{len(members):,} companies, {len(uni):,} universe rows")
         for c, (ticker, typ) in by_month.items():
             cday = px.to_day(c)
-            code, why = master.price_code(cik, c)
+            code, why = master.price_code(cik, c, ticker)
             s = store.get(code)
             if s is None:
                 key = (cik, ticker, drop_reason(why) if code is None else "no_price_file")

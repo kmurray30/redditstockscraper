@@ -303,3 +303,14 @@ def test_export_tickers_command_writes_a_filter_list(tmp_path, capsys):
     lines = dest.read_text().splitlines()
     assert lines[0].startswith("# 3 tickers") and lines[1:] == ["AAPL", "RSH", "WLT"]
     assert "3 tickers" in capsys.readouterr().out
+
+
+def test_the_member_ticker_wins_over_another_product_of_the_same_issuer():
+    # JPMorgan's CIK also lists the AMJ ETN; alphabetically AMJ came first and every JPM row
+    # in the universe was the ETN (found 2026-10-27)
+    snaps = [snap("2020-01-02", "JPM", "19617"), snap("2020-01-02", "AMJ", "19617"),
+             snap("2021-01-04", "JPM", "19617"), snap("2021-01-04", "AMJ", "19617")]
+    idx = {"JPM": ("1990-01-01", "2026-10-01"), "AMJ": ("2009-04-01", "2026-10-01")}
+    m = sm.SecurityMaster(snaps, idx)
+    assert m.price_code("19617", "2020-06-01", "JPM") == ("JPM", "ok")
+    assert m.price_code("19617", "2020-06-01")[0] == "AMJ"          # the old behaviour without the hint

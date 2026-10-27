@@ -331,11 +331,17 @@ class SecurityMaster:
         """Does a *different* company hold ``code`` in a snapshot at or after ``after``?"""
         return any(d >= after and k != cik for d, k in self._holders.get(code, ()))
 
-    def price_code(self, cik: str, on: date | str) -> tuple[str | None, str]:
+    def price_code(self, cik: str, on: date | str, ticker: str | None = None) -> tuple[str | None, str]:
         """(EODHD code, reason). Candidates are the tickers the company ever held plus
         their bankruptcy-suffixed forms. A code that a different company takes over after
         this one's lifetime holds that company's history (BBBY), so it is rejected. A series
-        that merely runs on past the exchange listing (OTC trading) is still the company's."""
+        that merely runs on past the exchange listing (OTC trading) is still the company's.
+
+        ``ticker`` is the stock ticker the company is listed under that month (the universe
+        passes its membership row's): its own series comes first. Without it, an issuer of
+        other listed products under the same CIK got whichever code sorted first: JPMorgan
+        Chase resolved to ``AMJ``, its Alerian MLP ETN, because EODHD names the ETN after its
+        issuer (found 2026-10-27)."""
         on = str(on)
         info = self._ciks.get(cik)
         if info is None:
@@ -359,7 +365,9 @@ class SecurityMaster:
                 ok.append(c)
         if not ok:
             return None, "no_valid_series" + (f" ({'; '.join(why)})" if why else "")
-        ok.sort(key=lambda c: (c not in held_on, c))  # prefer a ticker it had by then
+        own = {ticker, *(ticker + x for x in BANKRUPT_SUFFIXES)} if ticker else set()
+        # its stock ticker that month first, then a ticker it had by then
+        ok.sort(key=lambda c: (c not in own, c not in held_on, c))
         return ok[0], "ok"
 
 

@@ -100,9 +100,49 @@ def test_crowd_rule_any_point_in_time_and_pushback_later_does_not_undo_it():
     assert ev[0]["bulls"] == 2 and ev[0]["authors"] == 2 and ev[0]["threads"] == ["a", "b"]
     assert dl.crowd_events(gs, lv, (2019, 2024), exclude={("2021-02-01", "1")}) == []   # a blue chip then
     w = dl.crowd_window(gs[6:], dl.month_index("2021-02-01"))
-    assert w["bulls"] == 2 and w["bears"] == 2 and "bears 2 >= bulls 2" in dl.crowd_failures(w, lv)
+    assert w["bulls"] == 2 and w["bears"] == 2 and "bear weight 10.0 >= bull weight 10.0" in dl.crowd_failures(w, lv)
     # a bullish post whose comments pushed it to neutral still counts as bullish; bearish direction does not
     assert dl.bull_thread(g("x", "1", "2021-01-01", direction_5=3)) and not dl.bull_thread(g("x", "1", "2021-01-01", direction_5=2))
+    # the value can be all in the comments: a question post (stance 0) whose thread points up counts
+    assert dl.bull_thread(g("x", "1", "2021-01-01", stance=0.0, direction_5=4))
+    assert not dl.bull_thread(g("x", "1", "2021-01-01", stance=0.0, direction_5=3))
+
+
+def test_only_credible_bears_count_and_by_weight():
+    lv = dl.Crowd("t", bulls=2, authors=2, comments=30, credibility=4.0)
+    gs = [g("a", "1", "2021-01-01", credibility=6.0), g("b", "1", "2021-01-01", credibility=6.0),
+          *[g(f"w{i}", "1", "2021-01-01", stance=-0.8, direction_5=1, credibility=2.0) for i in range(5)],  # weak bears
+          g("s", "1", "2021-01-01", stance=-0.8, direction_5=1, credibility=8.0)]                          # one strong bear
+    w = dl.crowd_window(gs, dl.month_index("2021-01-01"), lv.credibility)
+    assert w["bears"] == 1 and w["bear_weight"] == 8.0 and w["bull_weight"] == 12.0 and not dl.crowd_failures(w, lv)
+    weak_bull = g("c", "1", "2021-01-01", credibility=3.0)         # below the floor: does not count as a bull
+    assert dl.crowd_window(gs + [weak_bull], dl.month_index("2021-01-01"), lv.credibility)["bulls"] == 2
+
+
+def test_missed_runups_neither_count_nor_fire():
+    lv = dl.Crowd("t", bulls=2, authors=2, comments=30, credibility=4.0)
+    c = dict(credibility=5.0)
+    gs = [g("a", "1", "2021-01-01", **c), g("b", "1", "2021-02-01", **c), g("d", "1", "2021-04-01", **c)]
+    assert [e["month"] for e in dl.crowd_events(gs, lv, (2019, 2024))] == ["2021-02-01"]
+    ran = {("2021-01-01", "1")}               # January's bull thread came after a double: it does not count
+    assert [e["month"] for e in dl.crowd_events(gs, lv, (2019, 2024), ran=ran)] == ["2021-04-01"]
+    ran2 = {("2021-02-01", "1")}              # no event in a run-up month, and its thread does not count later
+    assert dl.crowd_events(gs, lv, (2019, 2024), ran=ran2) == []
+
+
+def test_runups_from_the_price_series(tmp_path):
+    import datetime as dt
+    (tmp_path / "eod").mkdir()
+    days = [dt.date(2020, 1, 1) + dt.timedelta(d) for d in range(0, 400)]
+    close = [10.0 if d < dt.date(2020, 9, 1) else 25.0 for d in days]      # 2.5x in the six months to Jan 2021
+    pq.write_table(pa.table({"date": [d.isoformat() for d in days], "open": close, "high": close, "low": close,
+                             "close": close, "adjusted_close": close, "volume": [1e6] * len(days)}),
+                   tmp_path / "eod" / "RUN.parquet")
+    pq.write_table(pa.Table.from_pylist([{"month": "2021-01-01", "cik": "1", "code": "RUN"},
+                                         {"month": "2020-08-01", "cik": "1", "code": "RUN"}]), tmp_path / "u.parquet")
+    r = dl.runups(tmp_path / "u.parquet", tmp_path, {("2021-01-01", "1"), ("2020-08-01", "1"), ("2021-01-01", "9")})
+    assert r[("2021-01-01", "1")] == pytest.approx(2.5) and r[("2020-08-01", "1")] == pytest.approx(1.0)
+    assert ("2021-01-01", "9") not in r
 
 
 def test_crowd_run_end_to_end(tmp_path, capsys, monkeypatch):
@@ -113,7 +153,7 @@ def test_crowd_run_end_to_end(tmp_path, capsys, monkeypatch):
     pq.write_table(pa.Table.from_pylist(grades), tmp_path / "thesis_threads_identified.thesis_v2.parquet")
     assert dl.main(["run", "--rule", "crowd", "--split", "dev", "--features", str(tmp_path), "--prompt", "thesis_v2",
                     "--inspect", "RKLB", "--titles", str(tmp_path / "none"), "--parquet", str(tmp_path / "none"),
-                    "--blue-chip-top", "0", "--out", str(tmp_path / "c.json")]) == 0
+                    "--blue-chip-top", "0", "--eodhd", str(tmp_path / "none"), "--out", str(tmp_path / "c.json")]) == 0
     out = capsys.readouterr().out
     assert "crowd darlings per year" in out and "DARLING" in out and "2015-01 RKLB" in out
     assert "C1 loose" in out and (tmp_path / "c.json").exists()

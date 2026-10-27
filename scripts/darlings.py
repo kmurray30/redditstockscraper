@@ -178,19 +178,30 @@ def pick_level(grades, years) -> tuple[Level, dict]:
 
 # ------------------------------------------------------------------ the crowd rule
 
+RUNUP = 2.0            # a stock that already doubled ...
+RUNUP_MONTHS = 6       # ... over this many months: the run-up was missed (user decision 2026-10-27)
+
+
 @dataclass(frozen=True)
 class Crowd:
     """A company-level rule (user decision 2026-10-27: "the point is whether these were ever
     darlings at ANY POINT IN TIME. So it running up and then getting pushback shouldn't matter").
-    Over the graded threads visible in the ``LOOKBACK`` months up to a cutoff: enough bullish
-    threads, by enough different authors, drawing enough discussion, that the model found
-    credible on average, and more bullish threads than bearish ones. A company is a darling the
-    first month this holds; what is said about it afterwards does not undo that."""
+    Only *quality* threads count, on either side: the model's credibility at or above the floor.
+    Over the quality threads visible in the ``LOOKBACK`` months up to a cutoff: enough bullish
+    ones, by enough different authors, drawing enough discussion, and the bullish side outweighs
+    the bearish side by summed credibility. A company is a darling the first month this holds;
+    what is said about it afterwards does not undo that.
+
+    Second round (user, 2026-10-27): a thread whose value is all in its comments counts (the
+    thread's net direction decides, not the poster's opening stance); weak bearish threads do
+    not count against a company, only credible ones, weighted by credibility; and a bullish
+    thread written when the stock had already doubled in the last six months does not count
+    ("I treat these as me having missed the run-up"), nor can the event fall in such a month."""
     name: str
-    bulls: int             # bullish threads in the window
+    bulls: int             # quality bullish threads in the window
     authors: int           # their distinct authors
     comments: int          # comments those threads drew
-    credibility: float     # mean model credibility (1-10, probability-weighted) of the bullish threads
+    credibility: float     # the quality floor: model credibility (1-10, probability-weighted) per thread
 
 
 CROWD_LEVELS = (
@@ -203,12 +214,14 @@ CROWD_LEVELS = (
 
 
 def bull_thread(g: dict) -> bool:
-    """The poster argues for the company and the discussion did not turn the thread bearish
-    (net direction 3 or more): pushback inside a bullish thread does not disqualify it."""
-    if (g.get("stance") or 0) < 0.25:
-        return False
+    """The thread as a whole points up (net direction 4-5, which may come from the comments
+    alone, under a question or a neutral post), or the poster argues for the company and the
+    discussion did not turn it bearish (net direction 3): pushback inside a bullish thread does
+    not disqualify it. A v1 grade (no direction) falls back on the poster's stance."""
     d = g.get("direction_5")
-    return d is None or d >= 3
+    if d is None:
+        return (g.get("stance") or 0) >= 0.25
+    return d >= 4 or (d == 3 and (g.get("stance") or 0) >= 0.25)
 
 
 def bear_thread(g: dict) -> bool:
@@ -217,16 +230,24 @@ def bear_thread(g: dict) -> bool:
     return d <= 2 if d is not None else (g.get("stance") or 0) <= -0.25
 
 
-def crowd_window(gs: list[dict], mi: int) -> dict:
+def cred(g: dict) -> float:
+    return float(g.get("credibility") or g.get("credibility_10") or 0)
+
+
+def crowd_window(gs: list[dict], mi: int, floor: float = 0.0, ran: set = frozenset()) -> dict:
     """The crowd at month index ``mi``: the company's graded threads visible in the LOOKBACK
-    months up to it."""
+    months up to it. Only threads with credibility >= ``floor`` count on either side; bullish
+    threads from a month in ``ran`` (the stock had already doubled) do not count."""
     case = [x for x in gs if 0 <= mi - month_index(x["first_month"]) < LOOKBACK]
-    bulls = [x for x in case if bull_thread(x)]
-    creds = [float(x.get("credibility") or x.get("credibility_10") or 0) for x in bulls]
-    return {"n_graded": len(case), "bulls": len(bulls), "bears": sum(bear_thread(x) for x in case),
+    good = [x for x in case if cred(x) >= floor]
+    bulls = [x for x in good if bull_thread(x) and (x["first_month"], x["cik"]) not in ran]
+    bears = [x for x in good if bear_thread(x)]
+    return {"n_graded": len(case), "bulls": len(bulls), "bears": len(bears),
+            "missed_runup": sum(bull_thread(x) and (x["first_month"], x["cik"]) in ran for x in good),
             "authors": len({x.get("author") for x in bulls}),
             "comments": int(sum(x.get("n_comments") or 0 for x in bulls)),
-            "credibility": float(np.mean(creds)) if creds else 0.0,
+            "credibility": float(np.mean([cred(x) for x in bulls])) if bulls else 0.0,
+            "bull_weight": float(sum(cred(x) for x in bulls)), "bear_weight": float(sum(cred(x) for x in bears)),
             "threads": [x["post_id"] for x in bulls], "n_threads": len(bulls),
             "late": any((x.get("late_shown") or 0) > 0 or x.get("edited_late") for x in bulls)}
 
@@ -234,17 +255,17 @@ def crowd_window(gs: list[dict], mi: int) -> dict:
 def crowd_failures(w: dict, lv: Crowd) -> list[str]:
     out = [f"{k} {w[k]:g} < {getattr(lv, k):g}" for k in ("bulls", "authors", "comments")
            if w[k] < getattr(lv, k)]
-    if w["credibility"] < lv.credibility:
-        out.append(f"credibility {w['credibility']:.1f} < {lv.credibility:g}")
-    if w["bears"] >= w["bulls"]:
-        out.append(f"bears {w['bears']} >= bulls {w['bulls']}")
+    if w["bulls"] and w["bear_weight"] >= w["bull_weight"]:
+        out.append(f"bear weight {w['bear_weight']:.1f} >= bull weight {w['bull_weight']:.1f}")
     return out
 
 
-def crowd_events(grades: list[dict], lv: Crowd, years: tuple[int, int], exclude: set = frozenset()) -> list[dict]:
+def crowd_events(grades: list[dict], lv: Crowd, years: tuple[int, int], exclude: set = frozenset(),
+                 ran: set = frozenset()) -> list[dict]:
     """One row per darling event: the first month (at a graded cutoff, after any cooldown) the
     company's crowd passes the rule. ``exclude`` holds (month, cik) pairs that cannot qualify
-    (the blue chips at that month)."""
+    (the blue chips at that month); ``ran`` the pairs where the stock had already doubled over
+    the last RUNUP_MONTHS (no event then, and its bullish threads do not count later either)."""
     by_cik: dict[str, list[dict]] = defaultdict(list)
     for g in grades:
         by_cik[g["cik"]].append(g)
@@ -253,11 +274,11 @@ def crowd_events(grades: list[dict], lv: Crowd, years: tuple[int, int], exclude:
         last = None
         for m in sorted({g["first_month"] for g in gs}):
             mi = month_index(m)
-            if not years[0] <= int(m[:4]) <= years[1] or (m, cik) in exclude:
+            if not years[0] <= int(m[:4]) <= years[1] or (m, cik) in exclude or (m, cik) in ran:
                 continue
             if last is not None and mi - last < COOLDOWN:
                 continue
-            w = crowd_window(gs, mi)
+            w = crowd_window(gs, mi, lv.credibility, ran)
             if crowd_failures(w, lv):
                 continue
             last = mi
@@ -267,30 +288,63 @@ def crowd_events(grades: list[dict], lv: Crowd, years: tuple[int, int], exclude:
     return out
 
 
-def pick_crowd_level(grades, years, exclude) -> tuple[Crowd, dict]:
+def pick_crowd_level(grades, years, exclude, ran=frozenset()) -> tuple[Crowd, dict]:
     """The strictest crowd level with at least MIN_PER_YEAR darlings every year once the blue
-    chips are out; the loosest if none reaches it. Counts only."""
+    chips and the missed run-ups are out; the loosest if none reaches it. Counts only."""
     table, chosen = {}, None
     for lv in CROWD_LEVELS:
-        table[lv.name] = {"no_blue_chips": per_year(crowd_events(grades, lv, years, exclude), years),
-                          "all": per_year(crowd_events(grades, lv, years), years)}
+        table[lv.name] = {"no_blue_chips": per_year(crowd_events(grades, lv, years, exclude, ran), years),
+                          "runups_kept": per_year(crowd_events(grades, lv, years, exclude), years)}
         if min(table[lv.name]["no_blue_chips"].values()) >= MIN_PER_YEAR:
             chosen = lv
     return chosen or CROWD_LEVELS[0], table
 
 
-def inspect_crowd(grades: list[dict], tickers: list[str], lv: Crowd, chips: set, titles: dict, log=print):
+def runups(universe: Path, eodhd: Path, pairs: set) -> dict[tuple[str, str], float]:
+    """(month, cik) -> adjusted close on the last bar before the cutoff over the close
+    RUNUP_MONTHS earlier, from the company's price series that month. Pairs with no series or
+    no bar that far back are left out (never filtered)."""
+    if not pairs or not universe.exists():
+        return {}
+    import duckdb
+    import pyarrow as pa
+    import prices as px
+    con = duckdb.connect()
+    con.register("want", pa.Table.from_pylist([{"month": m, "cik": c} for m, c in pairs]))
+    codes = con.execute(f"select w.month, w.cik, u.code from want w join read_parquet('{universe}') u "
+                        "on u.month = w.month and u.cik = w.cik where u.code is not null").fetchall()
+    store, out = px.PriceStore(eodhd), {}
+    for m, cik, code in codes:
+        s = store.get(code)
+        if s is None:
+            continue
+        day = px.to_day(m)
+        i = s.index_on_or_before(day - 1)
+        j = s.index_on_or_before(day - 1 - round(RUNUP_MONTHS * 30.44))
+        if i is None or j is None or i == j or s.close[j] <= 0 or day - 1 - s.days[i] > px.MAX_ENTRY_GAP:
+            continue
+        out[(m, cik)] = float(s.close[i] / s.close[j])
+    return out
+
+
+def inspect_crowd(grades: list[dict], tickers: list[str], lv: Crowd, chips: set, titles: dict, log=print,
+                  ran: set = frozenset(), runup: dict | None = None):
     """For each ticker, the crowd at every graded cutoff and why it is or is not a darling then."""
+    runup = runup or {}
     for t in tickers:
         gs = [g for g in grades if (g.get("ticker") or "").upper() == t.upper()]
         log(f"\n-- {t}: {len(gs)} graded threads; the crowd at each graded cutoff at {lv.name}")
         for m in sorted({g["first_month"] for g in gs}):
-            w = crowd_window(gs, month_index(m))
+            key = (m, gs[0]["cik"])
+            w = crowd_window(gs, month_index(m), lv.credibility, ran)
             why = crowd_failures(w, lv)
-            chip = (m, gs[0]["cik"]) in chips
-            log(f"  {m[:7]} {'blue chip' if chip else ('DARLING  ' if not why else 'no       ')} graded {w['n_graded']:2d} "
-                f"bulls {w['bulls']:2d} bears {w['bears']:2d} authors {w['authors']:2d} cmts {w['comments']:5d} "
-                f"cred {w['credibility']:.1f}" + (f"  [{'; '.join(why)}]" if why else ""))
+            state = ("blue chip" if key in chips else "ran up   " if key in ran
+                     else "DARLING  " if not why else "no       ")
+            r = runup.get(key)
+            log(f"  {m[:7]} {state} graded {w['n_graded']:2d} quality bulls {w['bulls']:2d} "
+                f"(weight {w['bull_weight']:4.1f}) bears {w['bears']:2d} (weight {w['bear_weight']:4.1f}) "
+                f"authors {w['authors']:2d} cmts {w['comments']:5d}"
+                + (f" 6m {r:.2f}x" if r else "") + (f"  [{'; '.join(why)}]" if why else ""))
         for g in sorted(gs, key=lambda g: g["first_month"]):
             log(f"     {g['first_month'][:7]} {'bull' if bull_thread(g) else 'bear' if bear_thread(g) else '    '} "
                 f"stance {float(g.get('stance') or 0):+.2f} dir {g.get('direction_5')} cred {g.get('credibility_10')} "
@@ -476,14 +530,18 @@ def run_crowd(a, grades: list[dict], years: tuple[int, int]) -> int:
     chips = blue_chips(duckdb.connect(), Path(a.features) / "universe.parquet", a.blue_chip_top)
     print(f"blue chips: top {a.blue_chip_top} by 60-day dollar volume that month and twelve months before "
           f"({len({c for _, c in chips}):,} companies, {len(chips):,} company-months)")
-    lv, table = pick_crowd_level(grades, years, chips)
+    runup = runups(Path(a.features) / "universe.parquet", Path(a.eodhd), {(g["first_month"], g["cik"]) for g in grades})
+    ran = {k for k, r in runup.items() if r >= RUNUP}
+    print(f"run-ups: {len(ran):,} of {len(runup):,} graded company-months had already doubled over the last "
+          f"{RUNUP_MONTHS} months (no event then, their bullish threads do not count)")
+    lv, table = pick_crowd_level(grades, years, chips, ran)
     print(f"\ncrowd darlings per year by level (any {LOOKBACK}-month window; first month only, then a "
           f"{COOLDOWN}-month cooldown; floor {MIN_PER_YEAR} per year):")
     for name, t in table.items():
         print(f"  {name:10s} no blue chips " + " ".join(f"{y}:{n:3d}" for y, n in t["no_blue_chips"].items())
               + f"   total {sum(t['no_blue_chips'].values())}")
-        print(f"  {'':10s} with them     " + " ".join(f"{y}:{n:3d}" for y, n in t["all"].items())
-              + f"   total {sum(t['all'].values())}")
+        print(f"  {'':10s} run-ups kept  " + " ".join(f"{y}:{n:3d}" for y, n in t["runups_kept"].items())
+              + f"   total {sum(t['runups_kept'].values())}")
     ok = min(table[lv.name]["no_blue_chips"].values()) >= MIN_PER_YEAR
     print(f"level used: {lv.name} {asdict(lv)} (the strictest with >= {MIN_PER_YEAR} every year"
           + ("" if ok else "; NONE reaches the floor, loosest used") + ")")
@@ -491,13 +549,14 @@ def run_crowd(a, grades: list[dict], years: tuple[int, int]) -> int:
     missing = sorted({g["post_id"] for g in grades} - set(titles))
     if missing:
         titles.update(corpus_titles(Path(a.parquet), missing))
-    inspect_crowd(grades, a.inspect, lv, chips, titles)
+    inspect_crowd(grades, a.inspect, lv, chips, titles, ran=ran, runup=runup)
 
-    evs = crowd_events(grades, lv, years, chips)
+    evs = crowd_events(grades, lv, years, chips, ran)
     con = open_db(Path(a.features))
     months = sorted({e["month"] for e in evs})
     rows, cells, months_ = outcome_tables(con, months) if months else ({}, {}, {})
-    res = {"rule": "crowd", "level": asdict(lv), "blue_chip_top": a.blue_chip_top, "counts": table,
+    res = {"rule": "crowd", "level": asdict(lv), "blue_chip_top": a.blue_chip_top, "runup": [RUNUP, RUNUP_MONTHS],
+           "counts": table,
            "outcomes": report(f"{lv.name}, crowd rule, blue chips out", evs, rows, cells, months_)}
     print(f"\n{sum(e['late'] for e in evs)} of {len(evs)} darlings rest on a thread holding content written "
           f"after its first cutoff")
@@ -506,7 +565,8 @@ def run_crowd(a, grades: list[dict], years: tuple[int, int]) -> int:
         o1, o3, o5 = (rows.get((e["month"], e["cik"], y)) or {} for y in HORIZONS)
         first = titles.get(e["threads"][0], "") if e["threads"] else ""
         print(f"  {e['month'][:7]} {e['ticker'] or '?':6s} {(e['name'] or '')[:22]:22s} bulls {e['bulls']} bears "
-              f"{e['bears']} authors {e['authors']} cmts {e['comments']:5d} cred {e['credibility']:.1f}  "
+              f"{e['bears']} authors {e['authors']} cmts {e['comments']:5d} cred {e['credibility']:.1f} "
+              f"6m {runup.get((e['month'], e['cik'])) or float('nan'):.2f}x  "
               f"1y {fmt_outcome(o1)}  3y {fmt_outcome(o3)}  5y {fmt_outcome(o5)}  | {first[:55]}")
     out = Path(a.out or f"data/experiments/darlings_crowd_{a.split}_{a.variant}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -532,6 +592,7 @@ def main(argv=None) -> int:
     p.add_argument("--rule", default="thread", choices=["thread", "crowd"],
                    help="thread: one qualifying thread makes a darling; crowd: the company's bullish threads "
                         "over LOOKBACK months, at any point in time, blue chips out")
+    p.add_argument("--eodhd", default="data/market/eodhd", help="crowd rule: prices for the run-up filter")
     p.add_argument("--blue-chip-top", type=int, default=BLUE_CHIP_TOP,
                    help="crowd rule: blue chip = top N by dollar volume that month and a year before (0 = keep them)")
     a = p.parse_args(argv)
