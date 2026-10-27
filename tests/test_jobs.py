@@ -271,3 +271,14 @@ def test_darlings_anytime_grades_identified_first_and_checks_the_blinding():
     blind = [i for i, c in enumerate(cmds) if "blinded" in c]
     assert len(crowd) == 2 and crowd[0] < min(blind) and "check-blind" in cmds[crowd[1] - 1]
     assert all("--rule" in cmds[i] and "crowd" in cmds[i] for i in crowd)
+
+
+def test_fix_rebuild_keeps_the_old_universe_and_rebuilds_around_the_splits_pull():
+    cmds = jobs.resolve("fix-rebuild")
+    assert cmds[0][0] == "cp" and cmds[0][-1].endswith("universe_before_fix.parquet")
+    names = [" ".join(c) for c in cmds]
+    u = [i for i, n in enumerate(names) if "universe.py" in n]
+    sp = [i for i, n in enumerate(names) if "market_data.py splits" in n]
+    assert cmds[sp[0]][:2] == ["sh", "-c"] and "|| echo" in cmds[sp[0]][2]
+    assert len(u) == 2 and u[0] < sp[0] < u[1]
+    assert not any("validate" in n and "substantive" in n for n in names)     # the finalist stays off validate

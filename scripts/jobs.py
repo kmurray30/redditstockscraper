@@ -272,6 +272,33 @@ PRESETS: dict[str, list[list[str]]] = {
                                             "check-blind")]] if v == "blinded" else []),
                              [*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "recent",
                                          "--grades-dir", "data/features/darlings_b", "--variant", v)])]],
+    # the data-layer fix of 2026-10-27 (user: "pls fix the bugs"): dollar volume without later
+    # splits (prices.dollar_volume) and the member's own price series (JPM was its AMJ ETN).
+    # The old universe and labels are kept for comparison; the universe is rebuilt twice around
+    # the splits pull (new codes such as JPM need their split file); the dollar-volume ranks are
+    # printed for a check by eye; then the baseline ladders, the recommended finalist
+    # (substantive, dev only: validate stays unseen), the v2 credibility row without direction,
+    # and the darling crowd rule (round two) both ways. No model spend.
+    "fix-rebuild": [["cp", "data/features/universe.parquet", "data/features/universe_before_fix.parquet"],
+                    ["cp", "data/features/labels.parquet", "data/features/labels_before_fix.parquet"],
+                    _py("universe.py"),
+                    # a missing split file only skips the dividend correction for that code, so a
+                    # failed pull (no EODHD key any more) must not stop the rebuild
+                    ["sh", "-c", shlex.join(_py("market_data.py", "splits", "--universe",
+                                                "data/features/universe.parquet"))
+                     + " || echo '[fix-rebuild] splits pull failed; codes without a split file keep the dividend factor'"],
+                    _py("universe.py"),
+                    _py("darling_census.py", "--chip-report", "2015-07-01", "2020-07-01", "2021-12-01",
+                        "--tickers", "JPM", "AMZN", "NVDA", "AAPL", "ASML", "GE", "BP", "GME", "RKLB"),
+                    _py("backtest.py", "ladder", "--split", "dev"),
+                    _py("backtest.py", "ladder", "--split", "validate"),
+                    _py("backtest.py", "run", "--baseline", "substantive", "--split", "dev",
+                        "--rules", '{"drop_deleted": false}'),
+                    [*_V2, "THESIS_VARIANT=identified", 'THESIS_PARAMS={"quality": "direct", "direction": "none"}',
+                     *_py("backtest.py", "run", "--scorer", "scripts/thesis_scorer.py:factory", "--split", "dev")],
+                    *[[*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "recent",
+                                  "--grades-dir", "data/features/darlings_b", "--variant", v)]
+                      for v in ("identified", "blinded")]],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),

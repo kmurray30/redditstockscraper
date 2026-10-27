@@ -57,8 +57,9 @@ class Series:
     low: np.ndarray         # adjusted
     close: np.ndarray       # adjusted (total return)
     raw_close: np.ndarray   # as quoted at the time
-    volume: np.ndarray
+    volume: np.ndarray      # EODHD's: adjusted for every split up to the download date
     bad_days: np.ndarray = None  # days of unexplained >6x one-day moves (see clean_series)
+    split_factor: np.ndarray = None  # per bar, product of 1/ratio over later splits; None = no split data
 
     def __post_init__(self):
         if self.bad_days is None:
@@ -165,11 +166,7 @@ def inconsistent_adjustment_days(s: Series, splits: list[tuple[int, float]]) -> 
         return np.empty(0, dtype=np.int64)
     f = s.close_adj_over_raw
     # cumulative split factor in force at each bar: product of 1/ratio over splits after it
-    sf = np.ones(len(s.days))
-    for day, ratio in splits:
-        if ratio > 0:
-            sf[s.days < day] *= 1.0 / ratio
-    left = f / sf
+    left = f / split_factors(s.days, splits)
     bad = ~((left >= DIV_FACTOR_MIN) & (left <= DIV_FACTOR_MAX))
     return s.days[bad].astype(np.int64)
 
@@ -186,6 +183,15 @@ def mark_bad_days(s: Series, extra: np.ndarray | None = None) -> Series:
     return Series(s.code, s.days, s.open, s.high, s.low, s.close, s.raw_close, s.volume, bad)
 
 
+def split_factors(days: np.ndarray, splits: list[tuple[int, float]]) -> np.ndarray:
+    """Per bar, the product of 1/ratio over the splits after it (1 after the last split)."""
+    sf = np.ones(len(days))
+    for day, ratio in splits:
+        if ratio > 0:
+            sf[days < day] *= 1.0 / ratio
+    return sf
+
+
 def clean_series(s: Series, splits: list[tuple[int, float]] | None = None) -> Series:
     """Drop bad ticks, repair unadjusted splits, and mark whatever can't be trusted. ``splits``
     None means "no split data for this code": the adjustment-consistency check is skipped;
@@ -193,7 +199,10 @@ def clean_series(s: Series, splits: list[tuple[int, float]] | None = None) -> Se
     s, _ = drop_spikes(s)
     if splits:
         s, _ = fix_unadjusted_splits(s, splits)
-    return mark_bad_days(s, inconsistent_adjustment_days(s, splits))
+    s = mark_bad_days(s, inconsistent_adjustment_days(s, splits))
+    if splits is not None:
+        object.__setattr__(s, "split_factor", split_factors(s.days, splits))
+    return s
 
 
 class PriceStore:
@@ -296,12 +305,32 @@ def outcome(s: Series, entry_i: int, years: float, data_end: int, *,
 
 # ---------------------------------------------------------------- features at a date
 
+def dollar_volume(s: Series) -> np.ndarray:
+    """Dollar volume per bar as traded at the time, with no knowledge of later splits.
+
+    EODHD's volume is adjusted for every split up to the download date (checked 2026-10-27 by
+    ``volume_check.py``: share volume shows no jump across forward or reverse splits), so the
+    raw close times it is wrong by the later splits' ratio: AMZN in July 2020 read $207B a day
+    instead of about $10B, and a company that later reverse-split 1:20 read 20 times too small.
+    Winners split and dying companies reverse-split, so that was look-ahead in the eligibility
+    floor and the liquidity quintiles. The adjusted close times the volume is consistent across
+    splits; it still carries the dividend adjustment, which is divided out where the split data
+    explains the adjustment (dividend factor in [0.2, 1.05]); elsewhere it is left in."""
+    base = s.close * s.volume
+    if s.split_factor is None:
+        return base
+    with np.errstate(divide="ignore", invalid="ignore"):
+        div = s.close_adj_over_raw / s.split_factor
+    ok = np.isfinite(div) & (div >= 0.2) & (div <= DIV_FACTOR_MAX)
+    return np.where(ok, base / np.where(ok, div, 1.0), base)
+
+
 def trailing_dollar_volume(s: Series, i: int, n: int = 60) -> float | None:
-    """Median raw dollar volume over the ``n`` bars up to and including bar ``i``."""
+    """Median dollar volume (``dollar_volume``) over the ``n`` bars up to and including bar ``i``."""
     lo = max(i - n + 1, 0)
     if i - lo + 1 < n // 2:
         return None
-    return float(np.median(s.raw_close[lo:i + 1] * s.volume[lo:i + 1]))
+    return float(np.median(dollar_volume(s)[lo:i + 1]))
 
 
 def momentum(s: Series, i: int, lookback: int = 252, skip: int = 21) -> float | None:

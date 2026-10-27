@@ -198,3 +198,25 @@ def test_corrupt_series_makes_every_overlapping_outcome_bad_data():
     s = px.clean_series(series_with_ratio([0.0017] * 400, [1.05] * 400), [])
     o = px.outcome(s, 0, 1.0, data_end=int(s.days[-1]) + 400, slippage_bps=0)
     assert o.status == "bad_data"
+
+
+def test_dollar_volume_has_no_knowledge_of_later_splits():
+    # 10 bars before a 20:1 split and 10 after; the stock trades 1,000 shares at $2,000 before
+    # (= 20,000 at $100 after): $2M a day throughout. EODHD's volume is split-adjusted
+    # (20,000 before), its adjusted close too ($100), with a 0.9 dividend factor before the split.
+    days = np.arange(20, dtype=np.int64)
+    raw = np.r_[np.full(10, 2000.0), np.full(10, 100.0)]
+    adj = np.r_[np.full(10, 100.0 * 0.9), np.full(10, 100.0)]
+    vol = np.full(20, 20000.0)
+    s = px.Series("X", days, adj, adj, adj, adj, raw, vol)
+    assert px.trailing_dollar_volume(s, 9, 10) == pytest.approx(2e6 * 0.9)    # no split data: dividend left in
+    s = px.clean_series(s, [(10, 20.0)])
+    assert px.trailing_dollar_volume(s, 9, 10) == pytest.approx(2e6)            # the old formula read $40M
+    assert px.trailing_dollar_volume(s, 19, 10) == pytest.approx(2e6)
+    # a later 1:20 reverse split: the old formula read 20 times too small
+    raw = np.r_[np.full(10, 1.0), np.full(10, 20.0)]
+    adj = np.full(20, 20.0)
+    vol = np.full(20, 5000.0)                                                   # 100,000 shares a day before, adjusted
+    s = px.clean_series(px.Series("Y", days, adj, adj, adj, adj, raw, vol), [(10, 0.05)])
+    assert px.trailing_dollar_volume(s, 9, 10) == pytest.approx(1e5)
+    assert float(np.median(raw[:10] * vol[:10])) == pytest.approx(5e3)
