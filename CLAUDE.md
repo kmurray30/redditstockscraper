@@ -652,6 +652,48 @@ many threads despite pushback. A company-level rule (many authors, most threads 
 credibility floor) fits them better than a thread-level one; proposed, not run, as it would be
 one more look at the only recent data.
 
+**Darlings at any point in time (2026-10-27, preset `darlings-anytime`, `darlings.py --rule
+crowd`; user: "whether these were ever darlings at ANY POINT IN TIME ... pushback shouldn't
+matter. Also yeah filter out the blue chips").** Company-level rule: at any graded cutoff, the
+company's threads over three months hold enough bullish threads (poster bullish, thread not net
+bearish) by different authors, with enough comments and a mean credibility floor, and more bulls
+than bears; the first month that holds is the event, later pushback does not undo it. Candidates
+at census level B (>= 3 authors, >= 100 comments), blue chips dropped before grading: 1,762
+threads graded both ways into `data/features/darlings_b/` ($0.38, lifetime $6.269 of $7;
+check-blind 0). Loosest level (2 bulls, 2 authors, 50 comments, credibility 3.5): 1 / 26 / 64 /
+10 / 6 / 16 darlings in 2019-2024, 123 in all (blinded 127); every stricter level fails the
+five-a-year floor in more years. Outcomes against liquidity x momentum matched peers: 1y they
+double more often (19% vs 11%), 3y beat the S&P 23% vs 29% (gap CI -14 to +2 points) with
+permanent loss 23% vs 12%, 5y 25% vs 27% with loss 26% vs 14%. 2021 holds half of them: the crowd
+darlings of 2020-21 are the bubble names (FUBO, TLRY, BB, CRSR, SPCE, PTON), up first, ruined
+later. ASML never qualifies (Dec 2021: two bullish threads against three bearish); RKLB's threads
+are mostly questions ("Thoughts on RKLB?", stance near 0), one bullish thread per window. Noise:
+several darlings are mis-resolved tickers (THC from cannabis posts, SP, AE, DTC, EVO, BYD = Boyd
+Gaming for the Chinese carmaker). **The blue-chip filter did not work** (JPM, GE, BP passed)
+because of the first data bug below; the darling numbers stand as a first look only.
+
+**Two data-layer bugs found 2026-10-27 (not fixed yet; every result above carries them):**
+1. **Split look-ahead in `adv60`** (`prices.trailing_dollar_volume` = raw close x EODHD volume,
+   and the volume is split-adjusted to the download date). Measured by `scripts/volume_check.py`
+   (`JOB=script:volume_check`, read only): AMZN in July 2020 stored $207B a day, $10.3B after
+   dividing out the later 20:1 split; NVDA $151B -> $3.8B; BKNG $21.9B -> $0.9B (25:1 split).
+   6.2% of universe rows have a later split (dollar volume overstated: future winners look
+   bigger, so size_q and the size-matched lifts are tilted), 14.6% a later reverse split
+   (understated: future losers look smaller). Correcting by the split factor flips 1,092 rows
+   out of eligibility and 30,285 in (11,131 in dev); the rows that come in have a 5y permanent
+   loss rate of 48% in dev against 6.3% for the eligible universe, so the universe's loss base
+   rate is understated (about 6.3% -> 7.9% in dev) and every loss-lift is affected. Caveat: the
+   reverse-split correction gives absurd values for a few pennies (BURG $117B), so whether EODHD
+   adjusts volume for reverse splits must be checked on the bars before fixing; the fix is to
+   compute dollar volume from split-consistent price and volume, then rebuild the universe and
+   re-run everything downstream.
+2. **Wrong security for issuers with several listed products**: JPM resolves to code `AMJ`
+   (the JPMorgan Alerian MLP ETN, same CIK), so every JPM row in the universe, labels and
+   backtests is the ETN. `SecurityMaster.price_code`'s name check passes because EODHD names the
+   ETN after its issuer. Other banks with ETNs or listed notes (UBS, GS, MS, BAC, C, BCS) and
+   companies with listed notes or preferreds (grade names like "T-Mobile US 5.50%") need the
+   same check. Fix: prefer the code equal to the ticker when it has a common-stock series.
+
 **Scoring** (`thesis_scorer.py`, weights tuned on the gold set 2026-10-22, see below): `Q =
 100*(.25 argument + .15 evidence + .05 tone + .05 falsifiability + .20 balance + .30 discussion)
 - 10*hype`, with `discussion = (independent_support + independent_opposition +
