@@ -84,3 +84,36 @@ def test_run_end_to_end(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "level used" in out and "-- ASML: 1 graded threads" in out and "DARLING" in out
     assert "-- RKLB: 0 graded threads" in out and "2015-01 ASML" in out and (tmp_path / "d.json").exists()
+
+
+def test_crowd_rule_any_point_in_time_and_pushback_later_does_not_undo_it():
+    lv = dl.Crowd("t", bulls=2, authors=2, comments=30, credibility=4.0)
+    c = dict(credibility=5.0)
+    gs = [g("a", "1", "2021-01-01", **c), g("b", "1", "2021-02-01", **c),            # two bulls, two authors
+          g("c", "1", "2021-05-01", stance=0.8, direction_5=1, **c),                   # later pushback
+          g("d", "1", "2021-05-01", stance=-0.8, direction_5=1, **c),
+          g("e", "2", "2021-01-01", **c), g("f", "2", "2021-01-01", author="ae", **c),  # one author twice
+          g("h", "3", "2021-01-01", **c), g("j", "3", "2021-01-01", stance=-0.5, direction_5=2, **c),
+          g("i", "3", "2021-02-01", **c), g("k", "3", "2021-02-01", stance=-0.5, direction_5=1, **c)]  # bears >= bulls
+    ev = dl.crowd_events(gs, lv, (2019, 2024))
+    assert [(e["cik"], e["month"]) for e in ev] == [("1", "2021-02-01")]
+    assert ev[0]["bulls"] == 2 and ev[0]["authors"] == 2 and ev[0]["threads"] == ["a", "b"]
+    assert dl.crowd_events(gs, lv, (2019, 2024), exclude={("2021-02-01", "1")}) == []   # a blue chip then
+    w = dl.crowd_window(gs[6:], dl.month_index("2021-02-01"))
+    assert w["bulls"] == 2 and w["bears"] == 2 and "bears 2 >= bulls 2" in dl.crowd_failures(w, lv)
+    # a bullish post whose comments pushed it to neutral still counts as bullish; bearish direction does not
+    assert dl.bull_thread(g("x", "1", "2021-01-01", direction_5=3)) and not dl.bull_thread(g("x", "1", "2021-01-01", direction_5=2))
+
+
+def test_crowd_run_end_to_end(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(dl, "MIN_PER_YEAR", 1)
+    test_outcomes_against_the_matched_cell(tmp_path)
+    grades = [g("p9", "9", "2015-01-01", ticker="RKLB", credibility=6.0, n_comments=30),
+              g("q9", "9", "2015-01-01", ticker="RKLB", author="other", credibility=6.0, n_comments=30)]
+    pq.write_table(pa.Table.from_pylist(grades), tmp_path / "thesis_threads_identified.thesis_v2.parquet")
+    assert dl.main(["run", "--rule", "crowd", "--split", "dev", "--features", str(tmp_path), "--prompt", "thesis_v2",
+                    "--inspect", "RKLB", "--titles", str(tmp_path / "none"), "--parquet", str(tmp_path / "none"),
+                    "--blue-chip-top", "0", "--out", str(tmp_path / "c.json")]) == 0
+    out = capsys.readouterr().out
+    assert "crowd darlings per year" in out and "DARLING" in out and "2015-01 RKLB" in out
+    assert "C1 loose" in out and (tmp_path / "c.json").exists()

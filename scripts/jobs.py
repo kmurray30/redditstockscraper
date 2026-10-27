@@ -253,6 +253,25 @@ PRESETS: dict[str, list[list[str]]] = {
                         [*_V2, *_py("thesis_llm.py", "--threads", "data/features/darlings/threads.parquet", "check-blind")],
                         *[[*_V2, *_py("darlings.py", "run", "--split", "recent", "--grades-dir", "data/features/darlings",
                                       "--variant", v)] for v in ("identified", "blinded")]],
+    # darlings at any point in time (user decision 2026-10-27: later pushback does not matter, blue
+    # chips out): candidates at the looser census level B (>= 3 authors, >= 100 comments over three
+    # months) so smaller and earlier crowds are graded too, blue chips dropped before any spend, their
+    # top threads graded with thesis_v2 into data/features/darlings_b (already graded threads are cache
+    # hits), then the company-level crowd rule. Identified first, so its result stands even if the
+    # spend cap stops the blinded half.
+    "darlings-anytime": [_py("darling_census.py", "--years", "2019", "2024", "--write",
+                             "data/features/darlings_b/candidates.parquet", "--write-level", "B",
+                             "--blue-chip-top", "200"),
+                         _py("thesis_funnel.py", "--only", "data/features/darlings_b/candidates.parquet",
+                             "--out", "data/features/darlings_b/threads.parquet"),
+                         *[c for v in ("identified", "blinded") for c in (
+                             *[[*_V2, *_py("thesis_llm.py", "--threads", "data/features/darlings_b/threads.parquet",
+                                           "--features", "data/features/darlings_b", step, "--variant", v)]
+                               for step in ("run", "collect")],
+                             *([[*_V2, *_py("thesis_llm.py", "--threads", "data/features/darlings_b/threads.parquet",
+                                            "check-blind")]] if v == "blinded" else []),
+                             [*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "recent",
+                                         "--grades-dir", "data/features/darlings_b", "--variant", v)])]],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),

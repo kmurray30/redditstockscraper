@@ -37,6 +37,24 @@ COOLDOWN = 12
 WINDOW = 3       # calendar months in the rolling window (about 90 days)
 # (name, distinct authors, comments on their substantive posts) in the window
 LEVELS = (("A", 2, 50), ("B", 3, 100), ("C", 4, 200), ("D", 5, 400), ("E", 8, 800))
+# Blue chips (user decision 2026-10-27: "filter out the blue chips"). We have no market cap, so a
+# blue chip is a company among the BLUE_CHIP_TOP most traded eligible stocks (60-day median dollar
+# volume) both that month and twelve months before: the persistently huge names (AAPL, MSFT, AMZN,
+# ASML, TSM). A stock that only became heavily traded during its own run (RKLB in late 2024, GME in
+# January 2021) is not one.
+BLUE_CHIP_TOP = 200
+
+
+def blue_chips(con, universe: Path, top: int = BLUE_CHIP_TOP) -> set[tuple[str, str]]:
+    """(month, cik) pairs that are blue chips by the rule above (empty if top <= 0)."""
+    if top <= 0 or not universe.exists():
+        return set()
+    return {(m, c) for m, c in con.execute(f"""
+        with r as (select month, cik, rank() over (partition by month order by adv60 desc) rk
+                   from read_parquet('{universe}') where eligible and adv60 is not null)
+        select a.month, a.cik from r a join r b
+          on b.cik = a.cik and cast(b.month as date) = cast(a.month as date) - interval 12 month
+        where a.rk <= {top} and b.rk <= {top}""").fetchall()}
 
 
 def monthly(con, parquet: Path, mentions: Path, features: Path, years: tuple[int, int]) -> list[tuple]:
@@ -100,10 +118,12 @@ def candidates(roll: dict, tickers: dict, authors_min: int, comments_min: int, y
     return sorted(out, key=lambda e: (e["month"], -e["comments"]))
 
 
-def write_candidates(roll: dict, level: str, years, universe: Path, out: Path, con, log=print) -> int:
+def write_candidates(roll: dict, level: str, years, universe: Path, out: Path, con, log=print,
+                     blue_chip_top: int = 0) -> int:
     """Every company-month at or above ``level`` (no cooldown, so a long darling run is graded at
     each cutoff), mapped to the cutoff that closes the window (the first of the next month) and
-    kept only where the company is eligible in the universe then: that drops ETFs and funds."""
+    kept only where the company is eligible in the universe then: that drops ETFs and funds.
+    With ``blue_chip_top`` the blue chips at that cutoff are dropped too (nothing is paid for them)."""
     import pyarrow as pa
     import pyarrow.parquet as pq
     _, au, cm = next(lv for lv in LEVELS if lv[0] == level)
@@ -120,10 +140,15 @@ def write_candidates(roll: dict, level: str, years, universe: Path, out: Path, c
             f"select c.month, c.cik from cand c join read_parquet('{universe}') u "
             f"on u.month = c.month and u.cik = c.cik where u.eligible").fetchall()}
     kept = [r for r in rows if (r["month"], r["cik"]) in eligible]
+    chips = blue_chips(con, universe, blue_chip_top)
+    n_chips = sum((r["month"], r["cik"]) in chips for r in kept)
+    kept = [r for r in kept if (r["month"], r["cik"]) not in chips]
     out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(kept, schema=pa.schema([("month", pa.string()), ("cik", pa.string())])), out)
     log(f"\nwrote {len(kept):,} grading candidates (level {level}, {len({r['cik'] for r in kept}):,} companies; "
-        f"{len(rows) - len(kept):,} company-months dropped as not eligible: funds, ETFs, delisted) to {out}")
+        f"{len(rows) - len(kept) - n_chips:,} company-months dropped as not eligible: funds, ETFs, delisted"
+        + (f"; {n_chips:,} as blue chips, top {blue_chip_top} by dollar volume now and a year before" if blue_chip_top > 0 else "")
+        + f") to {out}")
     return len(kept)
 
 
@@ -141,6 +166,9 @@ def main(argv=None) -> int:
     p.add_argument("--write-level", default="C")
     p.add_argument("--universe", default="data/features/universe.parquet",
                    help="with --write: keep only companies eligible at that cutoff (drops ETFs and funds)")
+    p.add_argument("--blue-chip-top", type=int, default=0,
+                   help=f"with --write: drop blue chips (top N by dollar volume now and a year before; "
+                        f"{BLUE_CHIP_TOP} is the darling study's choice, 0 = keep them)")
     a = p.parse_args(argv)
     import duckdb
     years = (a.years[0], a.years[1])
@@ -173,7 +201,8 @@ def main(argv=None) -> int:
         print(f"  {y} ({len(evs)}): " + ", ".join(f"{e['ticker']} {e['month'][5:]} {e['authors']}a/{e['posts']}p/{e['comments']}c"
                                              for e in evs[:a.show]))
     if a.write:
-        write_candidates(roll, a.write_level, years, Path(a.universe), Path(a.write), con)
+        write_candidates(roll, a.write_level, years, Path(a.universe), Path(a.write), con,
+                         blue_chip_top=a.blue_chip_top)
     for t in a.tickers:
         ciks = [c for c, tk in tickers.items() if (tk or "").upper() == t.upper()]
         print(f"\n-- {t}: peak 90-day window per year (authors / posts / comments)")

@@ -261,3 +261,13 @@ def test_darlings_recent_chain():
     assert all(c[:2] == ["env", "THESIS_PROMPT=thesis_v2"] and "data/features/darlings/threads.parquet" in c for c in llm)
     assert [c[c.index("--variant") + 1] for c in llm if "--variant" in c] == ["identified", "blinded"] * 2
     assert cmds[-1][-1] == "blinded" and "recent" in cmds[-1] and "holdout" not in " ".join(" ".join(c) for c in cmds)
+
+
+def test_darlings_anytime_grades_identified_first_and_checks_the_blinding():
+    cmds = jobs.resolve("darlings-anytime")
+    assert cmds[0][-6:] == ["--write", "data/features/darlings_b/candidates.parquet", "--write-level", "B",
+                            "--blue-chip-top", "200"]
+    crowd = [i for i, c in enumerate(cmds) if "darlings.py" in " ".join(c)]
+    blind = [i for i, c in enumerate(cmds) if "blinded" in c]
+    assert len(crowd) == 2 and crowd[0] < min(blind) and "check-blind" in cmds[crowd[1] - 1]
+    assert all("--rule" in cmds[i] and "crowd" in cmds[i] for i in crowd)

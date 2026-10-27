@@ -62,3 +62,16 @@ def test_write_candidates_keeps_eligible_company_months(tmp_path, capsys):
     assert got and all(r["cik"] == "1" for r in got)                       # the fund is dropped
     assert {"month": "2015-03-01", "cik": "1"} in got                       # Feb window -> March cutoff
     assert "dropped as not eligible" in capsys.readouterr().out
+
+
+def test_blue_chips_are_top_traded_now_and_a_year_before(tmp_path):
+    import duckdb
+    uni = []
+    for m in ("2020-01-01", "2021-01-01"):
+        for i in range(5):     # cik 0 most traded both years; cik 4 jumps to the top only in 2021
+            adv = {"2020-01-01": [100, 90, 80, 70, 1], "2021-01-01": [100, 90, 80, 70, 500]}[m][i]
+            uni.append({"month": m, "cik": str(i), "eligible": True, "adv60": float(adv)})
+    pq.write_table(pa.Table.from_pylist(uni), tmp_path / "u.parquet")
+    chips = dc.blue_chips(duckdb.connect(), tmp_path / "u.parquet", 2)
+    assert chips == {("2021-01-01", "0")}            # cik 1: top 2 in 2020 but third in 2021; cik 4: new
+    assert dc.blue_chips(duckdb.connect(), tmp_path / "u.parquet", 0) == set()
