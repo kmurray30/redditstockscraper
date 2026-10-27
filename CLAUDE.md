@@ -672,7 +672,26 @@ several darlings are mis-resolved tickers (THC from cannabis posts, SP, AE, DTC,
 Gaming for the Chinese carmaker). **The blue-chip filter did not work** (JPM, GE, BP passed)
 because of the first data bug below; the darling numbers stand as a first look only.
 
-**Two data-layer bugs found 2026-10-27 (not fixed yet; every result above carries them):**
+**Crowd rule, round two (2026-10-27, user decisions; rerun on the fixed universe in
+`fix-rebuild`):** (1) a thread whose value is in its comments counts as bullish (net direction
+4-5 under any opening stance; net 3 still needs a bullish poster); (2) only *quality* threads
+count on either side (credibility at or above the level's floor), and the bullish side must
+outweigh the bearish side by summed credibility, so weak bear posts no longer cancel anything;
+(3) a bullish thread written when the stock had already doubled over the last six months does
+not count, and no event falls in such a month ("I treat these as me having missed the run-up";
+148 of 772 graded company-months had doubled). Loosest level: 1 / 16 / 47 / 13 / 4 / 16 darlings
+in 2019-2024 (97; blinded 101; 24 removed by the run-up rule), so 2019 and 2023 miss the floor.
+Outcomes vs liquidity x momentum matched peers: 1y beat the S&P 39% vs 37%, doubled 19% vs 9%;
+3y beat 27% vs 30% (gap CI -12 to +7), permanent loss 22% vs 13%; 5y 26% vs 27%, loss 25% vs
+16%. Blinded the same. Still no edge and more ruin. **RKLB qualifies in April 2024** (three
+credible bullish threads by three authors, 80 comments, stock down 6% over six months): +367%
+against the S&P in the next year (7.8x at best); its December 2024 threads are excluded as a
+missed run-up (6.2x in six months). **ASML qualifies in November 2021** on two thin bullish
+threads (a sector-ETF question and an EUV-competitors question), entered near its top: -27% a
+year later, -44% after three years. It is a blue chip by dollar volume in the months either
+side.
+
+**Two data-layer bugs found 2026-10-27, FIXED the same day (see "After the data fix" below; every result above this point carries them):**
 1. **Split look-ahead in `adv60`** (`prices.trailing_dollar_volume` = raw close x EODHD volume,
    and the volume is split-adjusted to the download date). Measured by `scripts/volume_check.py`
    (`JOB=script:volume_check`, read only): AMZN in July 2020 stored $207B a day, $10.3B after
@@ -693,6 +712,46 @@ because of the first data bug below; the darling numbers stand as a first look o
    ETN after its issuer. Other banks with ETNs or listed notes (UBS, GS, MS, BAC, C, BCS) and
    companies with listed notes or preferreds (grade names like "T-Mobile US 5.50%") need the
    same check. Fix: prefer the code equal to the ticker when it has a common-stock series.
+
+**After the data fix (2026-10-27, user: "pls fix the bugs"; preset `fix-rebuild`, run twice).**
+(1) `prices.dollar_volume` = raw close x volume x the product of 1/ratio over the *later splits
+EODHD adjusted the volume for*, each split tested on the series itself (`volume_adjusted_for`:
+raw share volume jumps by the ratio at a split, adjusted volume does not; a split after the
+series' last bar belongs to a later holder of the code and is ignored). `volume_check` showed
+volume is adjusted for most splits, forward and reverse, but not all: a first fix that assumed
+all (adjusted close x volume) put dying pennies at the top (VNTR $80B a day) and was replaced.
+(2) `SecurityMaster.price_code(cik, on, ticker)` puts the member's own ticker first; the
+universe passes it (JPM now JPM, rank 16-21 by dollar volume). Remaining known outliers: a few
+codes still read absurd dollar volume (SPLP trillions, WFT, ORIG, PACD in 2015), so the top of
+the dollar-volume ranking is not fully clean. The pre-fix build is kept as
+`data/features/{universe,labels}_before_fix.parquet` (`volume_check.py --compare`). **Effect:**
+eligible company-months 610,069 -> 637,221; dev 5y P(5x) unchanged at 4.75%, **P(permanent
+loss) 6.25% -> 7.57%** (the companies that later reverse-split are back). Plain lifts barely
+move; loss lifts fall and size-matched numbers change a lot, because the liquidity quintiles
+were sorted partly by future splits. Dev, 5y, top decile, after the fix (before in brackets):
+
+| Scorer | lift | size-m | vs mentioned | loss (size-m) | CAGR vs SPY 16.1% | IR |
+|---|---|---|---|---|---|---|
+| mention count | 2.20 (2.25) | 3.39 (2.92) | 1.94 | 0.97 (1.51) [1.05 (1.84)] | 17.7% | 0.22 |
+| mentions incl. comments | 2.14 | 3.43 | 1.89 | 0.73 (1.17) | 18.2% | 0.29 |
+| random among mentioned | 1.36 (1.37) | 1.63 | 1.11 | 1.20 (1.46) [1.25 (1.59)] | 13.3% | -0.21 |
+| 12-1 momentum | 1.62 | 1.62 | 1.85 | 1.48 (1.49) | 13.1% | -0.17 |
+| `substantive`, all four rules | 4.26 (4.38) | 6.83 | 3.37 | 0.62 (1.00) [0.65 (1.22)] | 26.3% | 0.66 |
+| `substantive`, no deleted-author rule (the finalist) | 4.17 (4.29) | 6.68 | 3.43 | 0.59 (0.96) [0.64 (1.19)] | 26.3% | 0.69 |
+| thesis_v2 credibility, direction none | 3.66 (3.69) | 5.78 | 2.79 | 0.69 (1.10) [0.83 (1.50)] | 24.6% | 0.67 |
+
+The ranking of scorers is unchanged. Thesis grades were not redone: the universe now holds
+some company-months the funnel never planned, and those carry no grade.
+
+**Validate was looked at by `substantive` (my mistake, 2026-10-27).** The `ladder` command
+runs every baseline, and `substantive` (all four rules) has been one since 10-22, so both
+`fix-rebuild` runs printed its validate row; the user had not yet chosen which finalists see
+validate. Rows (2019-2020, 5y, after the fix): `substantive` lift 1.66 [1.31, 2.23], size-m
+2.47, vs mentioned 1.35, loss 1.39 (3.45), CAGR 17.9% vs SPY 14.8% (IR 0.28; the top five
+gains are 17.9% of the total, so it is concentrated); mention count 1.50 (2.16), loss 1.37
+(3.01), CAGR 13.6%; random 1.23, loss 1.15. The dev edge (4.2) mostly does not carry over:
+better than mention count on upside, no better on ruin. This counts as the finalist's one look
+(the deleted-author variant differs by one rule that carried nothing on dev).
 
 **Scoring** (`thesis_scorer.py`, weights tuned on the gold set 2026-10-22, see below): `Q =
 100*(.25 argument + .15 evidence + .05 tone + .05 falsifiability + .20 balance + .30 discussion)
