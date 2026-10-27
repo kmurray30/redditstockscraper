@@ -382,6 +382,8 @@ def main(argv=None) -> int:
     p.add_argument("--max-companies", type=int, default=MAX_COMPANIES)
     p.add_argument("--model", default=None, help="for the cost line (default LLM_MODEL or gpt-5-nano)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--only", help="parquet of (month, cik): plan only these company-months (the darling "
+                                  "candidates); the months come from the file, --splits is ignored")
     a = p.parse_args(argv)
     import os
     from llm import price_for
@@ -394,16 +396,25 @@ def main(argv=None) -> int:
     con = duckdb.connect()
     con.execute(f"create view universe as select * from read_parquet('{a.universe}')")
     all_months = [r[0] for r in con.execute("select distinct month from universe order by 1").fetchall()]
-    months = [m for s in a.splits for m in lg.split_months(s, all_months)]
+    only = None
+    if a.only:
+        only = defaultdict(set)
+        for m, c in con.execute(f"select month, cik from read_parquet('{a.only}')").fetchall():
+            only[m].add(c)
+        months = sorted(m for m in only if m in set(all_months))
+    else:
+        months = [m for s in a.splits for m in lg.split_months(s, all_months)]
     if a.years:
         months = [m for m in months if int(m[:4]) in a.years]
     uni = universe_by_month(con, months)
+    if only is not None:   # the universe cut to the candidates: select() ranks only them
+        uni = {m: {c: r for c, r in uni.get(m, {}).items() if c in only[m]} for m in months}
     print(f"planning {len(months)} cohorts ({months[0]} .. {months[-1]}), top {a.top_k} per company, "
           f"lookback {a.lookback}d", flush=True)
     names = load_names(Path(a.massive), Path(a.eodhd))
     threads, census = plan(corpus, months, uni, lookback=a.lookback, top_k=a.top_k,
                            max_companies=a.max_companies, names=names)
-    rej = rejected_sample(corpus, months, uni, a.lookback, a.max_companies, seed=a.seed)
+    rej = [] if only is not None else rejected_sample(corpus, months, uni, a.lookback, a.max_companies, seed=a.seed)
     print(format_census(threads, census, price_in, price_out, model, a.seed, rej))
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)

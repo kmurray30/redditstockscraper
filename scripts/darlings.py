@@ -27,6 +27,11 @@ so it costs nothing. Two steps, deliberately in this order:
    momentum names, so they are compared with stocks that had run just as hard. Rates are given
    per year too, so an effect that only exists in some years shows.
 
+For "recent" the threads are only those of the darling candidates (``darling_census.py --write``:
+company-months with heavy discussion by several authors), planned by ``thesis_funnel.py --only``
+and graded with thesis_v2 into ``--grades-dir`` (``data/features/darlings``), so the dev grades are
+untouched. Outcomes from 2023-2024 are partly censored: only horizons that have ended count.
+
 Point in time: a thread counts from its first monthly cutoff (``first_month``), which is when the
 backtest could first see it; the grades themselves follow the thesis pipeline's no-lock view (the
 model saw every comment the thread ever got), and ``late_shown`` darlings are counted separately.
@@ -52,7 +57,9 @@ from thesis_scorer import load_grades  # noqa: E402
 COOLDOWN = 12          # months before the same company can be a new darling
 MIN_PER_YEAR = 5       # the user's floor
 LOOKBACK = 3           # months of qualifying threads counted as "the case" at an event
-SPLIT_YEARS = {"dev": (2012, 2018), "validate": (2019, 2020)}
+# "recent" (user decision 2026-10-27): the darling study develops on 2019-2024, where the darlings
+# are; that uses up the sealed 2021-2022 holdout, which is recorded in the ledger when it runs.
+SPLIT_YEARS = {"dev": (2012, 2018), "validate": (2019, 2020), "recent": (2019, 2024)}
 HORIZONS = (1, 3, 5)
 FINAL = ("complete", "delisted")
 
@@ -266,6 +273,36 @@ def load_titles(path: Path) -> dict[str, str]:
     return {r["post_id"]: r.get("title") or "" for r in data}
 
 
+def corpus_titles(parquet: Path, post_ids: list[str]) -> dict[str, str]:
+    files = list((parquet / "posts").glob("*.parquet"))
+    if not files or not post_ids:
+        return {}
+    import duckdb
+    import pyarrow as pa
+    con = duckdb.connect()
+    con.register("want", pa.table({"id": pa.array(post_ids)}))
+    return dict(con.execute(f"select p.id, p.title from read_parquet('{parquet}/posts/*.parquet') p "
+                            "join want w on w.id = p.id").fetchall())
+
+
+def mark_holdout_used(note: str) -> None:
+    """The user gave up the sealed 2021-2022 holdout for the darling study (2026-10-27). Record it
+    in the ledger's holdout state, so any later one-look evaluation of 2021-2022 knows the period
+    has been seen and is refused without --accept-contaminated."""
+    import ledger as lg
+    from datetime import datetime, timezone
+    led = lg.Ledger()
+    state = led.holdout_state()
+    if any(c.get("config_id") == note for c in state["consulted"]):
+        return
+    led.root.mkdir(parents=True, exist_ok=True)
+    state["consulted"].append({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "config_id": note,
+                               "why": "user decision 2026-10-27: develop the darling study on 2019-2024"})
+    state["contaminated"] = len(state["consulted"]) > 1
+    led.holdout_path.write_text(json.dumps(state, indent=2))
+    print(f"[holdout] 2021-2022 recorded as seen ({note}); the sealed holdout no longer exists")
+
+
 def inspect(grades: list[dict], tickers: list[str], lv: Level, titles: dict, mentions: Path, log=print):
     """Every graded thread about each ticker and why it is or is not a darling thread; for a
     ticker with no grades (listed later than the graded years), its post counts by year."""
@@ -301,11 +338,15 @@ def main(argv=None) -> int:
     p.add_argument("--inspect", nargs="*", default=["ASML", "RKLB"])
     p.add_argument("--titles", default="data/ui/threads.json.zst")
     p.add_argument("--mentions", default="data/features/mentions.parquet")
-    p.add_argument("--out", default="data/experiments/darlings.json")
+    p.add_argument("--out", default=None, help="default data/experiments/darlings_<split>_<variant>.json")
+    p.add_argument("--grades-dir", default=None, help="where the grades file is (default --features)")
+    p.add_argument("--parquet", default="data/corpus/parquet", help="for thread titles not in the browser export")
     a = p.parse_args(argv)
     prompt = a.prompt or prompt_name()
     years = SPLIT_YEARS[a.split]
-    grades = load_grades(Path(a.features), a.variant, prompt)
+    grades = load_grades(Path(a.grades_dir or a.features), a.variant, prompt)
+    if years[0] <= 2022 and years[1] >= 2021:
+        mark_holdout_used(f"darlings:{a.split}:{a.variant}")
     print(f"{len(grades):,} graded threads ({a.variant}, prompt {prompt}); split {a.split} {years[0]}-{years[1]}")
 
     # 1. counts only
@@ -320,6 +361,9 @@ def main(argv=None) -> int:
     print(f"level used: {lv.name} {asdict(lv)} (the strictest with >= {MIN_PER_YEAR} every year"
           + ("" if min(table[lv.name]['strict'].values()) >= MIN_PER_YEAR else "; NONE reaches the floor, loosest used") + ")")
     titles = load_titles(Path(a.titles))
+    missing = sorted({g["post_id"] for g in grades} - set(titles))
+    if missing:
+        titles.update(corpus_titles(Path(a.parquet), missing))
     inspect(grades, a.inspect, lv, titles, Path(a.mentions))
 
     # 2. outcomes, once, for the chosen level
@@ -332,17 +376,18 @@ def main(argv=None) -> int:
            "lenient": report(f"{lv.name}, opposition ignored", lenient, rows, cells, months_)}
     late = sum(e["late"] for e in strict)
     print(f"\n{late} of {len(strict)} strict darlings rest on a thread holding content written after its first cutoff")
-    print(f"\nthe darlings (opposition rule on), with 3y and 5y outcomes (excess vs S&P, best multiple):")
+    print(f"\nthe darlings (opposition rule on), with 1y, 3y and 5y outcomes (excess vs S&P, best multiple; "
+          f"n/a = the horizon has not ended):")
     for e in strict:
-        o3, o5 = rows.get((e["month"], e["cik"], 3)) or {}, rows.get((e["month"], e["cik"], 5)) or {}
+        o1, o3, o5 = (rows.get((e["month"], e["cik"], y)) or {} for y in HORIZONS)
         def fmt(o):
             if not o or o.get("status") not in FINAL or o.get("excess") is None:
                 return "  n/a        "
             return f"{o['excess'] * 100:+6.0f}% x{float(o['max_mult'] or 0):4.1f}"
         first = titles.get(e["threads"][-1], "") if e["threads"] else ""
         print(f"  {e['month'][:7]} {e['ticker'] or '?':6s} {(e['name'] or '')[:24]:24s} threads {e['n_threads']} "
-              f"cmts {e['comments']:4d}  3y {fmt(o3)}  5y {fmt(o5)}  | {first[:60]}")
-    out = Path(a.out)
+              f"cmts {e['comments']:4d}  1y {fmt(o1)}  3y {fmt(o3)}  5y {fmt(o5)}  | {first[:60]}")
+    out = Path(a.out or f"data/experiments/darlings_{a.split}_{a.variant}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     res["events"] = {"strict": strict, "lenient": lenient}
     out.write_text(json.dumps(res, default=str, indent=1))

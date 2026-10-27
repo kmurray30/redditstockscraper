@@ -100,6 +100,33 @@ def candidates(roll: dict, tickers: dict, authors_min: int, comments_min: int, y
     return sorted(out, key=lambda e: (e["month"], -e["comments"]))
 
 
+def write_candidates(roll: dict, level: str, years, universe: Path, out: Path, con, log=print) -> int:
+    """Every company-month at or above ``level`` (no cooldown, so a long darling run is graded at
+    each cutoff), mapped to the cutoff that closes the window (the first of the next month) and
+    kept only where the company is eligible in the universe then: that drops ETFs and funds."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    _, au, cm = next(lv for lv in LEVELS if lv[0] == level)
+    rows = []
+    for cik, series in roll.items():
+        for mi, posts, authors, comments in series:
+            if years[0] <= mi // 12 <= years[1] and authors >= au and comments >= cm:
+                nxt = mi + 1
+                rows.append({"month": f"{nxt // 12}-{nxt % 12 + 1:02d}-01", "cik": cik})
+    eligible = set()
+    if universe.exists() and rows:
+        con.register("cand", pa.Table.from_pylist(rows))
+        eligible = {(m, c) for m, c in con.execute(
+            f"select c.month, c.cik from cand c join read_parquet('{universe}') u "
+            f"on u.month = c.month and u.cik = c.cik where u.eligible").fetchall()}
+    kept = [r for r in rows if (r["month"], r["cik"]) in eligible]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(kept, schema=pa.schema([("month", pa.string()), ("cik", pa.string())])), out)
+    log(f"\nwrote {len(kept):,} grading candidates (level {level}, {len({r['cik'] for r in kept}):,} companies; "
+        f"{len(rows) - len(kept):,} company-months dropped as not eligible: funds, ETFs, delisted) to {out}")
+    return len(kept)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--parquet", default="data/corpus/parquet")
@@ -109,6 +136,11 @@ def main(argv=None) -> int:
     p.add_argument("--show", type=int, default=8, help="candidates listed per year at the listed level")
     p.add_argument("--list-level", default="C")
     p.add_argument("--tickers", nargs="*", default=["ASML", "RKLB"])
+    p.add_argument("--write", help="write every company-month crossing --write-level (no cooldown) as grading "
+                                   "candidates: parquet of (month = the cutoff after the window, cik)")
+    p.add_argument("--write-level", default="C")
+    p.add_argument("--universe", default="data/features/universe.parquet",
+                   help="with --write: keep only companies eligible at that cutoff (drops ETFs and funds)")
     a = p.parse_args(argv)
     import duckdb
     years = (a.years[0], a.years[1])
@@ -140,6 +172,8 @@ def main(argv=None) -> int:
         evs = sorted(by_year.get(y, []), key=lambda e: -e["comments"])
         print(f"  {y} ({len(evs)}): " + ", ".join(f"{e['ticker']} {e['month'][5:]} {e['authors']}a/{e['posts']}p/{e['comments']}c"
                                              for e in evs[:a.show]))
+    if a.write:
+        write_candidates(roll, a.write_level, years, Path(a.universe), Path(a.write), con)
     for t in a.tickers:
         ciks = [c for c, tk in tickers.items() if (tk or "").upper() == t.upper()]
         print(f"\n-- {t}: peak 90-day window per year (authors / posts / comments)")

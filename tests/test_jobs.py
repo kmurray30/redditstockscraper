@@ -251,3 +251,13 @@ def test_darlings_preset_reads_the_v2_grades_and_takes_args():
     assert cmds == [["env", "THESIS_PROMPT=thesis_v2", jobs.PY, "scripts/darlings.py", "run", "--inspect", "ASML"]]
     with pytest.raises(jobs.JobError, match="holdout"):
         jobs.resolve("darlings", "--split holdout")
+
+
+def test_darlings_recent_chain():
+    cmds = jobs.resolve("darlings-recent")
+    assert cmds[0][1:3] == ["scripts/darling_census.py", "--years"] and "--write" in cmds[0]
+    assert "--only" in cmds[1] and cmds[1][-1] == "data/features/darlings/threads.parquet"
+    llm = [c for c in cmds if "scripts/thesis_llm.py" in c]
+    assert all(c[:2] == ["env", "THESIS_PROMPT=thesis_v2"] and "data/features/darlings/threads.parquet" in c for c in llm)
+    assert [c[c.index("--variant") + 1] for c in llm if "--variant" in c] == ["identified", "blinded"] * 2
+    assert cmds[-1][-1] == "blinded" and "recent" in cmds[-1] and "holdout" not in " ".join(" ".join(c) for c in cmds)

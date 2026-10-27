@@ -43,3 +43,22 @@ def test_census_counts_authors_over_the_window_and_cools_down(tmp_path, capsys):
     lines = {l.split()[0]: l for l in out.splitlines() if l.strip()[:1] in "ABCDE" and ">=" in l}
     assert lines["A"].split()[-1] == "1" and lines["B"].split()[-1] == "1" and lines["C"].split()[-1] == "0"
     assert "RKLB 03 3a/3p/110c" in out and "BIG" not in out and "-- ASML" in out
+
+
+def test_write_candidates_keeps_eligible_company_months(tmp_path, capsys):
+    day = 86400
+    rk = [("1", "RKLB")]
+    posts = [{"id": c, "t": T + i * 20 * day, "a": "a" + c, "c": 80, "co": rk} for i, c in enumerate("abcde")]
+    posts.append({"id": "f", "t": T, "a": "z", "c": 900, "co": [("9", "SPY")]})
+    build(tmp_path, posts)
+    uni = [{"month": f"2015-{m:02d}-01", "cik": "1", "eligible": True} for m in range(1, 13)]
+    uni += [{"month": "2015-02-01", "cik": "9", "eligible": False}]
+    pq.write_table(pa.Table.from_pylist(uni), tmp_path / "u.parquet")
+    out = tmp_path / "cand.parquet"
+    assert dc.main(["--parquet", str(tmp_path), "--mentions", str(tmp_path / "m.parquet"),
+                    "--features", str(tmp_path / "f.parquet"), "--years", "2015", "2015", "--tickers",
+                    "--write", str(out), "--write-level", "A", "--universe", str(tmp_path / "u.parquet")]) == 0
+    got = pq.read_table(out).to_pylist()
+    assert got and all(r["cik"] == "1" for r in got)                       # the fund is dropped
+    assert {"month": "2015-03-01", "cik": "1"} in got                       # Feb window -> March cutoff
+    assert "dropped as not eligible" in capsys.readouterr().out

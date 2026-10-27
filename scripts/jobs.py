@@ -238,6 +238,21 @@ PRESETS: dict[str, list[list[str]]] = {
     "darlings": [[*_V2, *_py("darlings.py", "run")]],
     # where the darlings are: counts per year across 2012-2024, no model, no returns (free)
     "darling-census": [_py("darling_census.py")],
+    # the darling study on 2019-2024 (user decisions 2026-10-27: TypeSafe topped up; the sealed
+    # 2021-2022 holdout is given up for it): the candidates (several authors, heavy discussion,
+    # eligible stocks only), their top threads at each candidate cutoff, graded with thesis_v2
+    # both ways into data/features/darlings (the dev grades are untouched), the blinding checked,
+    # then the darling rule and its outcomes, identified and blinded. About $1 on Jev.
+    "darlings-recent": [_py("darling_census.py", "--years", "2019", "2024", "--write",
+                            "data/features/darlings/candidates.parquet", "--write-level", "C"),
+                        _py("thesis_funnel.py", "--only", "data/features/darlings/candidates.parquet",
+                            "--out", "data/features/darlings/threads.parquet"),
+                        *[[*_V2, *_py("thesis_llm.py", "--threads", "data/features/darlings/threads.parquet",
+                                      "--features", "data/features/darlings", step, "--variant", v)]
+                          for step in ("run", "collect") for v in ("identified", "blinded")],
+                        [*_V2, *_py("thesis_llm.py", "--threads", "data/features/darlings/threads.parquet", "check-blind")],
+                        *[[*_V2, *_py("darlings.py", "run", "--split", "recent", "--grades-dir", "data/features/darlings",
+                                      "--variant", v)] for v in ("identified", "blinded")]],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),
