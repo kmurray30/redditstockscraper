@@ -173,7 +173,7 @@ def test_stock_filter_narrows_the_grid_lists_and_dropdown(tmp_path):
         assert 'id=stockdata>[["MSFT", "Microsoft", 3], ["AMZN", "Amazon.com", 2]]' in home and "id=stocklist" in home
         code, lst = get(base + "/list?stance=bull&qbin=6&measure=direct&ticker=MSFT")
         assert code == 200 and "2 threads about <b>MSFT</b>" in lst and "/post/p3_1?measure=direct&ticker=MSFT" in lst
-        assert "/post/p1_1" not in lst and "/?measure=direct&ticker=MSFT" in lst
+        assert "/post/p1_1" not in lst and "/grid?measure=direct&ticker=MSFT" in lst
         code, post = get(base + "/post/p3_1?measure=direct&ticker=MSFT")
         assert code == 200 and "/list?stance=bull&qbin=6&measure=direct&ticker=MSFT" in post
         code, allg = get(base + "/?measure=direct&ticker=BOGUS")             # unknown ticker: no filter
@@ -181,3 +181,86 @@ def test_stock_filter_narrows_the_grid_lists_and_dropdown(tmp_path):
         assert json.loads(get(base + "/api/stocks")[1])[0] == ["MSFT", "Microsoft", 3]
     finally:
         httpd.shutdown()
+
+
+def test_darling_export_builds_events_posts_and_price_history(tmp_path):
+    import datetime as dt
+    import llm
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import darling_export as de
+    g = grade(post_id="p1", cik="9", ticker="RKLB", name="Vector Acquisition Corp", created_utc=1711929600,  # 2024-04-01
+              first_month="2024-04-01", direction_5=4, credibility_10=6, credibility=5.8, prompt="thesis_v2",
+              prompt_version="thesis_v2.y.b2.jevdef456", variant="identified")
+    cache = llm.Cache(llm.cache_dir(tmp_path / "llm", g["model"], g["prompt_version"], "identified"))
+    cache.root.mkdir(parents=True)
+    cache.path("p1_9").write_text(json.dumps({"user": MSG.replace("Amazon Stock Price: Killing Me Softly", "Rocket Lab contract"),
+                                              "result": {}}))
+    (tmp_path / "eod").mkdir()
+    days = [dt.date(2022, 1, 3) + dt.timedelta(d) for d in range(0, 1000)]
+    close = [4.0 + i * 0.01 for i in range(len(days))]
+    pq.write_table(pa.table({"date": [d.isoformat() for d in days], "open": close, "high": close, "low": close,
+                             "close": close, "adjusted_close": close, "volume": [1e6] * len(days)}),
+                   tmp_path / "eod" / "RKLB.parquet")
+    pq.write_table(pa.Table.from_pylist([{"month": "2024-04-01", "cik": "9", "code": "RKLB"}]), tmp_path / "u.parquet")
+    pq.write_table(pa.Table.from_pylist([{"code": "RKLB", "name": "Rocket Lab USA Inc", "type": "Common Stock"}]),
+                   tmp_path / "sym.parquet")
+    pq.write_table(pa.Table.from_pylist([{"month": "2024-04-01", "cik": "9", "years": 1, "status": "complete",
+                                          "max_mult": 7.8, "excess": 3.67, "perm_loss": False, "cagr": 3.0}]),
+                   tmp_path / "labels.parquet")
+    ev = {"cik": "9", "ticker": "RKLB", "name": "Vector Acquisition Corp", "month": "2024-04-01", "threads": ["p1", "zz"],
+          "bulls": 3, "bears": 0, "authors": 3, "comments": 80, "credibility": 4.6}
+    data = de.build([ev], [g], tmp_path / "llm", "identified", tmp_path / "labels.parquet", tmp_path / "u.parquet",
+                    tmp_path / "sym.parquet", tmp_path, log=lambda m: None)
+    e = data["events"][0]
+    assert e["name"] == "Rocket Lab USA Inc" and e["keys"] == ["p1_9"] and e["outcome"]["1"]["max_mult"] == 7.8
+    assert e["outcome"]["3"] is None
+    r = data["threads"][0]
+    assert r["title"] == "Rocket Lab contract" and r["darling_ticker"] == "RKLB" and r["close_at_post"] > 4.0
+    pr = data["stocks"]["RKLB"]["prices"]
+    assert pr[0][0] <= "2023-04-03" and pr[-1][0] == days[-1].isoformat() and len(pr) > 70
+    assert all(a[0] < b[0] for a, b in zip(pr, pr[1:]))
+
+
+def test_timeline_and_stock_chart_pages(tmp_path):
+    rec = v2("p1", 0.6, 4, 6)
+    rec.update({"ticker": "RKLB", "cik": "1", "key": "p1_1", "darling_ticker": "RKLB", "close_at_post": 5.5,
+                "created_utc": 1711929600})
+    data = {"events": [{"ticker": "RKLB", "cik": "1", "month": "2024-04-01", "name": "Rocket Lab USA Inc", "keys": ["p1_1"],
+                        "bulls": 3, "bears": 0, "authors": 3, "comments": 80, "credibility": 4.6,
+                        "outcome": {"1": {"status": "complete", "excess": 3.67, "max_mult": 7.8, "perm_loss": False},
+                                    "3": None, "5": None}}],
+            "threads": [rec],
+            "stocks": {"RKLB": {"code": "RKLB", "name": "Rocket Lab USA Inc",
+                                "prices": [["2023-04-03", 4.0], ["2024-04-01", 5.5], ["2025-04-01", 25.0]]}},
+            "rule": {"bulls": 2, "authors": 2, "comments": 50, "credibility": 3.5}, "runup": [2.0, 6],
+            "summary": {"3": {"n": 78, "p_beat": 0.27, "p_loss": 0.22, "matched": {"p_beat": 0.30, "p_loss": 0.13}}}}
+    d = tsv.Darlings.from_bytes(zstd.ZstdCompressor().compress(json.dumps(data).encode()))
+    store = tsv.Store([v2("p9", 0.0, 3, 5)])
+    httpd = tsv.serve(store, "pw", 0, tsv.DarlingsBox(d))
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        code, home = get(base + "/")
+        assert code == 200 and "Reddit darlings" in home and "/stock/RKLB" in home and "darling from 2024-04" in home
+        assert "+367% vs S&amp;P, best x7.8" in home and "3y: not yet" in home and "27% beat the S&amp;P" in home
+        assert "/darling/p1_1" in home and "Killing Me Softly" in home
+        code, grid = get(base + "/grid")
+        assert code == 200 and "direction &rarr;" in grid
+        code, st = get(base + "/stock/rklb")
+        assert code == 200 and "<svg" in st and "<path d='M" in st and "href='/darling/p1_1'" in st and "<circle" in st
+        assert "stroke-dasharray" in st and "$5" in st or "$10" in st
+        code, post = get(base + "/darling/p1_1")
+        assert code == 200 and "Killing Me Softly" in post and "/stock/RKLB" in post and "&larr; timeline" in post
+        assert get(base + "/stock/NOPE")[0] == 404 and get(base + "/darling/nope")[0] == 404
+    finally:
+        httpd.shutdown()
+    plain = tsv.serve(store, "pw", 0)            # no darling export yet: the grid is the landing page
+    t = threading.Thread(target=plain.serve_forever, daemon=True)
+    t.start()
+    try:
+        code, home = get(f"http://127.0.0.1:{plain.server_address[1]}/")
+        assert code == 200 and "direction &rarr;" in home and "Reddit darlings" not in home
+    finally:
+        plain.shutdown()

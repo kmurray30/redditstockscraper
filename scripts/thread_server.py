@@ -7,7 +7,12 @@ no public domain. At start it reads ``data/ui/threads.json.zst`` (written by
 Routes (all behind HTTP Basic auth, any user name, password ``GOLD_PASSWORD``; ``/healthz``
 is open and carries no data):
 
-    /?measure=             the grid: five rows for the model's stance levels, ten columns
+    /                      the Reddit darlings as a timeline (``data/ui/darlings.json.zst`` from
+                           ``darling_export.py --push``); the grid until that export exists
+    /stock/<TICKER>        a darling stock's price history with a marker at every darling
+                           post, each a link to the post; the events and outcomes below it
+    /darling/<post>_<cik>  a darling post as the model saw it
+    /grid?measure=         the grid: five rows for the model's stance levels, ten columns
                            for thread quality in bins of ten; ``measure`` picks the quality
                            formula (``q`` current, ``q_gated`` corroboration-gated, when the
                            export carries it); every count links to its list
@@ -34,6 +39,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 KEY = "data/ui/threads.json.zst"
+DARLINGS_KEY = "data/ui/darlings.json.zst"
 PAGE_SIZE = 150
 # the model's five stance levels (the rubric's levels sit at -1, -0.5, 0, 0.5, 1; the decoded
 # value is probability-weighted, so the bins are the midpoints between levels)
@@ -90,6 +96,15 @@ def day(ts) -> str:
         return ""
 
 
+def prepare(r: dict) -> dict:
+    """The derived fields every page reads off a record."""
+    r["_stance"] = stance_class(r.get("stance"))
+    r["_q"] = float(r.get("q") or 0)
+    d = r.get("direction_5")
+    r["_dir"] = DIRECTION_CLASS.get(int(d)) if d is not None else None
+    return r
+
+
 class Store:
     def __init__(self, records: list[dict]):
         self.records = records
@@ -97,10 +112,7 @@ class Store:
         self.measures = [m for m, _ in MEASURES
                          if any(r.get(MEASURE_FIELD[m]) is not None for r in records)] or ["q"]
         for r in records:
-            r["_stance"] = stance_class(r.get("stance"))
-            r["_q"] = float(r.get("q") or 0)
-            d = r.get("direction_5")
-            r["_dir"] = DIRECTION_CLASS.get(int(d)) if d is not None else None
+            prepare(r)
         prompts = Counter(r.get("prompt") for r in records if r.get("prompt"))
         variants = Counter(r.get("variant") for r in records if r.get("variant"))
         self.prompt = prompts.most_common(1)[0][0] if prompts else None
@@ -264,7 +276,7 @@ FILTER_JS = """
 (function(){
 var opts=JSON.parse(document.getElementById('stockdata').textContent),inp=document.getElementById('stock'),
 box=document.getElementById('stocklist'),measure=inp.dataset.measure;
-function go(t){location.href='/?measure='+encodeURIComponent(measure)+(t?'&ticker='+encodeURIComponent(t):'');}
+function go(t){location.href='/grid?measure='+encodeURIComponent(measure)+(t?'&ticker='+encodeURIComponent(t):'');}
 function esc(x){return String(x).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function render(){
   var q=inp.value.trim().toLowerCase(),list=opts;
@@ -294,7 +306,7 @@ def filter_html(store: Store, measure: str, ticker: str | None) -> str:
     if ticker:
         name = next((n for t, n, _ in store.tickers if t == ticker), "")
         current = (f"<span class=cur>Showing only <b>{esc(ticker)}</b> {esc(name)} &middot; "
-                   f"<a href='/?measure={measure}'>clear</a></span>")
+                   f"<a href='/grid?measure={measure}'>clear</a></span>")
     return (f"<div class=filter><label for=stock>Stock</label>"
             f"<div class=combo><input id=stock type=text autocomplete=off spellcheck=false "
             f"placeholder='Filter by ticker or name ({len(store.tickers):,} stocks)' value='{esc(ticker or '')}' "
@@ -321,7 +333,7 @@ def grid_html(store: Store, measure: str, ticker: str | None = None) -> bytes:
                          f"<a href='/list?stance={s}&qbin={b}&measure={measure}{tq(ticker)}'>{n:,}</a></div>")
     cells.append("</div></div>")
     measure_label = dict(MEASURES)[measure]
-    switch = " &middot; ".join(f"<b>{lbl}</b>" if m == measure else f"<a href='/?measure={m}{tq(ticker)}'>{lbl}</a>"
+    switch = " &middot; ".join(f"<b>{lbl}</b>" if m == measure else f"<a href='/grid?measure={m}{tq(ticker)}'>{lbl}</a>"
                                for m, lbl in MEASURES if m in store.measures)
     who = f"{store.variant} variant" + (f", prompt {esc(store.prompt)}" if store.prompt else "")
     if direct:
@@ -379,7 +391,7 @@ def list_html(store: Store, stance: str, b: int, measure: str, sort: str, pg: in
         head, what = (f"{label}, quality {qbin_label(b)}",
                       f"the model's stance {label.lower()} and {dict(MEASURES)[measure]} in {qbin_label(b)}")
     scope = f" about <b>{esc(ticker)}</b>" if ticker else ""
-    body = (f"<div class=crumbs><a href='/?measure={measure}{tq(ticker)}'>&larr; grid</a></div>"
+    body = (f"<div class=crumbs><a href='/grid?measure={measure}{tq(ticker)}'>&larr; grid</a></div>"
             f"<h1><span class='{stance}'>{label}</span>, {'credibility ' + str(b + 1) if direct else 'quality ' + qbin_label(b)}"
             f"{' &middot; ' + esc(ticker) if ticker else ''}</h1>"
             f"<p class=sub>{n:,} threads{scope} with {what}. Sort: {sorts}</p>"
@@ -394,7 +406,7 @@ def kv(label: str, value, bar: float | None = None) -> str:
     return f"<div>{inner}</div>"
 
 
-def post_html(store: Store, r: dict, measure: str, ticker: str | None = None) -> bytes:
+def post_html(store: Store, r: dict, measure: str, ticker: str | None = None, crumbs: str | None = None) -> bytes:
     g = r.get("grades") or {}
     o = r.get("outcome")
     comments = []
@@ -447,8 +459,9 @@ def post_html(store: Store, r: dict, measure: str, ticker: str | None = None) ->
     row_key, col = store.row_key(r, measure), store.col(r, measure)
     if row_key is None or col is None:   # a record outside the direct grid: back to its stance cell under q
         row_key, col, measure = r["_stance"], qbin(store.value(r, "q")), "q"
-    header = (f"<div class=crumbs><a href='/?measure={measure}{tq(ticker)}'>&larr; grid</a> &middot; "
-              f"<a href='/list?stance={row_key}&qbin={col}&measure={measure}{tq(ticker)}'>back to the list</a></div>"
+    crumbs = crumbs or (f"<a href='/grid?measure={measure}{tq(ticker)}'>&larr; grid</a> &middot; "
+                        f"<a href='/list?stance={row_key}&qbin={col}&measure={measure}{tq(ticker)}'>back to the list</a>")
+    header = (f"<div class=crumbs>{crumbs}</div>"
               f"<h1>{esc(r.get('title') or '(no title)')}</h1>"
               f"<p class=sub>{stance_tag(r)}{q_tags(store, r)}"
               f"<b>{esc(r.get('ticker'))}</b> {esc(r.get('name'))} &middot; r/{esc(', r/'.join(r.get('subreddits') or [r.get('subreddit') or '']))}"
@@ -464,9 +477,227 @@ def post_html(store: Store, r: dict, measure: str, ticker: str | None = None) ->
     return page(r.get("title") or "thread", header + text + cm + grades + outcome)
 
 
+# ------------------------------------------------------------------ darlings
+
+class Darlings:
+    """The darling export: events (company, month it became a darling, its bullish threads,
+    outcomes), the darling posts as records, and each darling stock's weekly price history."""
+
+    def __init__(self, data: dict):
+        self.data = data
+        self.events = sorted(data.get("events") or [], key=lambda e: (e["month"], e["ticker"]))
+        self.by_key = {r["key"]: prepare(r) for r in data.get("threads") or []}
+        self.stocks = data.get("stocks") or {}
+        self.by_ticker: dict[str, list[dict]] = {}
+        for e in self.events:
+            self.by_ticker.setdefault(e["ticker"], []).append(e)
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "Darlings":
+        import zstandard as zstd
+        return cls(json.loads(zstd.ZstdDecompressor().decompress(data, max_output_size=500_000_000)))
+
+    def posts(self, ticker: str) -> list[dict]:
+        """Every darling post about the stock, oldest first."""
+        keys = {k for e in self.by_ticker.get(ticker, []) for k in e.get("keys") or []}
+        return sorted((self.by_key[k] for k in keys if k in self.by_key), key=lambda r: r.get("created_utc") or 0)
+
+    def ticker(self, t: str) -> str | None:
+        t = (t or "").strip().upper()
+        return t if t in self.by_ticker else None
+
+
+DARLING_CSS = """
+.tl{border-left:3px solid var(--line);margin:0 0 0 8px;padding:0 0 0 20px}
+.yr{font-size:20px;font-weight:700;margin:22px 0 10px -32px;background:var(--bg);display:inline-block;padding:2px 8px;
+border-radius:8px;border:1px solid var(--line)}
+.ev{position:relative;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:0 0 12px}
+.ev:before{content:'';position:absolute;left:-29px;top:18px;width:13px;height:13px;border-radius:50%;background:var(--accent);
+border:2px solid var(--bg)}
+.ev .when{color:var(--muted);font-size:13px;font-weight:600}
+.ev .tk{font-size:19px;font-weight:800;letter-spacing:.02em;margin-right:8px}
+.ev .nm{color:var(--muted)}.ev ul{margin:8px 0 0;padding-left:18px}.ev li{margin:3px 0;font-size:14px}
+.pill{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:999px;background:var(--bg);
+border:1px solid var(--line);margin:4px 6px 0 0}
+.up{color:var(--bull)}.down{color:var(--bear)}
+.chart svg{width:100%;height:auto;display:block}.chart .note{color:var(--muted);font-size:13px;margin-top:6px}
+.chart a circle{cursor:pointer}.chart a:hover circle{r:9}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:4px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:50%;vertical-align:-1px;margin-right:5px}
+.legend i.l{border-radius:0;width:2px;height:14px;background:var(--bear)}
+"""
+
+
+def pct_s(x, plus=True) -> str:
+    try:
+        return f"{float(x):+.0%}" if plus else f"{float(x):.0%}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def outcome_pills(e: dict) -> str:
+    out = []
+    for y in ("1", "3", "5"):
+        o = (e.get("outcome") or {}).get(y)
+        if not o or o.get("status") not in ("complete", "delisted") or o.get("excess") is None:
+            out.append(f"<span class=pill>{y}y: not yet</span>")
+            continue
+        cls = "up" if float(o["excess"]) > 0 else "down"
+        best = f", best x{float(o['max_mult']):.1f}" if o.get("max_mult") is not None else ""
+        lost = ", permanent loss" if o.get("perm_loss") else ""
+        out.append(f"<span class='pill {cls}'>{y}y: {pct_s(o['excess'])} vs S&amp;P{best}{lost}</span>")
+    return "".join(out)
+
+
+def event_html(d: Darlings, e: dict, link_ticker: bool = True) -> str:
+    posts = [d.by_key[k] for k in e.get("keys") or [] if k in d.by_key]
+    items = "".join(f"<li><a href='/darling/{quote(r['key'])}'>{esc(r.get('title') or '(no title)')}</a> "
+                    f"<span class=meta>{day(r.get('created_utc'))} &middot; r/{esc(r.get('subreddit'))} &middot; "
+                    f"{int(r.get('n_comments') or 0)} comments &middot; cred {r.get('credibility_10') or '?'}/10</span></li>"
+                    for r in posts)
+    tk = (f"<a class=tk href='/stock/{quote(e['ticker'])}'>{esc(e['ticker'])}</a>" if link_ticker
+          else f"<b class=tk>{esc(e['ticker'])}</b>")
+    stats = (f"{e.get('bulls')} bullish threads by {e.get('authors')} authors, {int(e.get('comments') or 0):,} comments, "
+             f"mean credibility {float(e.get('credibility') or 0):.1f}/10"
+             + (f"; {e.get('bears')} credible bearish" if e.get("bears") else ""))
+    return (f"<div class=ev><div class=when>darling from {esc(e['month'][:7])}</div>"
+            f"<div>{tk}<span class=nm>{esc(e.get('name') or '')}</span></div>"
+            f"<div class=meta>{stats}</div><div>{outcome_pills(e)}</div><ul>{items}</ul></div>")
+
+
+def timeline_html(d: Darlings) -> bytes:
+    rule = d.data.get("rule") or {}
+    runup = d.data.get("runup") or [2.0, 6]
+    summ = (d.data.get("summary") or {}).get("3") or {}
+    intro = ("<p class=sub>A company becomes a Reddit darling the first month that, over the last three months, "
+             f"at least {rule.get('bulls', '?')} credible bullish threads by {rule.get('authors', '?')} or more different "
+             f"authors drew {rule.get('comments', '?')}+ comments and outweigh the credible bearish ones (credibility "
+             f"{rule.get('credibility', '?')}/10 or better counts). Blue chips are left out, and so is any month in which "
+             f"the stock had already gone up {float(runup[0]):g}x over {int(runup[1])} months (a missed run-up). "
+             "Click a ticker for its price chart with the darling posts marked.</p>")
+    if summ.get("n"):
+        intro += (f"<p class=sub>Track record so far (3 years later, {summ['n']} darlings with an ended horizon): "
+                  f"{pct_s(summ.get('p_beat'), False)} beat the S&amp;P against {pct_s((summ.get('matched') or {}).get('p_beat'), False)} "
+                  f"for comparable stocks; {pct_s(summ.get('p_loss'), False)} lost most of their value for good against "
+                  f"{pct_s((summ.get('matched') or {}).get('p_loss'), False)}.</p>")
+    body, year = [], None
+    for e in d.events:
+        y = e["month"][:4]
+        if y != year:
+            n = sum(1 for x in d.events if x["month"][:4] == y)
+            body.append(f"<div class=yr>{y} <span class=tot>{n} darling{'s' if n != 1 else ''}</span></div>")
+            year = y
+        body.append(event_html(d, e))
+    head = (f"<div class=crumbs><a href='/grid'>all graded threads (grid) &rarr;</a></div>"
+            f"<h1>Reddit darlings, {d.events[0]['month'][:4] if d.events else ''}-{year or ''}</h1>{intro}")
+    return page("Reddit darlings", head + f"<style>{DARLING_CSS}</style><div class=tl>{''.join(body)}</div>")
+
+
+def _ticks(lo: float, hi: float) -> list[float]:
+    """Round price levels between lo and hi for a log axis (1, 2, 5 x 10^k)."""
+    import math
+    out = []
+    for k in range(math.floor(math.log10(max(lo, 1e-6))) - 1, math.ceil(math.log10(max(hi, 1e-6))) + 1):
+        for m in (1, 2, 5):
+            v = m * 10 ** k
+            if lo <= v <= hi:
+                out.append(v)
+    if len(out) > 7:
+        out = [v for v in out if str(v).lstrip("0.").startswith("1")] or out
+    return out
+
+
+def chart_svg(prices: list, posts: list[dict], events: list[dict], w: int = 760, h: int = 340) -> str:
+    """The stock's adjusted close on a log scale, a dashed line at each darling month and a
+    clickable marker at each darling post (on the day it was posted)."""
+    import math
+    pts = [(datetime.strptime(dte, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp(), float(c))
+           for dte, c in prices if c and float(c) > 0]
+    if len(pts) < 2:
+        return "<p class=sub>No price history for this stock.</p>"
+    left, right, top, bottom = 56, 14, 14, 30
+    t0, t1 = pts[0][0], pts[-1][0]
+    marks = [(float(r["created_utc"]), float(r["close_at_post"]), r) for r in posts
+             if r.get("created_utc") and r.get("close_at_post")]
+    lo = min([c for _, c in pts] + [c for _, c, _ in marks])
+    hi = max([c for _, c in pts] + [c for _, c, _ in marks])
+    llo, lhi = math.log(lo * 0.9), math.log(hi * 1.1)
+    x = lambda t: left + (t - t0) / max(t1 - t0, 1) * (w - left - right)
+    y = lambda c: top + (lhi - math.log(c)) / max(lhi - llo, 1e-9) * (h - top - bottom)
+    out = [f"<svg viewBox='0 0 {w} {h}' role=img aria-label='price chart'>"]
+    for v in _ticks(lo * 0.9, hi * 1.1):
+        yy = y(v)
+        out.append(f"<line x1={left} x2={w - right} y1={yy:.1f} y2={yy:.1f} stroke='#e5e7eb'/>"
+                   f"<text x={left - 6} y={yy + 4:.1f} font-size=12 text-anchor=end fill='#6b7280'>"
+                   f"${v:g}</text>")
+    y0, y1 = datetime.fromtimestamp(t0, tz=timezone.utc).year + 1, datetime.fromtimestamp(t1, tz=timezone.utc).year
+    for yr in range(y0, y1 + 1):
+        t = datetime(yr, 1, 1, tzinfo=timezone.utc).timestamp()
+        xx = x(t)
+        out.append(f"<line x1={xx:.1f} x2={xx:.1f} y1={top} y2={h - bottom} stroke='#f0f1f3'/>"
+                   f"<text x={xx:.1f} y={h - 10} font-size=12 text-anchor=middle fill='#6b7280'>{yr}</text>")
+    for e in events:
+        t = datetime.strptime(e["month"][:10], "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+        if t0 <= t <= t1:
+            xx = x(t)
+            out.append(f"<line x1={xx:.1f} x2={xx:.1f} y1={top} y2={h - bottom} stroke='#b91c1c' stroke-dasharray='5 4'>"
+                       f"<title>darling from {esc(e['month'][:7])}</title></line>")
+    path = " ".join(f"{'M' if i == 0 else 'L'}{x(t):.1f},{y(c):.1f}" for i, (t, c) in enumerate(pts))
+    out.append(f"<path d='{path}' fill=none stroke='#17202a' stroke-width=1.6 />")
+    for t, c, r in marks:
+        if t0 <= t <= t1:
+            out.append(f"<a href='/darling/{quote(r['key'])}'><title>{day(r.get('created_utc'))}: "
+                       f"{esc(r.get('title') or '')} (close ${c:,.2f})</title>"
+                       f"<circle cx={x(t):.1f} cy={y(c):.1f} r=7 fill='#2563eb' stroke='#fff' stroke-width=2 /></a>")
+    out.append("</svg>")
+    return "".join(out)
+
+
+def stock_html(d: Darlings, ticker: str) -> bytes:
+    st = d.stocks.get(ticker) or {}
+    evs = d.by_ticker.get(ticker, [])
+    posts = d.posts(ticker)
+    name = st.get("name") or (evs[0].get("name") if evs else "")
+    chart = (f"<div class='card chart'>{chart_svg(st.get('prices') or [], posts, evs)}"
+             "<div class=legend><span><i style='background:#2563eb'></i>a darling post (click to open it)</span>"
+             "<span><i class=l></i>the month it became a darling</span></div>"
+             "<div class=note>Adjusted close (splits and dividends), weekly, log scale.</div></div>")
+    lst = "".join(f"<div class=item><a class=t href='/darling/{quote(r['key'])}'>{esc(r.get('title') or '(no title)')}</a>"
+                  f"<div class=meta>{day(r.get('created_utc'))} &middot; r/{esc(r.get('subreddit'))} &middot; "
+                  f"{int(r.get('n_comments') or 0)} comments &middot; cred {r.get('credibility_10') or '?'}/10 &middot; "
+                  f"dir {r.get('direction_5') or '?'}/5"
+                  + (f" &middot; close that day ${float(r['close_at_post']):,.2f}" if r.get("close_at_post") else "")
+                  + "</div></div>" for r in posts)
+    body = (f"<div class=crumbs><a href='/'>&larr; timeline</a></div><h1>{esc(ticker)} "
+            f"<span class=nm style='font-weight:400;color:var(--muted)'>{esc(name)}</span></h1>"
+            f"<p class=sub>{len(evs)} darling event{'s' if len(evs) != 1 else ''}, {len(posts)} darling posts</p>"
+            + chart + "<h2>The darling posts</h2><div class=card>" + (lst or "<p class=sub>None.</p>") + "</div>"
+            + "<h2>When it was a darling, and what happened next</h2>"
+            + "<div class=tl>" + "".join(event_html(d, e, link_ticker=False) for e in evs) + "</div>")
+    return page(f"{ticker}: darling chart", f"<style>{DARLING_CSS}</style>" + body)
+
+
+class DarlingsBox:
+    """Holds the darling export once it is loaded; ``loader`` is retried on use, at most once a minute."""
+
+    def __init__(self, darlings: Darlings | None = None, loader=None):
+        self.darlings, self.loader, self._tried = darlings, loader, 0.0
+
+    def get(self) -> Darlings | None:
+        import time
+        if self.darlings is None and self.loader and time.time() - self._tried > 60:
+            self._tried = time.time()
+            try:
+                self.darlings = self.loader()
+            except Exception as e:
+                print(f"[thread-ui] darlings not loaded ({type(e).__name__})", flush=True)
+        return self.darlings
+
+
 # ------------------------------------------------------------------ server
 
-def make_handler(store: Store, password: str):
+def make_handler(store: Store, password: str, box: DarlingsBox | None = None):
+    box = box or DarlingsBox()
     class Handler(BaseHTTPRequestHandler):
         server_version = "thread-ui"
 
@@ -502,8 +733,24 @@ def make_handler(store: Store, password: str):
                                   {"WWW-Authenticate": 'Basic realm="graded threads", charset="UTF-8"'})
             measure = store.measure(qs.get("measure", store.measures[-1]))
             ticker = store.ticker(qs.get("ticker"))
-            if u.path == "/":
+            darlings = box.get()
+            if u.path == "/" and darlings is not None and "measure" not in qs and "ticker" not in qs:
+                return self._send(200, timeline_html(darlings))
+            if u.path in ("/", "/grid"):
                 return self._send(200, grid_html(store, measure, ticker))
+            if u.path.startswith("/stock/") and darlings is not None:
+                t = darlings.ticker(u.path[len("/stock/"):])
+                if t is None:
+                    return self._send(404, b"not a darling stock", "text/plain")
+                return self._send(200, stock_html(darlings, t))
+            if u.path.startswith("/darling/") and darlings is not None:
+                r = darlings.by_key.get(u.path[len("/darling/"):])
+                if r is None:
+                    return self._send(404, b"no such darling post", "text/plain")
+                t = r.get("darling_ticker") or r.get("ticker")
+                crumbs = (f"<a href='/'>&larr; timeline</a> &middot; "
+                          f"<a href='/stock/{quote(t or '')}'>{esc(t)} price chart</a>")
+                return self._send(200, post_html(store, r, "direct", None, crumbs))
             if u.path == "/api/grid":
                 return self._send(200, json.dumps(store.grid(measure, ticker)).encode(), "application/json; charset=utf-8")
             if u.path == "/api/stocks":
@@ -531,8 +778,8 @@ def make_handler(store: Store, password: str):
     return Handler
 
 
-def serve(store: Store, password: str, port: int):
-    return ThreadingHTTPServer(("", port), make_handler(store, password))
+def serve(store: Store, password: str, port: int, box: DarlingsBox | None = None):
+    return ThreadingHTTPServer(("", port), make_handler(store, password, box))
 
 
 def main() -> int:
@@ -540,8 +787,10 @@ def main() -> int:
     if not password:
         raise SystemExit("GOLD_PASSWORD is not set")
     path = os.environ.get("THREADS_FILE")
+    dpath = os.environ.get("DARLINGS_FILE")
     if path:
         store = Store.from_file(Path(path))
+        box = DarlingsBox(loader=(lambda: Darlings.from_bytes(Path(dpath).read_bytes())) if dpath else None)
     else:
         import time
         import bucket_sync as bs
@@ -553,9 +802,12 @@ def main() -> int:
             except Exception as e:
                 print(f"[thread-ui] waiting for {KEY} in the bucket ({type(e).__name__}); retry in 30 s", flush=True)
                 time.sleep(30)
+        box = DarlingsBox(loader=lambda: Darlings.from_bytes(bucket.get_bytes(DARLINGS_KEY)))
     port = int(os.environ.get("PORT") or 8080)
-    print(f"[thread-ui] {len(store.records):,} threads, port {port}", flush=True)
-    serve(store, password, port).serve_forever()
+    d = box.get()
+    print(f"[thread-ui] {len(store.records):,} threads, "
+          + (f"{len(d.events)} darling events" if d else "no darling export yet") + f", port {port}", flush=True)
+    serve(store, password, port, box).serve_forever()
     return 0
 
 

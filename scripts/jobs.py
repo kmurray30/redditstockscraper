@@ -302,6 +302,9 @@ PRESETS: dict[str, list[list[str]]] = {
                     *[[*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "recent",
                                   "--grades-dir", "data/features/darlings_b", "--variant", v)]
                       for v in ("identified", "blinded")]],
+    # the darling timeline for thread-ui (user request 2026-10-29): the crowd rule's events with
+    # their posts, outcomes and price histories, pushed to the bucket; thread-ui reads it for /
+    "darling-export": [[*_V2, *_py("darling_export.py", "--push")]],
     # the pilot's like-for-like rows, no spend: every baseline on the same two years, and the
     # thesis scorer with threads holding late content excluded (the hindsight check)
     "pilot-checks": [_py("backtest.py", "ladder", "--split", "dev", "--years", "2014", "2017"),

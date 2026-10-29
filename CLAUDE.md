@@ -1057,6 +1057,17 @@ the 9,681 graded threads (text and comments) behind a password, which is more th
 page did; the user asked for it to review the grading. Tear down with `delete-service` when
 no longer needed. Refresh after a new grading run with `JOB=export-threads` and a redeploy of
 `thread-ui`.
+**Darling timeline (2026-10-29, user request: "just include the darling posts ... a timeline;
+clicking the ticker shows a price chart with a pointer at each darling post"):** `/` is now the
+timeline of the crowd-rule darlings (year by year, each event with its bullish threads, stats
+and 1/3/5-year outcome vs the S&P), `/stock/<TICKER>` an inline-SVG chart of the weekly
+adjusted close (log scale) with a clickable marker at each darling post and a dashed line at
+the darling month, `/darling/<post>_<cik>` the post as the model saw it; the old grid moved to
+`/grid`. Data: `darling_export.py --push` (preset `darling-export`) writes
+`data/ui/darlings.json.zst` from `data/experiments/darlings_crowd_recent_identified.json`, the
+`darlings_b` grades, the LLM cache, labels and prices; the server loads it from the bucket and
+retries once a minute until it exists, so no restart is needed after a new export of a new
+file (a changed file still needs `restart-service`).
 
 **Sanity checks the user asked for (2026-10-22, `calibrate --split dev --samples 8`, signed
 scorer):** the calibration table now also reports P(beat market), mean excess and the
