@@ -97,40 +97,37 @@ def instant(facts: dict, concepts, asof: str, ns: str = "us-gaap", unit: str = "
 
 
 def ttm(facts: dict, concepts, asof: str) -> tuple[float, str] | None:
-    """Trailing twelve months of a flow (cash flow, revenue) as known on ``asof``: per concept,
-    then the concept with the most recent period (NVIDIA moved from Revenues to
-    RevenueFromContractWithCustomer...; taking the first concept with any data read a stale
-    year, found 2026-10-30)."""
-    found = [(r[1], -i, r[0]) for i, c in enumerate(concepts) if (r := _ttm_one(facts, c, asof)) is not None]
-    if not found:
+    """Trailing twelve months of a flow (cash flow, revenue) as known on ``asof``: the last
+    annual figure plus this year's year-to-date minus last year's same period, else the last
+    annual figure. The concepts are pooled first (an earlier concept wins an identical span):
+    NVIDIA files quarters under ``Revenues`` and years under
+    ``RevenueFromContractWithCustomerExcludingAssessedTax``, so one concept alone either has no
+    year or no quarter (its 2020 revenue read -7% when it was +28%, found 2026-10-30)."""
+    spans: dict[tuple[str, str], tuple[int, str, float]] = {}
+    for rank, c in enumerate(concepts):
+        for r in _facts(facts, c, asof=asof):
+            if not r.get("start"):
+                continue
+            k = (r["start"], r["end"])
+            cand = (-rank, r.get("filed", ""), float(r["val"]))   # earlier concept, then latest filing
+            if k not in spans or cand[:2] > spans[k][:2]:
+                spans[k] = cand
+    if not spans:
         return None
-    end, _, val = max(found)
-    return val, end
-
-
-def _ttm_one(facts: dict, c: str, asof: str) -> tuple[float, str] | None:
-    rows = [r for r in _facts(facts, c, asof=asof) if r.get("start")]
-    if not rows:
-        return None
-    by_span: dict[tuple[str, str], tuple[str, float]] = {}
-    for r in rows:   # the latest filing of each (start, end) span wins (restatements)
-        k = (r["start"], r["end"])
-        if k not in by_span or r.get("filed", "") > by_span[k][0]:
-            by_span[k] = (r.get("filed", ""), float(r["val"]))
-    spans = {k: v for k, (_, v) in by_span.items()}
-    dur = {k: (_d(k[1]) - _d(k[0])).days for k in spans}
-    annual = sorted((k for k in spans if 350 <= dur[k] <= 380), key=lambda k: k[1])
-    latest_end = max(k[1] for k in spans)
+    val = {k: v[2] for k, v in spans.items()}
+    dur = {k: (_d(k[1]) - _d(k[0])).days for k in val}
+    annual = sorted((k for k in val if 350 <= dur[k] <= 380), key=lambda k: k[1])
+    latest_end = max(k[1] for k in val)
     if annual and annual[-1][1] == latest_end:
-        return spans[annual[-1]], latest_end
-    ytd = [k for k in spans if k[1] == latest_end and dur[k] < 350]
+        return val[annual[-1]], latest_end
+    ytd = [k for k in val if k[1] == latest_end and dur[k] < 350]
     for k in sorted(ytd, key=lambda k: -dur[k]):
-        prior = [q for q in spans if abs((_d(k[1]) - _d(q[1])).days - 365) <= 12 and abs(dur[q] - dur[k]) <= 12]
+        prior = [q for q in val if abs((_d(k[1]) - _d(q[1])).days - 365) <= 12 and abs(dur[q] - dur[k]) <= 12]
         fy = [y for y in annual if _d(k[0]) - timedelta(days=12) <= _d(y[1]) <= _d(k[1])]
         if prior and fy:
-            return spans[fy[-1]] + spans[k] - spans[prior[0]], latest_end
+            return val[fy[-1]] + val[k] - val[prior[0]], latest_end
     if annual:
-        return spans[annual[-1]], annual[-1][1]
+        return val[annual[-1]], annual[-1][1]
     return None
 
 

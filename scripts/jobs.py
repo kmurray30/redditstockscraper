@@ -385,6 +385,8 @@ PRESETS: dict[str, list[list[str]]] = {
 PRESETS["rebuild"] = [c for name in ("export-tickers", "refilter", "corpus", "wordstats",
                                      "mentions", "universe", "splits", "universe", "baselines",
                                      "ladder-dev", "ladder-validate") for c in PRESETS[name]]
+# the corrected darling run first (minutes), then the long backfill, in one deployment
+PRESETS["rerun-then-backfill"] = PRESETS["darlings-rerun"] + PRESETS["backfill"]
 # Presets that accept JOB_ARGS (appended to their single command).
 TAKES_ARGS = {"run", "ladder-dev", "ladder-validate", "pull-data", "census", "llm-run", "llm-collect",
               "gold-build", "gold-eval", "thesis-timeline", "calibrate", "thesis-run", "export-threads",

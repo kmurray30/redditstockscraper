@@ -78,3 +78,12 @@ def test_latest_concept_wins_dual_classes_add_and_stale_revenue_is_not_growth():
     assert m["shares"] == 700e6 and abs(m["dilution"] - (700 / 690 - 1)) < 1e-9                  # class A + B
     old = {"facts": {"us-gaap": {k: v for k, v in facts["facts"]["us-gaap"].items() if k != "RevenueFromContractWithCustomerExcludingAssessedTax"}}}
     assert fd.metrics(old, "2020-04-01")["revenue_growth"] is None        # FY2018 revenue is two years stale
+
+
+def test_quarters_and_years_under_different_concepts_are_pooled():
+    rev = {"Revenues": {"units": {"USD": [
+        f("2019-01-28", "2019-07-28", 4.799e9, "2019-08-15"), f("2020-01-27", "2020-07-26", 6.946e9, "2020-08-19")]}},
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+            f("2018-01-29", "2019-01-27", 11.716e9, "2019-02-21"), f("2019-01-28", "2020-01-26", 10.918e9, "2020-02-20")]}}}
+    v, end = fd.ttm({"facts": {"us-gaap": rev}}, fd.REVENUE, "2020-09-01")
+    assert end == "2020-07-26" and abs(v - (10.918e9 + 6.946e9 - 4.799e9)) < 1
