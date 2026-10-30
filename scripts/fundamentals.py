@@ -178,6 +178,7 @@ def metrics(facts: dict | None, asof: str, splits: list[tuple[str, float]] | Non
          "cash_date": cash[1] if cash else None, "debt": debt,
          "ocf_ttm": ocf[0] if ocf else None, "revenue_ttm": rev[0] if rev else None,
          "revenue_ttm_prev": rev_prev[0] if rev_prev else None,
+         "revenue_end": rev[1] if rev else None, "revenue_prev_end": rev_prev[1] if rev_prev else None,
          "shares": sh[0] if sh else None, "shares_prev": sh_prev[0] if sh_prev else None}
     if not m["known"]:
         m["why"] = "no cash or operating cash flow filed by then"
@@ -291,7 +292,7 @@ def main(argv=None) -> int:
     a1.add_argument("--out", default=str(DIR))
     a2 = sp.add_parser("show")
     a2.add_argument("--cik", required=True)
-    a2.add_argument("--asof", required=True)
+    a2.add_argument("--asof", required=True, help="one date or several, comma-separated")
     a2.add_argument("--dir", default=str(DIR))
     a = p.parse_args(argv)
     if a.cmd == "pull":
@@ -304,9 +305,14 @@ def main(argv=None) -> int:
         print(f"[fundamentals] {len(ciks):,} companies", flush=True)
         pull(sorted(ciks), Path(a.out), user_agent())
         return 0
-    m = metrics(Facts(Path(a.dir)).get(a.cik), a.asof)
-    print(json.dumps(m, default=str, indent=1))
-    print(gate(m), describe(m))
+    facts = Facts(Path(a.dir)).get(a.cik)
+    for asof in a.asof.split(","):
+        m = metrics(facts, asof)
+        print(json.dumps(m, default=str, indent=1))
+        print(gate(m), describe(m))
+    for c in REVENUE:   # what the filings hold, for checking the trailing-twelve-months arithmetic
+        rows = sorted(_facts(facts or {}, c, asof=a.asof.split(",")[-1]), key=lambda r: (r["end"], r.get("start", "")))
+        print(c, [(r.get("start"), r["end"], r["val"], r.get("filed"), r.get("form")) for r in rows if r["end"] >= "2018-06"][:40])
     return 0
 
 
