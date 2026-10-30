@@ -37,6 +37,9 @@ scoring etc.), which plugs in through the `Scorer` interface (see "Handoff: eval
   arguments (`run` needs `--baseline X` or `--scorer scripts/file.py:factory`); and `JOB_ID` =
   a new string. Then read the result with the Railway `get-logs` tool. Logs also persist on the
   volume in `data/logs/`, with a run index in `data/logs/jobs.jsonl`.
+- **Watch patterns (set 2026-10-30):** the worker redeploys only when `scripts/**`, `prompts/**`,
+  `requirements.txt`, `Dockerfile` or a railway config file changes; a push touching only
+  `CLAUDE.md`, `docs/` or `tests/` is SKIPPED, so notes can be pushed while a long job runs.
 - A `JOB_ID` runs once. A redeploy, for example a push to the branch, does not repeat a finished
   job, but it **kills a running one**, which then re-runs from the start. Do not push while a
   long job is running. Queued deployments all run eventually, each with the variables current
