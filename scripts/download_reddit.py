@@ -833,6 +833,24 @@ def fetch_window(fetch, endpoint: str, sub: str | None, start: int, end: int, li
             return
 
 
+COMMENT_DISCUSSED = 25     # a thread this discussed is worth its comments whatever the post says
+PRIMARY_HOSTS = ("sec.gov", "edgar", "investor.", "ir.", "investors.")
+
+
+def wants_comments(p: dict) -> bool:
+    """``--comments-for substantive``: fetch a kept thread's comments only when the darling
+    pipeline could use them: a self post of 400+ characters, a link post with 200+ characters
+    or a primary source, or a thread with 25+ comments (the value can be all in the comments).
+    Every comment of every kept thread would be one API call per thread, days of polite paging
+    for 2025-2026; these are the threads the substantive rule and the crowd rule read."""
+    text = p.get("selftext") or ""
+    if p.get("is_self"):
+        return len(text) >= 400 or int(p.get("num_comments") or 0) >= COMMENT_DISCUSSED
+    url = (p.get("url") or "").lower()
+    return (len(text) + len(p.get("title") or "") >= 200 or any(h in url for h in PRIMARY_HOSTS)
+            or url.endswith(".pdf") or int(p.get("num_comments") or 0) >= COMMENT_DISCUSSED)
+
+
 def cmd_arctic(args) -> int:
     """Filtered month-by-month fetch from Arctic Shift.
 
@@ -870,7 +888,8 @@ def cmd_arctic(args) -> int:
                     stats[("kept:" if keep else "dropped:") + reason] += 1
                     if keep:
                         w.write(slim(p, POST_FIELDS, tickers))
-                        kept.append((p["id"], int(p["created_utc"])))
+                        if args.comments_for == "all" or wants_comments(p):
+                            kept.append((p["id"], int(p["created_utc"])))
             n_comments = 0
             if not args.no_comments and kept:
                 with ZstLineWriter(sub_dir / f"comments_{tag}.zst") as w:
@@ -1198,6 +1217,8 @@ def main(argv=None) -> int:
     p.add_argument("--no-comments", action="store_true")
     p.add_argument("--comment-days", type=int, default=180,
                    help="fetch comments made within N days of the post")
+    p.add_argument("--comments-for", choices=["all", "substantive"], default="all",
+                   help="substantive: only threads the darling pipeline can use (see wants_comments)")
     p.set_defaults(func=cmd_arctic)
 
     p = sp.add_parser("torrent", help="plain download of whole files (no filtering)")

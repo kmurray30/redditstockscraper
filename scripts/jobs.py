@@ -331,6 +331,39 @@ PRESETS: dict[str, list[list[str]]] = {
                       *[[*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "all", "--grades-dir",
                                     *DARLING_GRADES, "--variant", v)] for v in ("identified", "blinded")],
                       [*_V2, *_py("darling_export.py", "--split", "all", "--grades-dir", *DARLING_GRADES, "--push")]],
+    # the 2025-2026 backfill and the darlings on it (user decision 2026-10-30, before Reddit's API
+    # access ends in March 2027): Arctic Shift month by month (resumable; comments only for the
+    # threads the darling pipeline can use, two weeks after each post), the corpus, mentions,
+    # universe to September 2026 around the splits pull, post features, then the forward darling
+    # candidates graded on Jev and the crowd rule over 2012-2026 with the timeline export. Long:
+    # many hours of polite paging; a push while it runs restarts it, and finished months are kept.
+    "backfill": [_py("download_reddit.py", "arctic", "--subs", *SUBS, "--after", "2025-01-01",
+                     "--before", "2026-10-01", "--tickers", "data/ref/tickers_all.txt",
+                     "--stoplist", "data/ref/stoplist.txt", "--comments-for", "substantive", "--comment-days", "14"),
+                 _py("corpus.py"),
+                 _py("entity_resolver.py", "mentions"),
+                 _py("universe.py", "--to", "2026-09-01"),
+                 ["sh", "-c", shlex.join(_py("market_data.py", "splits", "--universe", "data/features/universe.parquet"))
+                  + " || echo '[backfill] splits pull failed; codes without a split file keep raw dollar volume'"],
+                 _py("universe.py", "--to", "2026-09-01"),
+                 _py("baselines.py"),
+                 _py("darling_census.py", "--years", "2025", "2026", "--write", "data/features/darlings_f/candidates.parquet",
+                     "--write-level", "B", "--blue-chip-top", "200", "--watch", "NVDA", "ASML", "RKLB",
+                     "--watch-years", "2025", "2026"),
+                 _py("thesis_funnel.py", "--only", "data/features/darlings_f/candidates.parquet", "--top-k", "6",
+                     "--out", "data/features/darlings_f/threads.parquet"),
+                 ["sh", "-c", shlex.join(_py("fundamentals.py", "pull", "--ciks-from",
+                                             "data/features/darlings_f/candidates.parquet"))
+                  + " || echo '[backfill] SEC company facts not pulled'"],
+                 *[[*_V2, _JEV, *_py("thesis_llm.py", "--threads", "data/features/darlings_f/threads.parquet",
+                                     "--features", "data/features/darlings_f", step, "--variant", v)]
+                   for v in ("identified", "blinded") for step in ("run", "collect")],
+                 [*_V2, _JEV, *_py("thesis_llm.py", "--threads", "data/features/darlings_f/threads.parquet", "check-blind")],
+                 *[[*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "full", "--grades-dir",
+                               "data/features/darlings_f", *DARLING_GRADES, "--variant", v)]
+                   for v in ("identified", "blinded")],
+                 [*_V2, *_py("darling_export.py", "--split", "full", "--grades-dir", "data/features/darlings_f",
+                             *DARLING_GRADES, "--push")]],
     # the darling timeline for thread-ui (user request 2026-10-29): the crowd rule's events with
     # their posts, outcomes and price histories, pushed to the bucket; thread-ui reads it for /
     "darling-export": [[*_V2, *_py("darling_export.py", "--push")]],

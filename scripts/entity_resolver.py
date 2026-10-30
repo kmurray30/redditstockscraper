@@ -258,14 +258,15 @@ def build_mentions(er: EntityResolver, parquet_root: Path, out: Path, subs=None,
     with pq.ParquetWriter(tmp, MENTION_SCHEMA, compression="zstd") as w:
         for kind, folder in (("post", "posts"), ("comment", "comments")):
             for f in sorted((parquet_root / folder).glob("*.parquet")):
-                if subs and f.stem not in subs:
+                sub = f.stem.split("__")[0]   # "<sub>__arctic" holds the 2025+ backfill of <sub>
+                if subs and sub not in subs:
                     continue
                 sub_rows = 0
                 for batch in pq.ParquetFile(f).iter_batches(batch_size=50_000):
                     rows = []
                     for rec in batch.to_pylist():
                         if kind == "comment":
-                            rec["subreddit"] = f.stem
+                            rec["subreddit"] = sub
                         rows.extend(mention_rows(er, kind, rec))
                     if rows:
                         w.write_table(pa.Table.from_pylist(rows, schema=MENTION_SCHEMA))

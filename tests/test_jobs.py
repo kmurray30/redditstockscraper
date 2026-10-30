@@ -294,3 +294,15 @@ def test_darlings_more_grades_on_jev_and_runs_the_crowd_rule_on_every_grade_set(
     crowd = [c for c in cmds if "darlings.py" in " ".join(c)]
     assert all("all" in c and "data/features/darlings_c" in c and "data/features" in c for c in crowd)
     assert "--push" in cmds[-1] and "darling_export.py" in " ".join(cmds[-1])
+
+
+def test_backfill_chain_order_and_jev():
+    cmds = jobs.resolve("backfill")
+    names = [" ".join(c) for c in cmds]
+    i = {k: next(n for n, x in enumerate(names) if k in x) for k in
+         ("download_reddit.py arctic", "corpus.py", "entity_resolver.py mentions", "universe.py", "baselines.py",
+          "darling_census.py", "thesis_llm.py", "darlings.py", "darling_export.py")}
+    assert list(i.values()) == sorted(i.values())
+    assert "--comments-for substantive" in names[0] and "--before 2026-10-01" in names[0]
+    assert all("LLM_MODEL=jev-1.13.0" in c for c in cmds if "thesis_llm.py" in " ".join(c))
+    assert all("--split full" in n for n in names if "darlings.py" in n or "darling_export.py" in n)

@@ -115,6 +115,52 @@ def convert(src: Path, dst: Path, row_fn, schema: pa.Schema) -> int:
     return n
 
 
+ARCTIC_TAG = "__arctic"   # posts/<sub>__arctic.parquet: the Arctic Shift backfill (2025+)
+
+
+def concat_months(files: list[Path], dst: Path, row_fn, schema: pa.Schema) -> int:
+    """Several monthly zstd NDJSON files into one Parquet file; atomic via a temp file."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + ".tmp")
+    n = 0
+    with pq.ParquetWriter(tmp, schema, compression="zstd") as w:
+        for f in files:
+            buf = []
+            for rec in iter_records(f):
+                buf.append(row_fn(rec))
+                if len(buf) >= CHUNK:
+                    w.write_table(pa.Table.from_pylist(buf, schema=schema))
+                    n, buf = n + len(buf), []
+            if buf:
+                w.write_table(pa.Table.from_pylist(buf, schema=schema))
+                n += len(buf)
+    os.replace(tmp, dst)
+    return n
+
+
+def build_arctic(src_root: Path, out_root: Path, log=print) -> dict:
+    """``download_reddit.py arctic`` writes ``<sub>/posts_YYYY-MM.zst`` and ``comments_YYYY-MM.zst``
+    per finished month (``mentions_YYYY-MM.csv`` marks it finished). They become
+    ``posts/<sub>__arctic.parquet`` and ``comments/<sub>__arctic.parquet`` next to the dump files,
+    so every reader that globs ``posts/*.parquet`` sees 2025+ too. Unfinished months are skipped."""
+    counts = {}
+    if not src_root.exists():
+        return counts
+    for sub_dir in sorted(p for p in src_root.iterdir() if p.is_dir()):
+        done = {f.stem.split("_", 1)[1] for f in sub_dir.glob("mentions_*.csv")}
+        for kind, fn, schema in (("posts", post_row, POST_SCHEMA), ("comments", comment_row, COMMENT_SCHEMA)):
+            files = sorted(f for f in sub_dir.glob(f"{kind}_*.zst") if f.stem.split("_", 1)[1] in done)
+            if not files:
+                continue
+            dst = out_root / kind / f"{sub_dir.name}{ARCTIC_TAG}.parquet"
+            if dst.exists() and dst.stat().st_mtime >= max(f.stat().st_mtime for f in files):
+                log(f"  {sub_dir.name} {kind} (arctic): up to date")
+                continue
+            counts[(sub_dir.name, kind)] = concat_months(files, dst, fn, schema)
+            log(f"  {sub_dir.name} {kind} (arctic, {len(files)} months): {counts[(sub_dir.name, kind)]:,} rows")
+    return counts
+
+
 def build(src_root: Path, out_root: Path, subs: list[str] | None = None, log=print) -> dict:
     counts = {}
     for sub_dir in sorted(p for p in src_root.iterdir() if (p / "manifest.json").exists()):
@@ -140,8 +186,11 @@ def main(argv=None) -> int:
     p.add_argument("--src", default="data/corpus/reddit")
     p.add_argument("--out", default="data/corpus/parquet")
     p.add_argument("--subs", nargs="+")
+    p.add_argument("--arctic", default="data/corpus/reddit_arctic",
+                   help="the Arctic Shift backfill's monthly files (skipped when absent)")
     a = p.parse_args(argv)
     build(Path(a.src), Path(a.out), a.subs)
+    build_arctic(Path(a.arctic), Path(a.out))
     return 0
 
 

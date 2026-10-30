@@ -72,7 +72,7 @@ LOOKBACK = 3           # months of qualifying threads counted as "the case" at a
 # "recent" (user decision 2026-10-27): the darling study develops on 2019-2024, where the darlings
 # are; that uses up the sealed 2021-2022 holdout, which is recorded in the ledger when it runs.
 SPLIT_YEARS = {"dev": (2012, 2018), "validate": (2019, 2020), "recent": (2019, 2024), "all": (2012, 2024),
-               "forward": (2025, 2026)}
+               "forward": (2025, 2026), "full": (2012, 2026)}
 HORIZONS = (1, 3, 5)
 FINAL = ("complete", "delisted")
 
