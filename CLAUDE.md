@@ -691,6 +691,52 @@ threads (a sector-ETF question and an EUV-competitors question), entered near it
 year later, -44% after three years. It is a blue chip by dollar volume in the months either
 side.
 
+**Darlings round three (2026-10-30, user: "do all your suggestions" except wallstreetbets, "WSB
+is mostly for short term plays"; grading stays on Jev, never a chat LLM; NVDA on the watch list,
+"darling posts before and after the bitcoin hype, and before the AI peak").** Preset
+`darlings-more` then `darlings-rerun` (no spend):
+- **More threads**: level-B candidates (blue chips out) plus every month NVDA, ASML or RKLB had a
+  substantive post (2012-2024, blue chip or not), six threads per company per cutoff instead of
+  three, graded both ways on Jev (`LLM_MODEL=jev-1.13.0` pinned in the preset): 3,227 threads,
+  $0.60, lifetime $6.867, cap raised to $9 by me under the user's go-ahead; check-blind 0. The
+  crowd rule now runs over every grade set (`darlings_c`, `darlings_b`, `darlings`, the dev
+  grades; split `all` = 2012-2024).
+- **Name check** (`darlings.name_check`): an *ambiguous* ticker (the list `AMBIGUOUS` = THC, BYD,
+  DTC, SP, AE, EVO, plus tokens the corpus writes as words) counts only with a cashtag or the
+  company's name in the post. 365 of 14,345 threads dropped (SP, BYD, UPS, CNBC, ING, RE, CAT,
+  DTC, ...). A first version checked every ticker and dropped a third (AMD, NVDA, MSFT): never
+  do that again.
+- **Financial-health gate** (`fundamentals.py`, SEC XBRL company facts, point in time by
+  `filed` date; pulled to `data/ref/companyfacts/`): pass = positive operating cash flow or 2+
+  years of runway, at most +20% shares in a year (split-adjusted), growing trailing revenue,
+  debt within cash + 3 years of cash flow. Fixed before reading outcomes. Bugs found and fixed
+  on the way: concepts must be pooled (NVIDIA files quarters under `Revenues` and years under
+  `RevenueFromContract...`), the latest concept wins, cover-page share classes are summed
+  (Pinterest), stale revenue is not growth. Foreign filers (ASML, 20-F) read `unknown`.
+- **Result, identified, 2012-2024, loosest level**: 159 darlings (1/3/6/3/12/10/7/1/26/53/17/5/15
+  per year: the five-a-year floor still fails in 2012, 2013, 2015, 2019). Against liquidity x
+  momentum matched peers: 3y beat the S&P 31% vs 32%, 5y 30% vs 28%; 5x within 5y 15% vs 6.2%;
+  permanent loss 21% vs 14%. More multibaggers and more ruin, no edge on beating the market.
+  By health: pass (41) 5y 5x 22% vs 5.3%, permanent loss 15% vs 14%; fail (60) loss 26% vs 13%;
+  unknown (58). The gate looks like it removes the extra ruin, but the blinded run (123
+  darlings, fewer grades: the dev years have no blinded v2 grades) does not confirm it (pass
+  group 3y beat 14% vs 29%, loss 32% vs 14%). n is ~40 per group: not a result yet.
+- **NVDA** (watch list, a blue chip from 2017): darling months 2017-04 (before the crypto run;
+  12.4x in 5y), 2018-07 (into the crypto bust: -42% in a year, then 7.5x), 2019-08 ("With crypto
+  up again, time to buy NVDA?", 33.8x in 5y), 2020-09, 2021-09, 2023-12 and 2024-12 (before the
+  AI peak; +169% and +16% the next year). ASML: 2022-12, 2023-12, 2024-12 (blue chip; health
+  unknown, 20-F filer). RKLB: April 2024 as before.
+- **thread-ui**: health and watch-list pills, the track record by health, and **rating buttons**
+  per darling (Would act / Wouldn't / Unsure + reason) saved to the bucket at
+  `data/ui/darling_ratings.json` (`thread_server.Ratings`); read them on the worker with
+  `JOB=pull-data JOB_ARGS="--only ui"`.
+- **Backfill 2025-2026** (preset `backfill`, run as `rerun-then-backfill` 2026-10-30): Arctic
+  Shift month by month for the five subs (comments only for threads the darling pipeline can
+  use: `download_reddit.wants_comments`, two weeks after each post), corpus files
+  `posts|comments/<sub>__arctic.parquet`, mentions, universe to 2026-09, post features, forward
+  darling candidates graded on Jev both ways, the crowd rule over 2012-2026 (split `full`), the
+  export. Many hours; a push restarts it (finished months are kept).
+
 **Two data-layer bugs found 2026-10-27, FIXED the same day (see "After the data fix" below; every result above this point carries them):**
 1. **Split look-ahead in `adv60`** (`prices.trailing_dollar_volume` = raw close x EODHD volume,
    and the volume is split-adjusted to the download date). Measured by `scripts/volume_check.py`
