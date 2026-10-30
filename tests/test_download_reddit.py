@@ -932,3 +932,20 @@ def test_manifest_records_the_ticker_list_and_a_new_list_reruns_the_subreddit(pi
     assert dr.main(args2) == 0
     m2 = json.loads((out / "manifest.json").read_text())
     assert m2["tickers"] != m["tickers"] and m2["tickers_source"].endswith("tickers2.txt")
+
+
+def test_arctic_retries_a_dropped_connection(monkeypatch, no_sleep):
+    import http.client
+    calls = []
+
+    def fake_urlopen(req, timeout=0):
+        calls.append(1)
+        if len(calls) == 1:
+            raise http.client.IncompleteRead(b"x" * 10)
+        if len(calls) == 2:
+            raise ConnectionResetError("reset by peer")
+        return _ok_resp([{"id": "a", "created_utc": 5}])
+
+    monkeypatch.setattr(dr.urllib.request, "urlopen", fake_urlopen)
+    page = dr._arctic_get("posts/search", {"limit": 100}, 0)
+    assert [r["id"] for r in page] == ["a"] and len(calls) == 3

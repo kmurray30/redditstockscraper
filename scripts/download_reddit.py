@@ -29,6 +29,7 @@ training).
 from __future__ import annotations
 
 import argparse
+import http.client
 import io
 import json
 import random
@@ -784,7 +785,9 @@ def _arctic_get(endpoint: str, params: dict, polite_delay: float) -> list[dict]:
             print(f"    transient error ({body[:80]}); retrying in {wait:.0f}s "
                   f"(limit={params.get('limit')})")
             time.sleep(wait)
-        except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError) as e:
+        # a dropped connection mid-body (IncompleteRead, reset, remote disconnect) is transient too;
+        # a backfill died on IncompleteRead after four hours (2026-10-30)
+        except (urllib.error.URLError, OSError, http.client.HTTPException, RuntimeError, ValueError) as e:
             last = repr(e)
             print(f"    {e!r}; retrying")
             time.sleep(min(60.0, 2.0**attempt))
