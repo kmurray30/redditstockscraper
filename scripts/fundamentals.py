@@ -76,48 +76,65 @@ def _facts(facts: dict, concept: str, ns: str = "us-gaap", unit: str = "USD", as
 
 
 def instant(facts: dict, concepts, asof: str, ns: str = "us-gaap", unit: str = "USD",
-            before: str | None = None) -> tuple[float, str] | None:
-    """The latest balance-sheet value filed by ``asof`` (and dated on or before ``before``)."""
+            before: str | None = None, sum_classes: bool = False) -> tuple[float, str] | None:
+    """The latest balance-sheet value filed by ``asof`` (and dated on or before ``before``), across
+    the concepts (a company switches concept names over the years; the most recent date wins,
+    the earlier concept on a tie). ``sum_classes`` adds the facts one filing reports for the
+    same date (share classes on the cover page: Pinterest's A and B)."""
     best = None
-    for c in concepts:
+    for rank, c in enumerate(concepts):
+        groups: dict[tuple, list] = {}
         for r in _facts(facts, c, ns, unit, asof):
             if r.get("start") or (before and r["end"] > before):
                 continue
-            key = (r["end"], r.get("filed", ""))
+            groups.setdefault((r["end"], r.get("filed", ""), r.get("accn", "")), []).append(float(r["val"]))
+        for (end, filed, _), vals in groups.items():
+            val = sum(vals) if sum_classes else vals[-1]
+            key = (end, -rank, filed)
             if best is None or key > best[0]:
-                best = (key, float(r["val"]))
-        if best is not None:
-            return best[1], best[0][0]
-    return None
+                best = (key, val)
+    return (best[1], best[0][0]) if best else None
 
 
 def ttm(facts: dict, concepts, asof: str) -> tuple[float, str] | None:
-    """Trailing twelve months of a flow (cash flow, revenue) as known on ``asof``."""
-    for c in concepts:
-        rows = [r for r in _facts(facts, c, asof=asof) if r.get("start")]
-        if not rows:
-            continue
-        by_span: dict[tuple[str, str], tuple[str, float]] = {}
-        for r in rows:   # the latest filing of each (start, end) span wins (restatements)
-            k = (r["start"], r["end"])
-            if k not in by_span or r.get("filed", "") > by_span[k][0]:
-                by_span[k] = (r.get("filed", ""), float(r["val"]))
-        spans = {k: v for k, (_, v) in by_span.items()}
-        dur = {k: (_d(k[1]) - _d(k[0])).days for k in spans}
-        annual = sorted((k for k in spans if 350 <= dur[k] <= 380), key=lambda k: k[1])
-        latest_end = max(k[1] for k in spans)
-        if annual and annual[-1][1] == latest_end:
-            return spans[annual[-1]], latest_end
-        ytd = [k for k in spans if k[1] == latest_end and dur[k] < 350]
-        for k in sorted(ytd, key=lambda k: -dur[k]):
-            prior = [p for p in spans if abs((_d(k[1]) - _d(p[1])).days - 365) <= 12
-                     and abs(dur[p] - dur[k]) <= 12]
-            fy = [a for a in annual if _d(k[0]) - timedelta(days=12) <= _d(a[1]) <= _d(k[1])]
-            if prior and fy:
-                return spans[fy[-1]] + spans[k] - spans[prior[0]], latest_end
-        if annual:
-            return spans[annual[-1]], annual[-1][1]
+    """Trailing twelve months of a flow (cash flow, revenue) as known on ``asof``: per concept,
+    then the concept with the most recent period (NVIDIA moved from Revenues to
+    RevenueFromContractWithCustomer...; taking the first concept with any data read a stale
+    year, found 2026-10-30)."""
+    found = [(r[1], -i, r[0]) for i, c in enumerate(concepts) if (r := _ttm_one(facts, c, asof)) is not None]
+    if not found:
+        return None
+    end, _, val = max(found)
+    return val, end
+
+
+def _ttm_one(facts: dict, c: str, asof: str) -> tuple[float, str] | None:
+    rows = [r for r in _facts(facts, c, asof=asof) if r.get("start")]
+    if not rows:
+        return None
+    by_span: dict[tuple[str, str], tuple[str, float]] = {}
+    for r in rows:   # the latest filing of each (start, end) span wins (restatements)
+        k = (r["start"], r["end"])
+        if k not in by_span or r.get("filed", "") > by_span[k][0]:
+            by_span[k] = (r.get("filed", ""), float(r["val"]))
+    spans = {k: v for k, (_, v) in by_span.items()}
+    dur = {k: (_d(k[1]) - _d(k[0])).days for k in spans}
+    annual = sorted((k for k in spans if 350 <= dur[k] <= 380), key=lambda k: k[1])
+    latest_end = max(k[1] for k in spans)
+    if annual and annual[-1][1] == latest_end:
+        return spans[annual[-1]], latest_end
+    ytd = [k for k in spans if k[1] == latest_end and dur[k] < 350]
+    for k in sorted(ytd, key=lambda k: -dur[k]):
+        prior = [q for q in spans if abs((_d(k[1]) - _d(q[1])).days - 365) <= 12 and abs(dur[q] - dur[k]) <= 12]
+        fy = [y for y in annual if _d(k[0]) - timedelta(days=12) <= _d(y[1]) <= _d(k[1])]
+        if prior and fy:
+            return spans[fy[-1]] + spans[k] - spans[prior[0]], latest_end
+    if annual:
+        return spans[annual[-1]], annual[-1][1]
     return None
+
+
+STALE_DAYS = 460   # a trailing figure whose period ended this long before the date is too old to use
 
 
 def split_ratio(splits: list[tuple[str, float]], after: str, upto: str) -> float:
@@ -146,14 +163,14 @@ def metrics(facts: dict | None, asof: str, splits: list[tuple[str, float]] | Non
     rev_prev = ttm(facts, REVENUE, (a - timedelta(days=365)).isoformat())
     sh = None
     for ns, c in SHARES:
-        sh = instant(facts, (c,), asof, ns=ns, unit="shares")
+        sh = instant(facts, (c,), asof, ns=ns, unit="shares", sum_classes=ns == "dei")
         if sh is not None:
             break
     sh_prev = None
     if sh is not None:
         cut = (_d(sh[1]) - timedelta(days=330)).isoformat()
         for ns, c in SHARES:
-            sh_prev = instant(facts, (c,), asof, ns=ns, unit="shares", before=cut)
+            sh_prev = instant(facts, (c,), asof, ns=ns, unit="shares", before=cut, sum_classes=ns == "dei")
             if sh_prev is not None:
                 break
     m = {"known": cash is not None and ocf is not None, "asof": asof,
@@ -166,8 +183,9 @@ def metrics(facts: dict | None, asof: str, splits: list[tuple[str, float]] | Non
         m["why"] = "no cash or operating cash flow filed by then"
         return m
     m["runway_years"] = math.inf if m["ocf_ttm"] >= 0 else m["cash"] / -m["ocf_ttm"]
+    fresh = rev is not None and rev_prev is not None and (a - _d(rev[1])).days <= STALE_DAYS and rev[1] != rev_prev[1]
     m["revenue_growth"] = (m["revenue_ttm"] / m["revenue_ttm_prev"] - 1
-                           if m["revenue_ttm"] is not None and m["revenue_ttm_prev"] else None)
+                           if fresh and m["revenue_ttm_prev"] else None)
     if sh and sh_prev and sh_prev[0] > 0:
         m["dilution"] = sh[0] / (sh_prev[0] * split_ratio(splits, sh_prev[1], sh[1])) - 1
     else:

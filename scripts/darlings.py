@@ -562,12 +562,26 @@ def name_words(names, common: frozenset) -> tuple[set, set]:
     return words, phrases
 
 
+# tickers that are also something else in investing talk, found in the darling lists (2026-10-27):
+# THC (cannabis, not Tenet Healthcare), BYD (the carmaker, not Boyd Gaming), DTC
+# (direct-to-consumer, not Solo Brands), SP (S&P, not SP Plus), AE, EVO; extend as the user finds more
+AMBIGUOUS = frozenset({"THC", "BYD", "DTC", "SP", "AE", "EVO"})
+
+
+def ambiguous(ticker: str | None, common: frozenset, word_like: frozenset = frozenset()) -> bool:
+    """A bare ticker that needs the company's name next to it: on the list above, or a token
+    the corpus mostly writes as an ordinary word."""
+    t = (ticker or "").upper()
+    return t in AMBIGUOUS or t.lower() in common or t.lower() in word_like or t in word_like
+
+
 def name_check(grades: list[dict], parquet: Path, mentions: Path, massive: Path, common: frozenset,
-               log=print) -> tuple[list[dict], list[dict]]:
-    """Keep a thread for a company only if the post uses its cashtag or names it (a distinctive
-    word or the full name, in the title or the text). A bare ticker alone is too often
-    something else: THC in cannabis posts is not Tenet Healthcare, BYD the carmaker is not Boyd
-    Gaming, DTC is direct-to-consumer (found 2026-10-27). False negatives are acceptable."""
+               log=print, word_like: frozenset = frozenset()) -> tuple[list[dict], list[dict]]:
+    """For an ambiguous ticker (``ambiguous``), keep a thread only if the post uses the cashtag or
+    names the company (a distinctive word or the full name, in the title or the text): THC in
+    cannabis posts is not Tenet Healthcare, BYD the carmaker is not Boyd Gaming. Unambiguous
+    tickers (AMD, NVDA, MSFT, IBM) are written bare by everyone and pass as they are: a first
+    version checked every ticker and dropped a third of all threads, mostly real ones."""
     import re
     import duckdb
     import pyarrow as pa
@@ -596,14 +610,17 @@ def name_check(grades: list[dict], parquet: Path, mentions: Path, massive: Path,
     vocab = {c: name_words(ns, common) for c, ns in names.items()}
     keep, dropped = [], []
     for g in grades:
+        if not ambiguous(g.get("ticker"), common, word_like):
+            keep.append(g)
+            continue
         t = texts.get(g["post_id"])
         words, phrases = vocab[g["cik"]]
         ok = (t is None or (g["post_id"], g["cik"]) in cash
               or any(re.search(rf"\b{re.escape(w)}\b", t) for w in words)
               or any(ph in t for ph in phrases))
         (keep if ok else dropped).append(g)
-    log(f"  name check: {len(dropped):,} of {len(grades):,} threads dropped (no cashtag and no company name "
-        f"in the post); most dropped: " + ", ".join(f"{t} {n}" for t, n in
+    log(f"  name check: {len(dropped):,} of {len(grades):,} threads dropped (an ambiguous ticker with no cashtag "
+        f"and no company name in the post); dropped: " + ", ".join(f"{t} {n}" for t, n in
                                                   Counter(g.get('ticker') for g in dropped).most_common(12)))
     return keep, dropped
 
@@ -648,10 +665,10 @@ def run_crowd(a, grades: list[dict], years: tuple[int, int]) -> int:
     outcomes of the chosen level, once."""
     import duckdb
     from darling_census import blue_chips
-    from entity_resolver import load_common_words
+    from entity_resolver import load_common_words, load_word_like
     if not a.no_name_check:
         grades, _ = name_check(grades, Path(a.parquet), Path(a.mentions), Path(a.massive),
-                               load_common_words(Path(a.common_words)))
+                               load_common_words(Path(a.common_words)), word_like=load_word_like(Path(a.word_like)))
     chips = blue_chips(duckdb.connect(), Path(a.features) / "universe.parquet", a.blue_chip_top)
     print(f"blue chips: top {a.blue_chip_top} by 60-day dollar volume that month and twelve months before "
           f"({len({c for _, c in chips}):,} companies, {len(chips):,} company-months)")
@@ -747,6 +764,7 @@ def main(argv=None) -> int:
     p.add_argument("--eodhd", default="data/market/eodhd", help="crowd rule: prices for the run-up filter")
     p.add_argument("--massive", default="data/market/massive", help="crowd rule: company names for the name check")
     p.add_argument("--common-words", default="data/ref/common_words.txt")
+    p.add_argument("--word-like", default="data/ref/word_like.txt")
     p.add_argument("--no-name-check", action="store_true")
     p.add_argument("--facts", default="data/ref/companyfacts", help="crowd rule: SEC company facts (fundamentals.py pull)")
     p.add_argument("--blue-chip-top", type=int, default=BLUE_CHIP_TOP,

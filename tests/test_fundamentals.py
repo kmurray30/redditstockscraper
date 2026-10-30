@@ -59,3 +59,22 @@ def test_pull_saves_and_skips(tmp_path):
     assert len(calls) == 2
     assert fd.Facts(tmp_path).get("1")["facts"]["dei"] and fd.Facts(tmp_path).get("2") is None
     assert json.loads(gzip.decompress((tmp_path / "0000000001.json.gz").read_bytes()))
+
+
+def test_latest_concept_wins_dual_classes_add_and_stale_revenue_is_not_growth():
+    facts = {"facts": {"us-gaap": {
+        "CashAndCashEquivalentsAtCarryingValue": {"units": {"USD": [f(None, "2020-01-26", 10e9, "2020-02-20")]}},
+        "NetCashProvidedByUsedInOperatingActivities": {"units": {"USD": [f("2019-01-28", "2020-01-26", 4.7e9, "2020-02-20")]}},
+        "Revenues": {"units": {"USD": [f("2016-01-31", "2017-01-29", 6.9e9, "2017-03-01"),
+                                       f("2017-01-30", "2018-01-28", 9.7e9, "2018-02-28")]}},
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+            f("2018-01-29", "2019-01-27", 11.7e9, "2019-02-21"), f("2019-01-28", "2020-01-26", 10.9e9, "2020-02-20")]}}},
+        "dei": {"EntityCommonStockSharesOutstanding": {"units": {"shares": [
+            {"end": "2020-02-14", "val": 600e6, "filed": "2020-02-20", "accn": "x"},
+            {"end": "2020-02-14", "val": 100e6, "filed": "2020-02-20", "accn": "x"},
+            {"end": "2019-02-15", "val": 690e6, "filed": "2019-02-21", "accn": "y"}]}}}}}
+    m = fd.metrics(facts, "2020-04-01")
+    assert m["revenue_ttm"] == 10.9e9 and abs(m["revenue_growth"] - (10.9 / 11.7 - 1)) < 1e-9   # not -22% from Revenues
+    assert m["shares"] == 700e6 and abs(m["dilution"] - (700 / 690 - 1)) < 1e-9                  # class A + B
+    old = {"facts": {"us-gaap": {k: v for k, v in facts["facts"]["us-gaap"].items() if k != "RevenueFromContractWithCustomerExcludingAssessedTax"}}}
+    assert fd.metrics(old, "2020-04-01")["revenue_growth"] is None        # FY2018 revenue is two years stale

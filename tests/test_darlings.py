@@ -181,18 +181,21 @@ def test_name_check_drops_bare_tickers_that_mean_something_else(tmp_path):
              {"id": "p2", "title": "Tenet Healthcare (THC) Q3", "selftext": "hospital margins"},
              {"id": "p3", "title": "THC", "selftext": "short squeeze?"},
              {"id": "p4", "title": "Thoughts on RKLB?", "selftext": "Rocket Lab's Neutron timeline"},
-             {"id": "p5", "title": "BYD sales beat Tesla", "selftext": "chinese EVs"}]
+             {"id": "p5", "title": "BYD sales beat Tesla", "selftext": "chinese EVs"},
+             {"id": "p6", "title": "AMD earnings", "selftext": "MI300 ramp"}]
     pq.write_table(pa.Table.from_pylist(posts), tmp_path / "posts" / "stocks.parquet")
     pq.write_table(pa.Table.from_pylist([{"post_id": "p3", "cik": "1", "method": "cashtag"}]), tmp_path / "m.parquet")
     gs = [g("p1", "1", "2021-01-01", ticker="THC", name="Tenet Healthcare Corporation"),
           g("p2", "1", "2021-01-01", ticker="THC", name="Tenet Healthcare Corporation"),
           g("p3", "1", "2021-01-01", ticker="THC", name="Tenet Healthcare Corporation"),
-          g("p4", "2", "2024-04-01", ticker="RKLB", name="Rocket Lab USA, Inc."),
+          g("p4", "2", "2024-04-01", ticker="RKLB", name="Rocket Lab USA, Inc."),     # unambiguous
           g("p5", "3", "2024-04-01", ticker="BYD", name="Boyd Gaming Corp"),
-          g("p9", "3", "2024-04-01", ticker="BYD", name="Boyd Gaming Corp")]        # not in the corpus: kept
+          g("p9", "3", "2024-04-01", ticker="BYD", name="Boyd Gaming Corp"),         # not in the corpus: kept
+          g("p6", "4", "2024-04-01", ticker="AMD", name="Advanced Micro Devices")]   # unambiguous: kept bare
     keep, dropped = dl.name_check(gs, tmp_path, tmp_path / "m.parquet", tmp_path / "massive",
                                   frozenset({"gaming"}), log=lambda m: None)
     assert sorted(x["post_id"] for x in dropped) == ["p1", "p5"]           # cannabis THC, the BYD carmaker
-    assert sorted(x["post_id"] for x in keep) == ["p2", "p3", "p4", "p9"]  # named, cashtag, phrase, unknown
+    assert sorted(x["post_id"] for x in keep) == ["p2", "p3", "p4", "p6", "p9"]  # named, cashtag, ok, AMD, unknown
+    assert dl.ambiguous("thc", frozenset()) and not dl.ambiguous("NVDA", frozenset()) and dl.ambiguous("COST", frozenset({"cost"}))
     words, phrases = dl.name_words(["SP Plus Corp"], frozenset({"plus"}))
     assert words == set() and phrases == {"sp plus"}

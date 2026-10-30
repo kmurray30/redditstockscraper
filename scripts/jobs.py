@@ -331,6 +331,10 @@ PRESETS: dict[str, list[list[str]]] = {
                       *[[*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "all", "--grades-dir",
                                     *DARLING_GRADES, "--variant", v)] for v in ("identified", "blinded")],
                       [*_V2, *_py("darling_export.py", "--split", "all", "--grades-dir", *DARLING_GRADES, "--push")]],
+    # the crowd rule and the timeline export again on the grades already paid for (no spend)
+    "darlings-rerun": [*[[*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "all", "--grades-dir",
+                                     *DARLING_GRADES, "--variant", v)] for v in ("identified", "blinded")],
+                       [*_V2, *_py("darling_export.py", "--split", "all", "--grades-dir", *DARLING_GRADES, "--push")]],
     # the 2025-2026 backfill and the darlings on it (user decision 2026-10-30, before Reddit's API
     # access ends in March 2027): Arctic Shift month by month (resumable; comments only for the
     # threads the darling pipeline can use, two weeks after each post), the corpus, mentions,
