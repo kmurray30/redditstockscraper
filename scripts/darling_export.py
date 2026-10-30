@@ -28,7 +28,6 @@ import zstandard as zstd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import prices as px  # noqa: E402
-import thesis_scorer as ts  # noqa: E402
 import thread_export as te  # noqa: E402
 
 KEY = "data/ui/darlings.json.zst"
@@ -114,6 +113,7 @@ def build(events: list[dict], grades: list[dict], llm_dir: Path, variant: str, l
                     "name": names.get(k) or e.get("name"), "code": k,
                     "bulls": e.get("bulls"), "bears": e.get("bears"), "authors": e.get("authors"),
                     "comments": e.get("comments"), "credibility": e.get("credibility"),
+                    "watch": bool(e.get("watch")), "blue_chip": bool(e.get("blue_chip")), "health": e.get("health"),
                     "bull_weight": e.get("bull_weight"), "bear_weight": e.get("bear_weight"), "late": e.get("late"),
                     "keys": [f"{pid}_{e['cik']}" for pid in e["threads"] if (pid, e["cik"]) in by_key],
                     "outcome": {str(y): outs.get((e["month"], e["cik"], y)) for y in HORIZONS}})
@@ -146,7 +146,7 @@ def main(argv=None) -> int:
     p.add_argument("--variant", default="identified")
     p.add_argument("--split", default="recent")
     p.add_argument("--prompt", default=os.environ.get("THESIS_PROMPT") or "thesis_v2")
-    p.add_argument("--grades-dir", default="data/features/darlings_b")
+    p.add_argument("--grades-dir", nargs="+", default=["data/features/darlings_b"])
     p.add_argument("--result", default=None, help="default data/experiments/darlings_crowd_<split>_<variant>.json")
     p.add_argument("--features", default="data/features")
     p.add_argument("--symbols", default="data/market/eodhd/symbols.parquet")
@@ -157,12 +157,15 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     res_path = Path(a.result or f"data/experiments/darlings_crowd_{a.split}_{a.variant}.json")
     res = json.loads(res_path.read_text())
-    grades = ts.load_grades(Path(a.grades_dir), a.variant, a.prompt)
+    import darlings as dl
+    grades = dl.merge_grades([Path(d) for d in a.grades_dir], a.variant, a.prompt)
     feats = Path(a.features)
-    data = build(res["events"], grades, Path(a.llm_dir), a.variant, feats / "labels.parquet",
+    data = build(res["events"] + res.get("watch_events", []), grades, Path(a.llm_dir), a.variant, feats / "labels.parquet",
                  feats / "universe.parquet", Path(a.symbols), Path(a.eodhd))
     data.update({"rule": res.get("level"), "runup": res.get("runup"), "blue_chip_top": res.get("blue_chip_top"),
-                 "counts": res.get("counts"), "summary": res.get("outcomes"), "variant": a.variant,
+                 "counts": res.get("counts"), "summary": res.get("outcomes"), "by_health": res.get("by_health"),
+                 "watch": sorted({e["ticker"] for e in res.get("watch_events", []) if e.get("ticker")}),
+                 "variant": a.variant,
                  "split": a.split, "source": str(res_path)})
     blob = zstd.ZstdCompressor(level=9).compress(json.dumps(data, ensure_ascii=False, default=str).encode())
     out = Path(a.out)

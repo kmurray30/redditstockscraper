@@ -71,7 +71,8 @@ MIN_PER_YEAR = 5       # the user's floor
 LOOKBACK = 3           # months of qualifying threads counted as "the case" at an event
 # "recent" (user decision 2026-10-27): the darling study develops on 2019-2024, where the darlings
 # are; that uses up the sealed 2021-2022 holdout, which is recorded in the ledger when it runs.
-SPLIT_YEARS = {"dev": (2012, 2018), "validate": (2019, 2020), "recent": (2019, 2024)}
+SPLIT_YEARS = {"dev": (2012, 2018), "validate": (2019, 2020), "recent": (2019, 2024), "all": (2012, 2024),
+               "forward": (2025, 2026)}
 HORIZONS = (1, 3, 5)
 FINAL = ("complete", "delisted")
 
@@ -522,11 +523,135 @@ def fmt_outcome(o) -> str:
     return f"{o['excess'] * 100:+6.0f}% x{float(o['max_mult'] or 0):4.1f}"
 
 
+def merge_grades(dirs: list[Path], variant: str, prompt: str, log=print) -> list[dict]:
+    """The grades of several runs (the dev funnel, the darling candidates), one row per
+    (post, company); the first directory holding a pair wins."""
+    out, seen = [], set()
+    for d in dirs:
+        try:
+            gs = load_grades(Path(d), variant, prompt)
+        except (FileNotFoundError, SystemExit):
+            log(f"  no {variant} grades of {prompt} in {d}; skipped")
+            continue
+        n = 0
+        for g in gs:
+            k = (g["post_id"], g["cik"])
+            if k not in seen:
+                seen.add(k)
+                out.append(g)
+                n += 1
+        log(f"  {n:,} graded threads from {d}")
+    if not out:
+        raise SystemExit(f"no {variant} grades of {prompt} in any of {[str(d) for d in dirs]}")
+    return out
+
+
+def name_words(names, common: frozenset) -> tuple[set, set]:
+    """(single distinctive words, multi-word names) for a company: the words of its registered
+    names that are neither legal suffixes, nor generic, nor everyday, nor common in the corpus."""
+    import names as nm
+    words, phrases = set(), set()
+    for n in names:
+        core = nm.core_tokens(n)
+        if len(core) >= 2:
+            phrases.add(" ".join(core))
+        for t in core:
+            if (len(t) >= 3 and not t.isdigit() and t not in nm.GENERIC_FIRST and t not in nm.COMMON_LEAD
+                    and t not in common and t not in nm.SUFFIXES):
+                words.add(t)
+    return words, phrases
+
+
+def name_check(grades: list[dict], parquet: Path, mentions: Path, massive: Path, common: frozenset,
+               log=print) -> tuple[list[dict], list[dict]]:
+    """Keep a thread for a company only if the post uses its cashtag or names it (a distinctive
+    word or the full name, in the title or the text). A bare ticker alone is too often
+    something else: THC in cannabis posts is not Tenet Healthcare, BYD the carmaker is not Boyd
+    Gaming, DTC is direct-to-consumer (found 2026-10-27). False negatives are acceptable."""
+    import re
+    import duckdb
+    import pyarrow as pa
+    if not grades or not (parquet / "posts").exists():
+        log("  name check skipped: no corpus here")
+        return grades, []
+    con = duckdb.connect()
+    con.register("want", pa.Table.from_pylist([{"post_id": g["post_id"], "cik": g["cik"]} for g in grades]))
+    texts = dict(con.execute(f"""select p.id, lower(coalesce(p.title, '') || ' ' || coalesce(p.selftext, ''))
+                                 from read_parquet('{parquet}/posts/*.parquet') p
+                                 where p.id in (select post_id from want)""").fetchall())
+    cash = set()
+    if mentions.exists():
+        cash = {(pid, c) for pid, c in con.execute(
+            f"""select distinct m.post_id, m.cik from read_parquet('{mentions}') m join want w
+                on w.post_id = m.post_id and w.cik = m.cik where m.method = 'cashtag'""").fetchall()}
+    names: dict[str, set] = {}
+    for g in grades:
+        names.setdefault(g["cik"], set()).add(g.get("name") or "")
+    snaps = list((massive / "snapshots").glob("*.parquet"))
+    if snaps:
+        con.register("ciks", pa.Table.from_pylist([{"cik": c} for c in names]))
+        for c, n in con.execute(f"select distinct s.cik, s.name from read_parquet('{massive}/snapshots/*.parquet') s "
+                                "join ciks k on k.cik = s.cik where s.name is not null").fetchall():
+            names[c].add(n)
+    vocab = {c: name_words(ns, common) for c, ns in names.items()}
+    keep, dropped = [], []
+    for g in grades:
+        t = texts.get(g["post_id"])
+        words, phrases = vocab[g["cik"]]
+        ok = (t is None or (g["post_id"], g["cik"]) in cash
+              or any(re.search(rf"\b{re.escape(w)}\b", t) for w in words)
+              or any(ph in t for ph in phrases))
+        (keep if ok else dropped).append(g)
+    log(f"  name check: {len(dropped):,} of {len(grades):,} threads dropped (no cashtag and no company name "
+        f"in the post); most dropped: " + ", ".join(f"{t} {n}" for t, n in
+                                                  Counter(g.get('ticker') for g in dropped).most_common(12)))
+    return keep, dropped
+
+
+def splits_for(eodhd: Path, code: str | None) -> list[tuple[str, float]]:
+    from urllib.parse import quote
+    import pyarrow.parquet as pq
+    if not code:
+        return []
+    p = eodhd / "splits" / (quote(code, safe="") + ".parquet")
+    if not p.exists():
+        return []
+    t = pq.read_table(p).to_pydict()
+    return [(str(d)[:10], float(r)) for d, r in zip(t["date"], t["ratio"]) if r]
+
+
+def attach_health(evs: list[dict], universe: Path, eodhd: Path, facts_dir: Path) -> None:
+    """Each event's point-in-time financial health at its month (fundamentals.gate)."""
+    import duckdb
+    import pyarrow as pa
+    import fundamentals as fd
+    if not evs:
+        return
+    facts = fd.Facts(facts_dir)
+    code = {}
+    if universe.exists():
+        con = duckdb.connect()
+        con.register("want", pa.Table.from_pylist([{"month": e["month"], "cik": e["cik"]} for e in evs]))
+        code = {(m, c): k for m, c, k in con.execute(
+            f"select w.month, w.cik, u.code from want w join read_parquet('{universe}') u "
+            "on u.month = w.month and u.cik = w.cik").fetchall()}
+    for e in evs:
+        m = fd.metrics(facts.get(e["cik"]), e["month"][:10], splits_for(eodhd, code.get((e["month"], e["cik"]))))
+        status, why = fd.gate(m)
+        e["health"] = {"status": status, "why": why, "summary": fd.describe(m),
+                       **{k: m.get(k) for k in ("cash", "debt", "ocf_ttm", "revenue_ttm", "revenue_growth",
+                                                "dilution", "runway_years")}}
+
+
 def run_crowd(a, grades: list[dict], years: tuple[int, int]) -> int:
     """The crowd rule: counts per level first (blue chips out, and in for scale), then the
     outcomes of the chosen level, once."""
     import duckdb
     from darling_census import blue_chips
+    from entity_resolver import load_common_words
+    if not a.no_name_check:
+        grades, _ = name_check(grades, Path(a.parquet), Path(a.mentions), Path(a.massive),
+                               load_common_words(Path(a.common_words)))
     chips = blue_chips(duckdb.connect(), Path(a.features) / "universe.parquet", a.blue_chip_top)
     print(f"blue chips: top {a.blue_chip_top} by 60-day dollar volume that month and twelve months before "
           f"({len({c for _, c in chips}):,} companies, {len(chips):,} company-months)")
@@ -552,25 +677,49 @@ def run_crowd(a, grades: list[dict], years: tuple[int, int]) -> int:
     inspect_crowd(grades, a.inspect, lv, chips, titles, ran=ran, runup=runup)
 
     evs = crowd_events(grades, lv, years, chips, ran)
+    # the watch list (user, 2026-10-30: "add NVDA ... darling posts before and after the bitcoin hype,
+    # and before the AI peak"): the same rule with the blue-chip filter off for these stocks only;
+    # shown apart, never counted in the rule's track record
+    watch = {t.upper() for t in a.watch}
+    wgrades = [g for g in grades if (g.get("ticker") or "").upper() in watch]
+    wevs = crowd_events(wgrades, lv, years, frozenset(), ran)
+    for e in wevs:
+        e["watch"], e["blue_chip"] = True, (e["month"], e["cik"]) in chips
+    main_keys = {(e["month"], e["cik"]) for e in evs}
+    wevs = [e for e in wevs if (e["month"], e["cik"]) not in main_keys]
+    attach_health(evs + wevs, Path(a.features) / "universe.parquet", Path(a.eodhd), Path(a.facts))
     con = open_db(Path(a.features))
-    months = sorted({e["month"] for e in evs})
+    months = sorted({e["month"] for e in evs + wevs})
     rows, cells, months_ = outcome_tables(con, months) if months else ({}, {}, {})
     res = {"rule": "crowd", "level": asdict(lv), "blue_chip_top": a.blue_chip_top, "runup": [RUNUP, RUNUP_MONTHS],
            "counts": table,
            "outcomes": report(f"{lv.name}, crowd rule, blue chips out", evs, rows, cells, months_)}
+    # the financial-health gate (fundamentals.gate, fixed before looking): the same darlings split
+    # by whether their balance sheet passed at the darling month
+    res["by_health"] = {}
+    for st in ("pass", "fail", "unknown"):
+        sub = [e for e in evs if (e.get("health") or {}).get("status") == st]
+        res["by_health"][st] = report(f"{lv.name}, health gate {st.upper()} ({len(sub)} darlings)", sub, rows, cells, months_)
+    fails = Counter(w.split(" ")[0] for e in evs for w in (e.get("health") or {}).get("why", [])
+                    if (e.get("health") or {}).get("status") == "fail")
+    print(f"\nhealth gate reasons among the failing darlings: {dict(fails)}")
     print(f"\n{sum(e['late'] for e in evs)} of {len(evs)} darlings rest on a thread holding content written "
           f"after its first cutoff")
-    print("\nthe darlings, with 1y, 3y and 5y outcomes (excess vs S&P, best multiple; n/a = not ended):")
-    for e in evs:
+    print("\nthe darlings, with 1y, 3y and 5y outcomes (excess vs S&P, best multiple; n/a = not ended); "
+          "watch-list events (blue-chip filter off) marked W:")
+    for e in sorted(evs + wevs, key=lambda e: (e["month"], e["ticker"] or "")):
         o1, o3, o5 = (rows.get((e["month"], e["cik"], y)) or {} for y in HORIZONS)
         first = titles.get(e["threads"][0], "") if e["threads"] else ""
         print(f"  {e['month'][:7]} {e['ticker'] or '?':6s} {(e['name'] or '')[:22]:22s} bulls {e['bulls']} bears "
               f"{e['bears']} authors {e['authors']} cmts {e['comments']:5d} cred {e['credibility']:.1f} "
               f"6m {runup.get((e['month'], e['cik'])) or float('nan'):.2f}x  "
-              f"1y {fmt_outcome(o1)}  3y {fmt_outcome(o3)}  5y {fmt_outcome(o5)}  | {first[:55]}")
+              f"1y {fmt_outcome(o1)}  3y {fmt_outcome(o3)}  5y {fmt_outcome(o5)}  | {first[:55]}"
+              + ("  W" + (" blue chip" if e.get("blue_chip") else "") if e.get("watch") else "")
+              + f"  [{(e.get('health') or {}).get('status', '?')}: {(e.get('health') or {}).get('summary', '')}]")
     out = Path(a.out or f"data/experiments/darlings_crowd_{a.split}_{a.variant}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     res["events"] = evs
+    res["watch_events"] = wevs
     out.write_text(json.dumps(res, default=str, indent=1))
     print(f"\nwrote {out}")
     return 0
@@ -583,22 +732,29 @@ def main(argv=None) -> int:
     p.add_argument("--variant", default="identified")
     p.add_argument("--prompt", default=None, help="grades of this prompt (default THESIS_PROMPT, else thesis_v1)")
     p.add_argument("--split", default="dev", choices=sorted(SPLIT_YEARS))
-    p.add_argument("--inspect", nargs="*", default=["ASML", "RKLB"])
+    p.add_argument("--inspect", nargs="*", default=["ASML", "RKLB", "NVDA"])
+    p.add_argument("--watch", nargs="*", default=["ASML", "RKLB", "NVDA"],
+                   help="crowd rule: also report these stocks' darling months with the blue-chip filter off")
     p.add_argument("--titles", default="data/ui/threads.json.zst")
     p.add_argument("--mentions", default="data/features/mentions.parquet")
     p.add_argument("--out", default=None, help="default data/experiments/darlings_<split>_<variant>.json")
-    p.add_argument("--grades-dir", default=None, help="where the grades file is (default --features)")
+    p.add_argument("--grades-dir", nargs="+", default=None,
+                   help="where the grades files are (default --features); several are merged")
     p.add_argument("--parquet", default="data/corpus/parquet", help="for thread titles not in the browser export")
     p.add_argument("--rule", default="thread", choices=["thread", "crowd"],
                    help="thread: one qualifying thread makes a darling; crowd: the company's bullish threads "
                         "over LOOKBACK months, at any point in time, blue chips out")
     p.add_argument("--eodhd", default="data/market/eodhd", help="crowd rule: prices for the run-up filter")
+    p.add_argument("--massive", default="data/market/massive", help="crowd rule: company names for the name check")
+    p.add_argument("--common-words", default="data/ref/common_words.txt")
+    p.add_argument("--no-name-check", action="store_true")
+    p.add_argument("--facts", default="data/ref/companyfacts", help="crowd rule: SEC company facts (fundamentals.py pull)")
     p.add_argument("--blue-chip-top", type=int, default=BLUE_CHIP_TOP,
                    help="crowd rule: blue chip = top N by dollar volume that month and a year before (0 = keep them)")
     a = p.parse_args(argv)
     prompt = a.prompt or prompt_name()
     years = SPLIT_YEARS[a.split]
-    grades = load_grades(Path(a.grades_dir or a.features), a.variant, prompt)
+    grades = merge_grades([Path(d) for d in (a.grades_dir or [a.features])], a.variant, prompt)
     if years[0] <= 2022 and years[1] >= 2021:
         mark_holdout_used(f"darlings:{a.split}:{a.variant}")
     print(f"{len(grades):,} graded threads ({a.variant}, prompt {prompt}); split {a.split} {years[0]}-{years[1]}")

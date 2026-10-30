@@ -235,9 +235,16 @@ def test_timeline_and_stock_chart_pages(tmp_path):
                                 "prices": [["2023-04-03", 4.0], ["2024-04-01", 5.5], ["2025-04-01", 25.0]]}},
             "rule": {"bulls": 2, "authors": 2, "comments": 50, "credibility": 3.5}, "runup": [2.0, 6],
             "summary": {"3": {"n": 78, "p_beat": 0.27, "p_loss": 0.22, "matched": {"p_beat": 0.30, "p_loss": 0.13}}}}
+    data["events"][0]["health"] = {"status": "fail", "why": ["runway 1.2y"], "summary": "cash $300M, runway 1.2y"}
+    data["events"].append({"ticker": "NVDA", "cik": "2", "month": "2016-06-01", "name": "NVIDIA", "keys": [],
+                           "bulls": 2, "authors": 2, "comments": 90, "credibility": 5.0, "watch": True, "blue_chip": True,
+                           "health": {"status": "pass", "why": [], "summary": "cash-flow positive"}, "outcome": {}})
+    data["watch"] = ["NVDA"]
     d = tsv.Darlings.from_bytes(zstd.ZstdCompressor().compress(json.dumps(data).encode()))
     store = tsv.Store([v2("p9", 0.0, 3, 5)])
-    httpd = tsv.serve(store, "pw", 0, tsv.DarlingsBox(d))
+    saved = {}
+    ratings = tsv.Ratings(load=lambda: b'{"GME:2019-06": {"rating": "no"}}', save=lambda b: saved.update(blob=b))
+    httpd = tsv.serve(store, "pw", 0, tsv.DarlingsBox(d, ratings=ratings))
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -254,6 +261,26 @@ def test_timeline_and_stock_chart_pages(tmp_path):
         code, post = get(base + "/darling/p1_1")
         assert code == 200 and "Killing Me Softly" in post and "/stock/RKLB" in post and "&larr; timeline" in post
         assert get(base + "/stock/NOPE")[0] == 404 and get(base + "/darling/nope")[0] == 404
+        assert "finances fail: runway 1.2y" in home and "watch list &middot; blue chip then" in home
+        assert "Your verdicts: 0 of 2 darlings rated" in home and "rate(this,'RKLB:2024-04','act')" in home
+        def post(body, password="pw"):
+            req = urllib.request.Request(base + "/rate", data=json.dumps(body).encode(), method="POST",
+                                         headers={"Content-Type": "application/json"})
+            if password:
+                req.add_header("Authorization", "Basic " + base64.b64encode(f"x:{password}".encode()).decode())
+            try:
+                with urllib.request.urlopen(req) as r:
+                    return r.status, r.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode()
+        assert post({"id": "RKLB:2024-04", "rating": "act"}, password=None)[0] == 401
+        assert post({"id": "RKLB:2024-04", "rating": "maybe"})[0] == 400
+        code, cur = post({"id": "RKLB:2024-04", "rating": "act", "reason": "Neutron + contracts"})
+        assert code == 200 and json.loads(cur)["rating"] == "act"
+        assert json.loads(saved["blob"])["RKLB:2024-04"]["reason"] == "Neutron + contracts"
+        home = get(base + "/")[1]
+        assert "Your verdicts: 1 of 2" in home and "class='on' onclick=\"rate(this,'RKLB:2024-04','act')" in home
+        assert post({"id": "RKLB:2024-04", "rating": "clear"})[0] == 200 and "RKLB:2024-04" not in json.loads(saved["blob"])
     finally:
         httpd.shutdown()
     plain = tsv.serve(store, "pw", 0)            # no darling export yet: the grid is the landing page

@@ -40,6 +40,8 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 KEY = "data/ui/threads.json.zst"
 DARLINGS_KEY = "data/ui/darlings.json.zst"
+RATINGS_KEY = "data/ui/darling_ratings.json"
+RATINGS = (("act", "Would act"), ("no", "Wouldn't"), ("unsure", "Unsure"))
 PAGE_SIZE = 150
 # the model's five stance levels (the rubric's levels sit at -1, -0.5, 0, 0.5, 1; the decoded
 # value is probability-weighted, so the bins are the midpoints between levels)
@@ -507,6 +509,49 @@ class Darlings:
         return t if t in self.by_ticker else None
 
 
+def event_id(e: dict) -> str:
+    return f"{e['ticker']}:{e['month'][:7]}"
+
+
+class Ratings:
+    """The user's verdict on each darling event (user decision 2026-10-30: rate the darlings by
+    hand, so the rule can be checked against the user's own method rather than tuned on
+    returns). ``load``/``save`` move the JSON to and from the bucket."""
+
+    def __init__(self, load=None, save=None):
+        self._save = save
+        self.data: dict[str, dict] = {}
+        if load:
+            try:
+                self.data = json.loads(load() or b"{}")
+            except Exception as e:
+                print(f"[thread-ui] no darling ratings yet ({type(e).__name__})", flush=True)
+
+    def set(self, eid: str, rating: str, reason: str) -> dict:
+        if rating not in {k for k, _ in RATINGS} and rating != "clear":
+            raise ValueError(rating)
+        if rating == "clear":
+            self.data.pop(eid, None)
+        else:
+            self.data[eid] = {"rating": rating, "reason": reason[:2000],
+                              "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        if self._save:
+            self._save(json.dumps(self.data, indent=1, ensure_ascii=False).encode())
+        return self.data.get(eid) or {}
+
+
+RATE_JS = """
+async function rate(btn, eid, val){
+  const box = btn.closest('.rate'); const reason = box.querySelector('input').value;
+  const r = await fetch('/rate', {method:'POST', headers:{'Content-Type':'application/json'},
+                                  body: JSON.stringify({id: eid, rating: val, reason: reason})});
+  if(!r.ok){ box.querySelector('.st').textContent = 'not saved (' + r.status + ')'; return; }
+  box.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === val && val !== 'clear'));
+  box.querySelector('.st').textContent = val === 'clear' ? 'cleared' : 'saved';
+}
+"""
+
+
 DARLING_CSS = """
 .tl{border-left:3px solid var(--line);margin:0 0 0 8px;padding:0 0 0 20px}
 .yr{font-size:20px;font-weight:700;margin:22px 0 10px -32px;background:var(--bg);display:inline-block;padding:2px 8px;
@@ -525,6 +570,12 @@ border:1px solid var(--line);margin:4px 6px 0 0}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:4px}
 .legend i{display:inline-block;width:12px;height:12px;border-radius:50%;vertical-align:-1px;margin-right:5px}
 .legend i.l{border-radius:0;width:2px;height:14px;background:var(--bear)}
+.rate{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:10px;padding-top:8px;border-top:1px dashed var(--line)}
+.rate button{font-size:13px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);background:var(--card);
+color:var(--ink);cursor:pointer}.rate button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.rate input{flex:1;min-width:140px;font-size:14px;padding:5px 8px;border:1px solid var(--line);border-radius:8px}
+.rate .st{font-size:12px;color:var(--muted)}
+.pill.warn{color:#92400e;border-color:#f59e0b}
 """
 
 
@@ -549,7 +600,30 @@ def outcome_pills(e: dict) -> str:
     return "".join(out)
 
 
-def event_html(d: Darlings, e: dict, link_ticker: bool = True) -> str:
+def health_pill(e: dict) -> str:
+    h = e.get("health") or {}
+    st = h.get("status")
+    if not st:
+        return ""
+    cls = {"pass": "up", "fail": "down"}.get(st, "")
+    why = ("; ".join(h.get("why") or []) if st == "fail" else h.get("summary") or "")
+    label = {"pass": "finances pass", "fail": "finances fail", "unknown": "finances unknown"}[st]
+    return f"<span class='pill {cls}' title='{esc(h.get('summary') or '')}'>{label}{': ' + esc(why) if why else ''}</span>"
+
+
+def rate_html(e: dict, ratings: "Ratings | None") -> str:
+    if ratings is None:
+        return ""
+    eid = event_id(e)
+    cur = ratings.data.get(eid) or {}
+    btns = "".join(f"<button data-v={k} class='{'on' if cur.get('rating') == k else ''}' "
+                   f"onclick=\"rate(this,'{esc(eid)}','{k}')\">{label}</button>" for k, label in RATINGS)
+    return (f"<div class=rate>{btns}<button data-v=clear onclick=\"rate(this,'{esc(eid)}','clear')\">clear</button>"
+            f"<input placeholder='why (optional)' value='{esc(cur.get('reason') or '')}'>"
+            f"<span class=st>{'rated' if cur else ''}</span></div>")
+
+
+def event_html(d: Darlings, e: dict, link_ticker: bool = True, ratings: "Ratings | None" = None) -> str:
     posts = [d.by_key[k] for k in e.get("keys") or [] if k in d.by_key]
     items = "".join(f"<li><a href='/darling/{quote(r['key'])}'>{esc(r.get('title') or '(no title)')}</a> "
                     f"<span class=meta>{day(r.get('created_utc'))} &middot; r/{esc(r.get('subreddit'))} &middot; "
@@ -562,10 +636,13 @@ def event_html(d: Darlings, e: dict, link_ticker: bool = True) -> str:
              + (f"; {e.get('bears')} credible bearish" if e.get("bears") else ""))
     return (f"<div class=ev><div class=when>darling from {esc(e['month'][:7])}</div>"
             f"<div>{tk}<span class=nm>{esc(e.get('name') or '')}</span></div>"
-            f"<div class=meta>{stats}</div><div>{outcome_pills(e)}</div><ul>{items}</ul></div>")
+            f"<div class=meta>{stats}</div><div>{outcome_pills(e)}{health_pill(e)}"
+            + ("<span class='pill warn'>watch list" + (" &middot; blue chip then" if e.get("blue_chip") else "")
+               + "</span>" if e.get("watch") else "")
+            + f"</div><ul>{items}</ul>{rate_html(e, ratings)}</div>")
 
 
-def timeline_html(d: Darlings) -> bytes:
+def timeline_html(d: Darlings, ratings: "Ratings | None" = None) -> bytes:
     rule = d.data.get("rule") or {}
     runup = d.data.get("runup") or [2.0, 6]
     summ = (d.data.get("summary") or {}).get("3") or {}
@@ -580,6 +657,21 @@ def timeline_html(d: Darlings) -> bytes:
                   f"{pct_s(summ.get('p_beat'), False)} beat the S&amp;P against {pct_s((summ.get('matched') or {}).get('p_beat'), False)} "
                   f"for comparable stocks; {pct_s(summ.get('p_loss'), False)} lost most of their value for good against "
                   f"{pct_s((summ.get('matched') or {}).get('p_loss'), False)}.</p>")
+    bh = d.data.get("by_health") or {}
+    parts = []
+    for st, label in (("pass", "passed"), ("fail", "failed")):
+        m = (bh.get(st) or {}).get("3") or {}
+        if m.get("n"):
+            parts.append(f"those whose finances {label} the check: {pct_s(m.get('p_beat'), False)} beat the S&amp;P "
+                         f"after 3 years (n={m['n']}), {pct_s(m.get('p_loss'), False)} lost most of their value")
+    if parts:
+        intro += "<p class=sub>Split by the financial-health check at the darling month: " + "; ".join(parts) + ".</p>"
+    if d.data.get("watch"):
+        intro += (f"<p class=sub>Watch list ({esc(', '.join(d.data['watch']))}): their darling months are shown even "
+                  "when they were blue chips, and are not counted in the track record.</p>")
+    if ratings is not None:
+        n = sum(1 for e in d.events if event_id(e) in ratings.data)
+        intro += f"<p class=sub>Your verdicts: {n} of {len(d.events)} darlings rated.</p>"
     body, year = [], None
     for e in d.events:
         y = e["month"][:4]
@@ -587,10 +679,11 @@ def timeline_html(d: Darlings) -> bytes:
             n = sum(1 for x in d.events if x["month"][:4] == y)
             body.append(f"<div class=yr>{y} <span class=tot>{n} darling{'s' if n != 1 else ''}</span></div>")
             year = y
-        body.append(event_html(d, e))
+        body.append(event_html(d, e, ratings=ratings))
     head = (f"<div class=crumbs><a href='/grid'>all graded threads (grid) &rarr;</a></div>"
             f"<h1>Reddit darlings, {d.events[0]['month'][:4] if d.events else ''}-{year or ''}</h1>{intro}")
-    return page("Reddit darlings", head + f"<style>{DARLING_CSS}</style><div class=tl>{''.join(body)}</div>")
+    return page("Reddit darlings", head + f"<style>{DARLING_CSS}</style><script>{RATE_JS}</script>"
+                f"<div class=tl>{''.join(body)}</div>")
 
 
 def _ticks(lo: float, hi: float) -> list[float]:
@@ -653,7 +746,7 @@ def chart_svg(prices: list, posts: list[dict], events: list[dict], w: int = 760,
     return "".join(out)
 
 
-def stock_html(d: Darlings, ticker: str) -> bytes:
+def stock_html(d: Darlings, ticker: str, ratings: "Ratings | None" = None) -> bytes:
     st = d.stocks.get(ticker) or {}
     evs = d.by_ticker.get(ticker, [])
     posts = d.posts(ticker)
@@ -673,15 +766,16 @@ def stock_html(d: Darlings, ticker: str) -> bytes:
             f"<p class=sub>{len(evs)} darling event{'s' if len(evs) != 1 else ''}, {len(posts)} darling posts</p>"
             + chart + "<h2>The darling posts</h2><div class=card>" + (lst or "<p class=sub>None.</p>") + "</div>"
             + "<h2>When it was a darling, and what happened next</h2>"
-            + "<div class=tl>" + "".join(event_html(d, e, link_ticker=False) for e in evs) + "</div>")
-    return page(f"{ticker}: darling chart", f"<style>{DARLING_CSS}</style>" + body)
+            + "<div class=tl>" + "".join(event_html(d, e, link_ticker=False, ratings=ratings) for e in evs) + "</div>")
+    return page(f"{ticker}: darling chart", f"<style>{DARLING_CSS}</style><script>{RATE_JS}</script>" + body)
 
 
 class DarlingsBox:
     """Holds the darling export once it is loaded; ``loader`` is retried on use, at most once a minute."""
 
-    def __init__(self, darlings: Darlings | None = None, loader=None):
+    def __init__(self, darlings: Darlings | None = None, loader=None, ratings: Ratings | None = None):
         self.darlings, self.loader, self._tried = darlings, loader, 0.0
+        self.ratings = ratings
 
     def get(self) -> Darlings | None:
         import time
@@ -735,14 +829,14 @@ def make_handler(store: Store, password: str, box: DarlingsBox | None = None):
             ticker = store.ticker(qs.get("ticker"))
             darlings = box.get()
             if u.path == "/" and darlings is not None and "measure" not in qs and "ticker" not in qs:
-                return self._send(200, timeline_html(darlings))
+                return self._send(200, timeline_html(darlings, box.ratings))
             if u.path in ("/", "/grid"):
                 return self._send(200, grid_html(store, measure, ticker))
             if u.path.startswith("/stock/") and darlings is not None:
                 t = darlings.ticker(u.path[len("/stock/"):])
                 if t is None:
                     return self._send(404, b"not a darling stock", "text/plain")
-                return self._send(200, stock_html(darlings, t))
+                return self._send(200, stock_html(darlings, t, box.ratings))
             if u.path.startswith("/darling/") and darlings is not None:
                 r = darlings.by_key.get(u.path[len("/darling/"):])
                 if r is None:
@@ -771,6 +865,23 @@ def make_handler(store: Store, password: str, box: DarlingsBox | None = None):
                 return self._send(200, post_html(store, r, measure, ticker))
             self._send(404, b"not found", "text/plain")
 
+        def do_POST(self):  # noqa: N802
+            u = urlsplit(self.path)
+            if not self._authed():
+                return self._send(401, b"password required", "text/plain",
+                                  {"WWW-Authenticate": 'Basic realm="graded threads", charset="UTF-8"'})
+            if u.path != "/rate" or box.ratings is None:
+                return self._send(404, b"not found", "text/plain")
+            try:
+                n = min(int(self.headers.get("Content-Length") or 0), 20_000)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                cur = box.ratings.set(str(body.get("id"))[:64], str(body.get("rating")), str(body.get("reason") or ""))
+            except (ValueError, TypeError) as e:
+                return self._send(400, f"bad rating: {e}".encode(), "text/plain")
+            except Exception as e:
+                return self._send(500, f"not saved: {type(e).__name__}".encode(), "text/plain")
+            return self._send(200, json.dumps(cur).encode(), "application/json; charset=utf-8")
+
         def log_message(self, fmt, *args):  # no auth headers, no bodies
             sys.stdout.write("%s %s\n" % (self.address_string(), fmt % args))
             sys.stdout.flush()
@@ -790,7 +901,11 @@ def main() -> int:
     dpath = os.environ.get("DARLINGS_FILE")
     if path:
         store = Store.from_file(Path(path))
-        box = DarlingsBox(loader=(lambda: Darlings.from_bytes(Path(dpath).read_bytes())) if dpath else None)
+        rpath = os.environ.get("RATINGS_FILE")
+        ratings = Ratings(load=lambda: Path(rpath).read_bytes() if Path(rpath).exists() else b"{}",
+                          save=lambda b: Path(rpath).write_bytes(b)) if rpath else None
+        box = DarlingsBox(loader=(lambda: Darlings.from_bytes(Path(dpath).read_bytes())) if dpath else None,
+                          ratings=ratings)
     else:
         import time
         import bucket_sync as bs
@@ -802,7 +917,9 @@ def main() -> int:
             except Exception as e:
                 print(f"[thread-ui] waiting for {KEY} in the bucket ({type(e).__name__}); retry in 30 s", flush=True)
                 time.sleep(30)
-        box = DarlingsBox(loader=lambda: Darlings.from_bytes(bucket.get_bytes(DARLINGS_KEY)))
+        box = DarlingsBox(loader=lambda: Darlings.from_bytes(bucket.get_bytes(DARLINGS_KEY)),
+                          ratings=Ratings(load=lambda: bucket.get_bytes(RATINGS_KEY),
+                                          save=lambda b: bucket.put_bytes(RATINGS_KEY, b)))
     port = int(os.environ.get("PORT") or 8080)
     d = box.get()
     print(f"[thread-ui] {len(store.records):,} threads, "

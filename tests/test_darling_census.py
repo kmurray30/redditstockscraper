@@ -84,3 +84,22 @@ def test_chip_report_prints_ranks(tmp_path, capsys):
     assert dc.main(["--universe", str(tmp_path / "u.parquet"), "--chip-report", "2021-01-01", "--tickers", "T1", "X"]) == 0
     out = capsys.readouterr().out
     assert "T0 $0M" in out and "T1: rank 2" in out and "a year before 2" in out and "X: not eligible" in out
+
+
+def test_watch_tickers_are_written_at_every_month_blue_chip_or_not(tmp_path, capsys):
+    day = 86400
+    rk = [("1", "RKLB")]
+    posts = [{"id": c, "t": T + i * 20 * day, "a": "a" + c, "c": 3, "co": rk} for i, c in enumerate("ab")]
+    build(tmp_path, posts)
+    uni = [{"month": f"2015-{m:02d}-01", "cik": "1", "eligible": True, "adv60": 1e9} for m in range(1, 13)]
+    uni += [{"month": f"2014-{m:02d}-01", "cik": "1", "eligible": True, "adv60": 1e9} for m in range(1, 13)]
+    pq.write_table(pa.Table.from_pylist(uni), tmp_path / "u.parquet")
+    out = tmp_path / "cand.parquet"
+    base = ["--parquet", str(tmp_path), "--mentions", str(tmp_path / "m.parquet"), "--features", str(tmp_path / "f.parquet"),
+            "--years", "2015", "2015", "--tickers", "--write", str(out), "--write-level", "E",
+            "--universe", str(tmp_path / "u.parquet"), "--blue-chip-top", "1"]
+    assert dc.main(base) == 0 and pq.read_table(out).num_rows == 0          # too quiet for level E
+    assert dc.main(base + ["--watch", "RKLB", "--watch-years", "2015", "2015"]) == 0
+    got = pq.read_table(out).to_pylist()
+    assert got and all(r["cik"] == "1" for r in got) and {"month": "2015-02-01", "cik": "1"} in got
+    assert "watch-list company-months" in capsys.readouterr().out          # a blue chip, kept anyway

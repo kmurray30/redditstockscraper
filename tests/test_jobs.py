@@ -282,3 +282,15 @@ def test_fix_rebuild_keeps_the_old_universe_and_rebuilds_around_the_splits_pull(
     assert cmds[sp[0]][:2] == ["sh", "-c"] and "|| echo" in cmds[sp[0]][2]
     assert len(u) == 2 and u[0] < sp[0] < u[1]
     assert not any("validate" in n and "substantive" in n for n in names)     # the finalist stays off validate
+
+
+def test_darlings_more_grades_on_jev_and_runs_the_crowd_rule_on_every_grade_set():
+    cmds = jobs.resolve("darlings-more")
+    llm_steps = [c for c in cmds if "thesis_llm.py" in " ".join(c)]
+    assert len(llm_steps) == 5 and all("LLM_MODEL=jev-1.13.0" in c and "THESIS_PROMPT=thesis_v2" in c for c in llm_steps)
+    census = cmds[0]
+    assert census[census.index("--watch") + 1:census.index("--watch") + 4] == ["NVDA", "ASML", "RKLB"]
+    assert "--top-k" in cmds[1] and cmds[1][cmds[1].index("--top-k") + 1] == "6"
+    crowd = [c for c in cmds if "darlings.py" in " ".join(c)]
+    assert all("all" in c and "data/features/darlings_c" in c and "data/features" in c for c in crowd)
+    assert "--push" in cmds[-1] and "darling_export.py" in " ".join(cmds[-1])

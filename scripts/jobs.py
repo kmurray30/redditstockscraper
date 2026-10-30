@@ -40,7 +40,10 @@ def _py(script: str, *args: str) -> list[str]:
     return [PY, f"scripts/{script}", *args]
 
 
-_V2 = ("env", "THESIS_PROMPT=thesis_v2")   # the second prompt, carried by every v2 preset command
+_V2 = ("env", "THESIS_PROMPT=thesis_v2")
+_JEV = "LLM_MODEL=jev-1.13.0"   # the grader (user decision 2026-10-30: grading stays on Jev, no chat LLM)
+# every darling grade set, newest first (a thread graded twice keeps its newest grade)
+DARLING_GRADES = ("data/features/darlings_c", "data/features/darlings_b", "data/features/darlings", "data/features")   # the second prompt, carried by every v2 preset command
 
 
 PRESETS: dict[str, list[list[str]]] = {
@@ -302,6 +305,32 @@ PRESETS: dict[str, list[list[str]]] = {
                     *[[*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "recent",
                                   "--grades-dir", "data/features/darlings_b", "--variant", v)]
                       for v in ("identified", "blinded")]],
+    # round three of the darlings (user decisions 2026-10-30: "do all your suggestions", grading
+    # stays on Jev, NVDA on the watch list): level-B candidates with blue chips out, plus every
+    # month NVDA, ASML and RKLB had a substantive post (2012-2024, blue chip or not), six threads
+    # per company per cutoff instead of three, graded both ways on Jev (pinned here, whatever
+    # LLM_MODEL says) into data/features/darlings_c; SEC company facts for the financial-health
+    # gate; then the crowd rule over 2012-2024 on all grades so far (with the company-name
+    # check) and the timeline export.
+    "darlings-more": [_py("darling_census.py", "--years", "2019", "2024", "--write",
+                          "data/features/darlings_c/candidates.parquet", "--write-level", "B", "--blue-chip-top", "200",
+                          "--watch", "NVDA", "ASML", "RKLB", "--watch-years", "2012", "2024"),
+                      _py("thesis_funnel.py", "--only", "data/features/darlings_c/candidates.parquet", "--top-k", "6",
+                          "--out", "data/features/darlings_c/threads.parquet"),
+                      # without SEC_USER_AGENT the pull stops; the gate then reads "unknown" and the rest runs
+                      ["sh", "-c", shlex.join(_py("fundamentals.py", "pull", "--ciks-from",
+                                                  "data/features/darlings_c/candidates.parquet",
+                                                  "data/features/darlings_b/candidates.parquet",
+                                                  "data/features/darlings/candidates.parquet"))
+                       + " || echo '[darlings-more] SEC company facts not pulled; the health gate will read unknown'"],
+                      *[[*_V2, _JEV, *_py("thesis_llm.py", "--threads", "data/features/darlings_c/threads.parquet",
+                                          "--features", "data/features/darlings_c", step, "--variant", v)]
+                        for v in ("identified", "blinded") for step in ("run", "collect")],
+                      [*_V2, _JEV, *_py("thesis_llm.py", "--threads", "data/features/darlings_c/threads.parquet",
+                                        "check-blind")],
+                      *[[*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "all", "--grades-dir",
+                                    *DARLING_GRADES, "--variant", v)] for v in ("identified", "blinded")],
+                      [*_V2, *_py("darling_export.py", "--split", "all", "--grades-dir", *DARLING_GRADES, "--push")]],
     # the darling timeline for thread-ui (user request 2026-10-29): the crowd rule's events with
     # their posts, outcomes and price histories, pushed to the bucket; thread-ui reads it for /
     "darling-export": [[*_V2, *_py("darling_export.py", "--push")]],

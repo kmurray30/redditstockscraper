@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -157,3 +158,41 @@ def test_crowd_run_end_to_end(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "crowd darlings per year" in out and "DARLING" in out and "2015-01 RKLB" in out
     assert "C1 loose" in out and (tmp_path / "c.json").exists()
+    res = json.loads((tmp_path / "c.json").read_text())
+    assert res["events"][0]["health"]["status"] == "unknown" and set(res["by_health"]) == {"pass", "fail", "unknown"}
+    assert res["watch_events"] == [] and "health gate UNKNOWN (1 darlings)" in out
+
+
+def test_merge_grades_first_directory_wins(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    pq.write_table(pa.Table.from_pylist([g("p1", "1", "2015-01-01", stance=0.9)]), a / "thesis_threads_identified.thesis_v2.parquet")
+    pq.write_table(pa.Table.from_pylist([g("p1", "1", "2015-01-01", stance=-0.9), g("p2", "1", "2015-02-01")]),
+                   b / "thesis_threads_identified.thesis_v2.parquet")
+    out = dl.merge_grades([a, b, tmp_path / "none"], "identified", "thesis_v2", log=lambda m: None)
+    assert [(x["post_id"], x["stance"]) for x in out] == [("p1", 0.9), ("p2", 0.8)]
+    with pytest.raises(SystemExit):
+        dl.merge_grades([tmp_path / "none"], "identified", "thesis_v2", log=lambda m: None)
+
+
+def test_name_check_drops_bare_tickers_that_mean_something_else(tmp_path):
+    (tmp_path / "posts").mkdir()
+    posts = [{"id": "p1", "title": "THC beverages are the future", "selftext": "cannabis drinks, THC everywhere"},
+             {"id": "p2", "title": "Tenet Healthcare (THC) Q3", "selftext": "hospital margins"},
+             {"id": "p3", "title": "THC", "selftext": "short squeeze?"},
+             {"id": "p4", "title": "Thoughts on RKLB?", "selftext": "Rocket Lab's Neutron timeline"},
+             {"id": "p5", "title": "BYD sales beat Tesla", "selftext": "chinese EVs"}]
+    pq.write_table(pa.Table.from_pylist(posts), tmp_path / "posts" / "stocks.parquet")
+    pq.write_table(pa.Table.from_pylist([{"post_id": "p3", "cik": "1", "method": "cashtag"}]), tmp_path / "m.parquet")
+    gs = [g("p1", "1", "2021-01-01", ticker="THC", name="Tenet Healthcare Corporation"),
+          g("p2", "1", "2021-01-01", ticker="THC", name="Tenet Healthcare Corporation"),
+          g("p3", "1", "2021-01-01", ticker="THC", name="Tenet Healthcare Corporation"),
+          g("p4", "2", "2024-04-01", ticker="RKLB", name="Rocket Lab USA, Inc."),
+          g("p5", "3", "2024-04-01", ticker="BYD", name="Boyd Gaming Corp"),
+          g("p9", "3", "2024-04-01", ticker="BYD", name="Boyd Gaming Corp")]        # not in the corpus: kept
+    keep, dropped = dl.name_check(gs, tmp_path, tmp_path / "m.parquet", tmp_path / "massive",
+                                  frozenset({"gaming"}), log=lambda m: None)
+    assert sorted(x["post_id"] for x in dropped) == ["p1", "p5"]           # cannabis THC, the BYD carmaker
+    assert sorted(x["post_id"] for x in keep) == ["p2", "p3", "p4", "p9"]  # named, cashtag, phrase, unknown
+    words, phrases = dl.name_words(["SP Plus Corp"], frozenset({"plus"}))
+    assert words == set() and phrases == {"sp plus"}

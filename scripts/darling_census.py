@@ -138,20 +138,27 @@ def chip_report(con, universe: Path, months: list[str], tickers: list[str], top:
 
 
 def write_candidates(roll: dict, level: str, years, universe: Path, out: Path, con, log=print,
-                     blue_chip_top: int = 0) -> int:
+                     blue_chip_top: int = 0, watch: set | None = None, watch_years=None) -> int:
     """Every company-month at or above ``level`` (no cooldown, so a long darling run is graded at
     each cutoff), mapped to the cutoff that closes the window (the first of the next month) and
     kept only where the company is eligible in the universe then: that drops ETFs and funds.
-    With ``blue_chip_top`` the blue chips at that cutoff are dropped too (nothing is paid for them)."""
+    With ``blue_chip_top`` the blue chips at that cutoff are dropped too (nothing is paid for them).
+    ``watch`` ciks (the user's examples: NVDA, ASML, RKLB) are written at every month they had any
+    substantive subject post in ``watch_years``, blue chip or not."""
     import pyarrow as pa
     import pyarrow.parquet as pq
     _, au, cm = next(lv for lv in LEVELS if lv[0] == level)
-    rows = []
+    rows, watched = [], set()
+    watch = watch or set()
     for cik, series in roll.items():
         for mi, posts, authors, comments in series:
-            if years[0] <= mi // 12 <= years[1] and authors >= au and comments >= cm:
-                nxt = mi + 1
-                rows.append({"month": f"{nxt // 12}-{nxt % 12 + 1:02d}-01", "cik": cik})
+            nxt = mi + 1
+            row = {"month": f"{nxt // 12}-{nxt % 12 + 1:02d}-01", "cik": cik}
+            if cik in watch and watch_years and watch_years[0] <= mi // 12 <= watch_years[1]:
+                rows.append(row)
+                watched.add((row["month"], cik))
+            elif years[0] <= mi // 12 <= years[1] and authors >= au and comments >= cm:
+                rows.append(row)
     eligible = set()
     if universe.exists() and rows:
         con.register("cand", pa.Table.from_pylist(rows))
@@ -160,6 +167,7 @@ def write_candidates(roll: dict, level: str, years, universe: Path, out: Path, c
             f"on u.month = c.month and u.cik = c.cik where u.eligible").fetchall()}
     kept = [r for r in rows if (r["month"], r["cik"]) in eligible]
     chips = blue_chips(con, universe, blue_chip_top)
+    chips -= watched
     n_chips = sum((r["month"], r["cik"]) in chips for r in kept)
     kept = [r for r in kept if (r["month"], r["cik"]) not in chips]
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -167,7 +175,7 @@ def write_candidates(roll: dict, level: str, years, universe: Path, out: Path, c
     log(f"\nwrote {len(kept):,} grading candidates (level {level}, {len({r['cik'] for r in kept}):,} companies; "
         f"{len(rows) - len(kept) - n_chips:,} company-months dropped as not eligible: funds, ETFs, delisted"
         + (f"; {n_chips:,} as blue chips, top {blue_chip_top} by dollar volume now and a year before" if blue_chip_top > 0 else "")
-        + f") to {out}")
+        + f"; {sum((r['month'], r['cik']) in watched for r in kept):,} watch-list company-months) to {out}")
     return len(kept)
 
 
@@ -185,6 +193,9 @@ def main(argv=None) -> int:
     p.add_argument("--write-level", default="C")
     p.add_argument("--universe", default="data/features/universe.parquet",
                    help="with --write: keep only companies eligible at that cutoff (drops ETFs and funds)")
+    p.add_argument("--watch", nargs="*", default=[],
+                   help="with --write: also every month these tickers had any substantive post, blue chip or not")
+    p.add_argument("--watch-years", nargs=2, type=int, default=[2012, 2024])
     p.add_argument("--blue-chip-top", type=int, default=0,
                    help=f"with --write: drop blue chips (top N by dollar volume now and a year before; "
                         f"{BLUE_CHIP_TOP} is the darling study's choice, 0 = keep them)")
@@ -197,7 +208,8 @@ def main(argv=None) -> int:
         return 0
     years = (a.years[0], a.years[1])
     con = duckdb.connect()
-    rows = monthly(con, Path(a.parquet), Path(a.mentions), Path(a.features), years)
+    span = (min(years[0], a.watch_years[0]), max(years[1], a.watch_years[1])) if a.watch else years
+    rows = monthly(con, Path(a.parquet), Path(a.mentions), Path(a.features), span)
     tickers = {r[0]: r[1] for r in rows}
     roll = rolled(rows, con)
     per_year_posts = Counter()
@@ -225,8 +237,9 @@ def main(argv=None) -> int:
         print(f"  {y} ({len(evs)}): " + ", ".join(f"{e['ticker']} {e['month'][5:]} {e['authors']}a/{e['posts']}p/{e['comments']}c"
                                              for e in evs[:a.show]))
     if a.write:
+        watch = {c for c, tk in tickers.items() if (tk or "").upper() in {t.upper() for t in a.watch}}
         write_candidates(roll, a.write_level, years, Path(a.universe), Path(a.write), con,
-                         blue_chip_top=a.blue_chip_top)
+                         blue_chip_top=a.blue_chip_top, watch=watch, watch_years=tuple(a.watch_years))
     for t in a.tickers:
         ciks = [c for c, tk in tickers.items() if (tk or "").upper() == t.upper()]
         print(f"\n-- {t}: peak 90-day window per year (authors / posts / comments)")
