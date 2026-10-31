@@ -747,6 +747,13 @@ def _is_transient(code: int, body: str) -> bool:
     return any(w in body.lower() for w in ("timeout", "timed out", "slow down"))
 
 
+# Retries per page: with the wait capped at ARCTIC_MAX_WAIT that is about an hour of patience. Eight
+# attempts capped at 60 s (four minutes) killed a 16-hour backfill when the service was overloaded
+# (2026-10-30, StockMarket 2025-04).
+ARCTIC_ATTEMPTS = 20
+ARCTIC_MAX_WAIT = 300.0
+
+
 def _arctic_get(endpoint: str, params: dict, polite_delay: float) -> list[dict]:
     """GET one page, retrying transient failures. Shrinks ``limit`` after repeated timeouts
     (the API's own advice for "Query timed out"). The returned page records the size it
@@ -754,7 +761,7 @@ def _arctic_get(endpoint: str, params: dict, polite_delay: float) -> list[dict]:
     global _arctic_penalty
     params = {k: (_iso(v) if k in ("after", "before") else v) for k, v in params.items()}
     timeouts, last = 0, "no response"
-    for attempt in range(8):
+    for attempt in range(ARCTIC_ATTEMPTS):
         url = f"{ARCTIC_BASE}/{endpoint}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
@@ -778,7 +785,7 @@ def _arctic_get(endpoint: str, params: dict, polite_delay: float) -> list[dict]:
                 wait = float(e.headers.get("X-RateLimit-Reset") or 30)
             else:
                 timeouts += 1
-                wait = min(60.0, 2.0**attempt) + random.random()
+                wait = min(ARCTIC_MAX_WAIT, 2.0**attempt) + random.random()
                 _arctic_penalty = min(30.0, _arctic_penalty + 1.0)
                 if timeouts >= 2 and int(params.get("limit", 0) or 0) > 10:
                     params["limit"] = max(10, int(params["limit"]) // 2)
@@ -790,7 +797,7 @@ def _arctic_get(endpoint: str, params: dict, polite_delay: float) -> list[dict]:
         except (urllib.error.URLError, OSError, http.client.HTTPException, RuntimeError, ValueError) as e:
             last = repr(e)
             print(f"    {e!r}; retrying")
-            time.sleep(min(60.0, 2.0**attempt))
+            time.sleep(min(ARCTIC_MAX_WAIT, 2.0**attempt))
     raise RuntimeError(
         f"Arctic Shift kept failing (last: {last}). It is a free best-effort service and may "
         f"be overloaded: try again later or raise --delay.\n  url: {url}"
