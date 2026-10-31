@@ -740,6 +740,36 @@ is mostly for short term plays"; grading stays on Jev, never a chat LLM; NVDA on
   darling candidates graded on Jev both ways, the crowd rule over 2012-2026 (split `full`), the
   export. Many hours; a push restarts it (finished months are kept).
 
+**Backfill result (2026-10-31, `backfill-3`, exit 0).** Two crashes on the way, both Arctic
+Shift: an `http.client.IncompleteRead` (now retried like a timeout) and four minutes of 422
+timeouts on StockMarket 2025-04 (retries now 20 attempts capped at 300 s, about an hour per
+page). The download took about 25 h in all (StockMarket 2025-04, the tariff crash, alone was
+240k comments). The corpus now runs to 2026-09: 405k posts in `post_features`. **Coverage
+thins from July 2026 in every subreddit at once** (raw posts per month, June -> September:
+investing 1,869 -> 792, ValueInvesting 1,900 -> 1,032, stocks kept 684 -> 270), which reads as
+the archive losing coverage under Reddit's API wind-down rather than people posting less:
+darling counts from 2026-07 on are understated. Forward census (level B, blue chips out,
+watch list in): 487 candidate company-months, 1,602 threads, graded both ways on Jev in about
+a minute each ($0.64; lifetime $7.508 of the $9 cap; check-blind 0). Crowd rule over 2012-2026
+(split `full`), identified: **216 darlings over 171 companies, 27 in 2025 and 30 in 2026**
+(plus watch-list ASML 2026-01 and NVDA 2026-05); blinded 180. Outcomes against liquidity x
+momentum matched peers, all years, identified: 1y beat the S&P 38% vs 40%, doubled 19% vs
+11%; 3y beat 31% vs 32%, 5x 7.7% vs 2.6%, permanent loss 18% vs 12%; 5y beat 30% vs 29%, 5x 15%
+vs 6.1%, loss 21% vs 14%. Same picture as round three: more multibaggers, more ruin, no edge
+on beating the market. Health gate, identified: pass (74) 5y 5x 22% vs 5.3%, loss 15% vs 14%;
+fail (77) 5y loss 25% vs 13%; blinded does not confirm the pass group at 3y (beat 14% vs 29%,
+n 28). Of the 2025 darlings with a year of prices: GCT +216% vs the S&P, NBIS +145%, CNC
++122%, OSCR +99%, FTNT +84%, ULTA +49%, KSS +45%, APLD +43%, RKLB +41%; BYND -97%, ACHR -67%,
+SNAP -64%, GME -60%, WEN -48%, JD -44%, RDDT -41%. **Noise found in the forward list, not yet
+fixed:** GLP (Global Partners LP) is resolved from "GLP-1" drug posts (2026-06 "Everyone is
+panic selling NVO"; add GLP to `darlings.AMBIGUOUS`); QQQM (an Invesco ETF) passed as a
+company with Invesco Ltd's SEC facts; several darlings rest on threads about another company
+(ADP from a BLS-payroll thread, LNG from a weekly theme roundup, SNAP from "RDDT in Freefall",
+ASTS from a Planet Labs thread, IREN from a Nebius thread); the health line shows `shares
+-100%` for LYFT and PINS (a share-class sum that lost a class: a `fundamentals.py` bug, harmless
+to the gate but wrong); SATS 2026-05 shows the same -18% at 1, 3 and 5 years (its series ends
+early). thread-ui restarted on the new export (228 events, 173 stocks, 768 posts).
+
 **Two data-layer bugs found 2026-10-27, FIXED the same day (see "After the data fix" below; every result above this point carries them):**
 1. **Split look-ahead in `adv60`** (`prices.trailing_dollar_volume` = raw close x EODHD volume,
    and the volume is split-adjusted to the download date). Measured by `scripts/volume_check.py`
