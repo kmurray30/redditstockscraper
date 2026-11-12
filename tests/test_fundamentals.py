@@ -87,3 +87,41 @@ def test_quarters_and_years_under_different_concepts_are_pooled():
             f("2018-01-29", "2019-01-27", 11.716e9, "2019-02-21"), f("2019-01-28", "2020-01-26", 10.918e9, "2020-02-20")]}}}
     v, end = fd.ttm({"facts": {"us-gaap": rev}}, fd.REVENUE, "2020-09-01")
     assert end == "2020-07-26" and abs(v - (10.918e9 + 6.946e9 - 4.799e9)) < 1
+
+
+def test_bulk_pull_resumes_and_facts_read_from_the_zip(tmp_path):
+    import io
+    import json as _json
+    import zipfile as _zip
+    buf = io.BytesIO()
+    with _zip.ZipFile(buf, "w") as z:
+        z.writestr("CIK0000000042.json", _json.dumps({"cik": 42, "facts": {}}))
+    blob = buf.getvalue()
+
+    class Resp:
+        def __init__(self, body, status, headers):
+            self.body, self.status, self.headers = io.BytesIO(body), status, headers
+
+        def read(self, n=-1):
+            return self.body.read(n)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    out = tmp_path / "companyfacts.zip"
+    part = out.with_name(out.name + ".part")
+    part.write_bytes(blob[:10])                       # an interrupted earlier download
+
+    def opener(req, timeout=0):
+        start = int(req.headers["Range"].split("=")[1].rstrip("-"))
+        rest = blob[start:]
+        return Resp(rest, 206, {"Content-Range": f"bytes {start}-{len(blob) - 1}/{len(blob)}",
+                                "Content-Length": str(len(rest))})
+
+    assert fd.bulk_pull(out, "ua", opener=opener, log=lambda *_: None) == len(blob)
+    assert out.read_bytes() == blob and not part.exists()
+    f = fd.Facts(tmp_path / "none", bulk=out)
+    assert f.get("42") == {"cik": 42, "facts": {}} and f.get("43") is None

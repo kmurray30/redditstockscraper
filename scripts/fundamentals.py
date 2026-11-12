@@ -35,10 +35,12 @@ import gzip
 import json
 import math
 import os
+import shutil
 import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -47,6 +49,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 MIN_INTERVAL = 0.15
 DIR = Path("data/ref/companyfacts")
+# Every company's facts in one file, refreshed nightly by the SEC (1.4 GB on 2026-11-12, checked
+# with sec_bulk.py); ``Facts`` falls back to it for companies without a per-company file.
+BULK_URL = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"
+BULK = Path("data/ref/companyfacts.zip")
 
 CASH = ("CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
         "CashAndDueFromBanks", "Cash")
@@ -224,17 +230,119 @@ def describe(m: dict) -> str:
 
 
 class Facts:
-    """Lazy reader of the saved company facts."""
+    """Lazy reader of the saved company facts: a per-company file first, then the bulk zip."""
 
-    def __init__(self, root: Path = DIR):
-        self.root, self._cache = Path(root), {}
+    def __init__(self, root: Path = DIR, bulk: Path | None = BULK, cache: bool = True):
+        self.root, self._cache, self.keep = Path(root), {}, cache
+        self._zip = zipfile.ZipFile(bulk) if bulk and Path(bulk).exists() else None
+        self._names = None
+
+    def member(self, cik: str) -> str | None:
+        if self._zip is None:
+            return None
+        if self._names is None:
+            self._names = {Path(n).stem.upper().removeprefix("CIK"): n for n in self._zip.namelist()}
+        return self._names.get(str(cik).zfill(10))
 
     def get(self, cik: str) -> dict | None:
         cik = str(cik).zfill(10)
-        if cik not in self._cache:
-            p = self.root / f"{cik}.json.gz"
-            self._cache[cik] = json.loads(gzip.decompress(p.read_bytes())) if p.exists() else None
-        return self._cache[cik]
+        if cik in self._cache:
+            return self._cache[cik]
+        p = self.root / f"{cik}.json.gz"
+        if p.exists():
+            out = json.loads(gzip.decompress(p.read_bytes()))
+        else:
+            name = self.member(cik)
+            out = json.loads(self._zip.read(name)) if name else None
+        if self.keep:
+            self._cache[cik] = out
+        return out
+
+
+def bulk_pull(path: Path, ua: str, opener=None, log=print, chunk: int = 1 << 22) -> int:
+    """Download the nightly companyfacts.zip to ``path``, resuming a partial ``.part`` file and
+    checking the final size against the server's. Returns the size in bytes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(path.parent).free
+    log(f"[fundamentals] {free / 1e9:,.1f} GB free on the volume")
+    if free < 3e9:
+        raise SystemExit("less than 3 GB free: not downloading the 1.4 GB companyfacts.zip")
+    part = path.with_name(path.name + ".part")
+    have = part.stat().st_size if part.exists() else 0
+    headers = {"User-Agent": ua, "Accept-Encoding": "identity"}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    req = urllib.request.Request(BULK_URL, headers=headers)
+    with (opener or urllib.request.urlopen)(req, timeout=120) as r:
+        total = (r.headers.get("Content-Range") or "").rpartition("/")[2] or r.headers.get("Content-Length")
+        total = int(total) if total and total.isdigit() else None
+        if have and r.status != 206:   # the server ignored the range: start over
+            have = 0
+        if have and not (r.headers.get("Content-Range") or "").startswith(f"bytes {have}-"):
+            have = 0
+        mode = "ab" if have else "wb"
+        if have and r.headers.get("Content-Length"):
+            total = have + int(r.headers["Content-Length"])
+        done, last = have, time.time()
+        with open(part, mode) as f:
+            while True:
+                b = r.read(chunk)
+                if not b:
+                    break
+                f.write(b)
+                done += len(b)
+                if time.time() - last > 30:
+                    log(f"  {done / 1e6:,.0f} MB" + (f" of {total / 1e6:,.0f} MB" if total else ""))
+                    last = time.time()
+    size = part.stat().st_size
+    if total and size != total:
+        raise SystemExit(f"companyfacts.zip is {size:,} bytes, expected {total:,}: run again to resume")
+    with zipfile.ZipFile(part) as z:   # a truncated zip has no readable directory
+        n = len(z.namelist())
+    os.replace(part, path)
+    log(f"[fundamentals] companyfacts.zip: {size / 1e6:,.0f} MB, {n:,} companies -> {path}")
+    return size
+
+
+def inspect_bulk(facts: "Facts", universe: Path, tickers: list[str], log=print) -> None:
+    """What the bulk file holds for our universe, and the raw facts behind a few known problems."""
+    import duckdb
+    con = duckdb.connect()
+    rows = con.execute(f"""select cik, min(month) first, max(month) last, arg_max(ticker, month) ticker
+                            from read_parquet('{universe}') where eligible group by cik""").fetchall()
+    names = list(facts._zip.namelist()) if facts._zip else []
+    log(f"[inspect] {len(names):,} files in the zip, e.g. {names[:3]}")
+    by_year: dict[str, list[int]] = {}
+    for cik, first, last, _ in rows:
+        by_year.setdefault(first[:4], [0, 0])
+        by_year[first[:4]][0] += 1
+        by_year[first[:4]][1] += facts.member(cik) is not None
+    log(f"[inspect] universe companies ever eligible: {len(rows):,}; in the zip by first eligible year: "
+        + ", ".join(f"{y} {h}/{n}" for y, (n, h) in sorted(by_year.items())))
+    cik_of = {t: c for c, _, _, t in rows}
+    pat = ("Revenue", "Cash", "Borrow", "Debt", "ProfitLoss", "OperatingActivities", "Equity", "Assets",
+           "Liabilit", "GrossProfit", "Shares", "PropertyPlant")
+    for t in tickers:
+        cik = cik_of.get(t)
+        f = facts.get(cik) if cik else None
+        if not f:
+            log(f"\n-- {t}: cik {cik}, no facts")
+            continue
+        ns = {k: len(v) for k, v in (f.get("facts") or {}).items()}
+        log(f"\n-- {t} cik {cik} {f.get('entityName')}: concepts per namespace {ns}")
+        for k, v in sorted(((f.get("facts") or {}).get("dei") or {}).items()):
+            if "Shares" in k:
+                for unit, rs in v["units"].items():
+                    last8 = sorted(rs, key=lambda r: (r.get("end", ""), r.get("filed", "")))[-8:]
+                    log(f"   dei {k} [{unit}]: " + "; ".join(f"{r.get('end')} filed {r.get('filed')} {r.get('form')} "
+                                                        f"{r.get('accn')} {r['val']:,.0f}" for r in last8))
+        if "ifrs-full" in (f.get("facts") or {}):
+            hits = []
+            for k, v in sorted(f["facts"]["ifrs-full"].items()):
+                if any(p in k for p in pat):
+                    units = {u: max((r.get("end", "") for r in rs), default="") for u, rs in v["units"].items()}
+                    hits.append(f"{k} {units}")
+            log(f"   ifrs-full ({len(hits)} matching): " + " | ".join(hits[:80]))
 
 
 def fetch(cik: str, ua: str, opener=None) -> bytes | None:
@@ -287,11 +395,26 @@ def main(argv=None) -> int:
     a1 = sp.add_parser("pull")
     a1.add_argument("--ciks-from", nargs="+", required=True, help="parquet files with a cik column")
     a1.add_argument("--out", default=str(DIR))
+    b1 = sp.add_parser("bulk-pull", help="download the nightly companyfacts.zip (resumable)")
+    b1.add_argument("--out", default=str(BULK))
+    b1.add_argument("--inspect", nargs="*", default=None, metavar="TICKER",
+                    help="then print what the zip holds for the universe and these tickers")
+    b1.add_argument("--universe", default="data/features/universe.parquet")
     a2 = sp.add_parser("show")
     a2.add_argument("--cik", required=True)
     a2.add_argument("--asof", required=True, help="one date or several, comma-separated")
     a2.add_argument("--dir", default=str(DIR))
     a = p.parse_args(argv)
+    if a.cmd == "bulk-pull":
+        from edgar import user_agent
+        out = Path(a.out)
+        if not out.exists():
+            bulk_pull(out, user_agent())
+        else:
+            print(f"[fundamentals] {out} already here ({out.stat().st_size / 1e6:,.0f} MB)", flush=True)
+        if a.inspect is not None:
+            inspect_bulk(Facts(bulk=out, cache=False), Path(a.universe), a.inspect)
+        return 0
     if a.cmd == "pull":
         import pyarrow.parquet as pq
         from edgar import user_agent
