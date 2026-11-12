@@ -611,6 +611,22 @@ def health_pill(e: dict) -> str:
     return f"<span class='pill {cls}' title='{esc(h.get('summary') or '')}'>{label}{': ' + esc(why) if why else ''}</span>"
 
 
+def small_pill(e: dict) -> str:
+    if not e.get("small"):
+        return ""
+    return ("<span class='pill down' title='A small company (two least-traded fifths of the market that month). "
+            "Small companies that Reddit wrote substantive posts about ended in permanent loss more often than "
+            "comparable companies, in every period tested 2012-2025: check the balance sheet first.'>"
+            "small cap: higher ruin risk</span>")
+
+
+def mcap_note(e: dict) -> str:
+    m = e.get("mcap")
+    if not m:
+        return ""
+    return f"; market cap then ${m / 1e9:,.1f}B" if m >= 1e9 else f"; market cap then ${m / 1e6:,.0f}M"
+
+
 def rate_html(e: dict, ratings: "Ratings | None") -> str:
     if ratings is None:
         return ""
@@ -627,8 +643,12 @@ def event_html(d: Darlings, e: dict, link_ticker: bool = True, ratings: "Ratings
     posts = [d.by_key[k] for k in e.get("keys") or [] if k in d.by_key]
     items = "".join(f"<li><a href='/darling/{quote(r['key'])}'>{esc(r.get('title') or '(no title)')}</a> "
                     f"<span class=meta>{day(r.get('created_utc'))} &middot; r/{esc(r.get('subreddit'))} &middot; "
-                    f"{int(r.get('n_comments') or 0)} comments &middot; cred {r.get('credibility_10') or '?'}/10</span></li>"
-                    for r in posts)
+                    f"{int(r.get('n_comments') or 0)} comments &middot; cred {r.get('credibility_10') or '?'}/10</span>"
+                    + (" <span class='pill up' title='The post argues revenue, margins, cash flow or debt more than "
+                       "price action. Companies discussed this way beat comparable stocks slightly more often, with no "
+                       "extra permanent losses (consistent in every period, not statistically proven).'>"
+                       "fundamentals talk</span>" if r.get("fund_talk") else "")
+                    + "</li>" for r in posts)
     tk = (f"<a class=tk href='/stock/{quote(e['ticker'])}'>{esc(e['ticker'])}</a>" if link_ticker
           else f"<b class=tk>{esc(e['ticker'])}</b>")
     stats = (f"{e.get('bulls')} bullish threads by {e.get('authors')} authors, {int(e.get('comments') or 0):,} comments, "
@@ -636,7 +656,7 @@ def event_html(d: Darlings, e: dict, link_ticker: bool = True, ratings: "Ratings
              + (f"; {e.get('bears')} credible bearish" if e.get("bears") else ""))
     return (f"<div class=ev><div class=when>darling from {esc(e['month'][:7])}</div>"
             f"<div>{tk}<span class=nm>{esc(e.get('name') or '')}</span></div>"
-            f"<div class=meta>{stats}</div><div>{outcome_pills(e)}{health_pill(e)}"
+            f"<div class=meta>{stats}{mcap_note(e)}</div><div>{outcome_pills(e)}{health_pill(e)}{small_pill(e)}"
             + ("<span class='pill warn'>watch list" + (" &middot; blue chip then" if e.get("blue_chip") else "")
                + "</span>" if e.get("watch") else "")
             + f"</div><ul>{items}</ul>{rate_html(e, ratings)}</div>")
@@ -666,6 +686,10 @@ def timeline_html(d: Darlings, ratings: "Ratings | None" = None) -> bytes:
                          f"after 3 years (n={m['n']}), {pct_s(m.get('p_loss'), False)} lost most of their value")
     if parts:
         intro += "<p class=sub>Split by the financial-health check at the darling month: " + "; ".join(parts) + ".</p>"
+    intro += ("<p class=sub>Markers from the open heuristic study: a red <b>small cap</b> pill means the company was "
+              "small when it became a darling (Reddit-discussed small caps ended in permanent loss more often than "
+              "comparable companies in every period); a green <b>fundamentals talk</b> pill on a post means it argues "
+              "the business rather than the chart.</p>")
     if d.data.get("watch"):
         intro += (f"<p class=sub>Watch list ({esc(', '.join(d.data['watch']))}): their darling months are shown even "
                   "when they were blue chips, and are not counted in the track record.</p>")

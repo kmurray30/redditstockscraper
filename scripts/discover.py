@@ -152,13 +152,19 @@ def registration_hash() -> str:
 # ------------------------------------------------------------------ the panel
 
 def build_panel(con, parquet: Path, mentions: Path, pfeat: Path, pclass: Path, features: Path,
-                first: str, last: str, log=print, sic_path: Path | None = None) -> int:
+                first: str, last: str, log=print, sic_path: Path | None = None,
+                fund_path: Path | None = None) -> int:
     """One row per eligible company-month in [first, last] with the point-in-time features."""
     bad = ", ".join(f"'{a}'" for a in BAD_AUTHORS)
     rel = ", ".join(f"'{m}'" for m in RELIABLE)
     con.execute(f"create or replace view posts as select * from read_parquet('{parquet}/posts/*.parquet', union_by_name=true)")
     con.execute(f"create or replace view comments as select * from read_parquet('{parquet}/comments/*.parquet', union_by_name=true)")
     con.execute(f"create or replace view universe as select * from read_parquet('{features / 'universe.parquet'}')")
+    fp = Path(fund_path) if fund_path else None
+    con.execute(f"create or replace view fund as select month, cik, health, mcap from read_parquet('{fp}')"
+                if fp and fp.exists() else
+                "create or replace view fund as select null::varchar as month, null::varchar as cik, "
+                "null::varchar as health, null::double as mcap where false")
     sic = Path(sic_path) if sic_path else None
     con.execute(f"create or replace view sic as select * from read_parquet('{sic}')" if sic and sic.exists() else
                 "create or replace view sic as select null::varchar cik, null::varchar sic, null::varchar division where false")
@@ -231,8 +237,11 @@ def build_panel(con, parquet: Path, mentions: Path, pfeat: Path, pclass: Path, f
                  coalesce(p.prior_subst, 0) prior_subst
           from u left join agg a using (month, cik) left join prior p using (month, cik))
         , k as (select j.*, coalesce(sic.division, 'none') division,
-                       coalesce(regexp_matches(sic.sic, '^(357|36|48|737)'), false) tech
-                from j left join sic using (cik))
+                       coalesce(regexp_matches(sic.sic, '^(357|36|48|737)'), false) tech,
+                       coalesce(fu.health, 'unknown') health, fu.mcap,
+                       case when fu.mcap is null then 0
+                            else ntile(5) over (partition by j.month, fu.mcap is null order by fu.mcap) end mcap_q
+                from j left join sic using (cik) left join fund fu on fu.month = j.month and fu.cik = j.cik)
         select j.*,
                n_subst >= 1 and percent_rank() over (partition by month, n_subst >= 1 order by n_subst) >= 0.9 subst_top,
                n_posts >= 1 and percent_rank() over (partition by month, n_posts >= 1 order by n_posts) >= 0.99 crowded
@@ -317,9 +326,9 @@ def verdicts(res: dict, metric: str) -> dict[str, str]:
     return out
 
 
-def evaluate(con, n_boot: int = N_BOOT, log=print) -> dict:
+def evaluate(con, n_boot: int = N_BOOT, log=print, classes=None) -> dict:
     res = {}
-    for name, family, pred, meaning in CLASSES:
+    for name, family, pred, meaning in classes or CLASSES:
         r = {"family": family, "pred": pred, "meaning": meaning}
         for per, (first, last, h0, other) in PERIODS.items():
             r[per] = {}
@@ -428,6 +437,63 @@ def robustness(con, n_boot: int = N_BOOT, log=print) -> dict:
     return out
 
 
+# ------------------------------------------------------------------ round 3: the health gate
+
+# Fixed 2026-11-12 after rounds 1-2 and before the fundamentals table existed (user: "yes to all"):
+# does the balance sheet explain round 2's one robust finding, and does it sharpen the one
+# consistent lean? Health = fundamentals.gate at the cohort month on facts filed before it (cash
+# flow or 2+ years of runway, <= 20% dilution, growing revenue, debt within cash + 3 years of cash
+# flow), now for every company. Hypotheses, stated before any number:
+#   H1 fundamentals alone: health_pass beats matched peers and loses less; health_fail the reverse.
+#   H2 the gate removes Reddit's small-cap ruin: subst_small_pass shows no extra permanent loss,
+#      subst_small_fail carries it.
+#   H3 matched within health (cell + health), subst_small's extra loss shrinks toward zero.
+#   H4 fundamentals_talk_pass beats matched peers by more than fundamentals_talk alone.
+# Same periods, metrics, bootstrap and decision rule as round 1 (BH across these 9 classes). The
+# variant table also matches on true market-cap quintiles (shares x price, US filers) in place of
+# the liquidity quintile, which CLAUDE.md lists as a known limit.
+ROUND3 = [
+    ("health_pass", "fundamentals", "health = 'pass'", "every company passing the health gate (no Reddit)"),
+    ("health_fail", "fundamentals", "health = 'fail'", "every company failing it"),
+    ("subst_pass", "reddit x health", f"{S} and health = 'pass'", "substantive, health pass"),
+    ("subst_fail", "reddit x health", f"{S} and health = 'fail'", "substantive, health fail"),
+    ("subst_small_pass", "reddit x health", f"{S} and size_q <= 2 and health = 'pass'", "substantive small, pass"),
+    ("subst_small_fail", "reddit x health", f"{S} and size_q <= 2 and health = 'fail'", "substantive small, fail"),
+    ("subst_small_unknown", "reddit x health", f"{S} and size_q <= 2 and health = 'unknown'",
+     "substantive small, health unknown"),
+    ("fundamentals_talk_pass", "reddit x health", f"{S} and {FUNDY} and health = 'pass'", "fundamentals talk, pass"),
+    ("fundamentals_talk_fail", "reddit x health", f"{S} and {FUNDY} and health = 'fail'", "fundamentals talk, fail"),
+]
+ROUND3_VARIANTS = {"as round 1": (CELL, "false"), "within health": (CELL + ("health",), "false"),
+                   "market-cap matched": (("month", "mcap_q", "mom_q"), "mcap_q = 0")}
+ROUND3_CHECK = [("subst_small", "loss"), ("subst_small", "beat"), ("fundamentals_talk", "beat"),
+                ("fundamentals_talk", "loss"), ("health_pass", "beat"), ("health_pass", "loss")]
+
+
+def round3(con, n_boot: int = N_BOOT, log=print) -> dict:
+    cov = con.execute("""select substr(month, 1, 4) y, avg((health = 'pass')::int), avg((health = 'fail')::int),
+                                avg((health = 'unknown')::int), avg((mcap_q > 0)::int)
+                         from panel group by 1 order by 1""").fetchall()
+    log("[round 3] health pass / fail / unknown and market cap known, share of eligible company-months by year: "
+        + ", ".join(f"{y} {p:.0%}/{f:.0%}/{u:.0%} mcap {m:.0%}" for y, p, f, u, m in cov))
+    res = evaluate(con, n_boot, classes=ROUND3)
+    verdict = {m: verdicts(res, m) for m in ("beat", "big", "loss")}
+    report(res, verdict)
+    preds = {n: p for n, _, p, _ in CLASSES + ROUND3}
+    var = {}
+    log("\nvariants (gap vs matched peers, points; the cell changes, the class does not):")
+    for name, metric in ROUND3_CHECK:
+        log(f"  {name} ({metric})")
+        for v, (keys, excl) in ROUND3_VARIANTS.items():
+            row = {}
+            for per, (first, last, h, _) in PERIODS.items():
+                cik, d = diffs(con, preds[name], metric, h, first, last, keys, excl)
+                row[per] = cluster_gap(d, cik, n_boot)
+            var[f"{name}|{metric}|{v}"] = row
+            log(f"    {v:20s} " + "  ".join(f"{per} {fmt(row[per])}" for per in PERIODS))
+    return {"classes": res, "verdicts": verdict, "variants": var}
+
+
 # ------------------------------------------------------------------ report
 
 def fmt(g: dict, scale=100) -> str:
@@ -499,6 +565,8 @@ def main(argv=None) -> int:
     p.add_argument("--boot", type=int, default=N_BOOT)
     p.add_argument("--sic", default="data/ref/sic.parquet")
     p.add_argument("--robust", action="store_true", help="round 2: the robustness checks of round 1's survivors")
+    p.add_argument("--round3", action="store_true", help="round 3: the health gate and market-cap matching")
+    p.add_argument("--fundamentals", default="data/features/fundamentals.parquet")
     p.add_argument("--show", nargs="*", metavar="CLASS",
                    help="print the class and implied peer rates from a finished round-1 result (--out), then stop")
     a = p.parse_args(argv)
@@ -514,8 +582,17 @@ def main(argv=None) -> int:
           + ", ".join(f"{k} {v[0][:7]}..{v[1][:7]} at {v[2]}y" for k, v in PERIODS.items()), flush=True)
     con = duckdb.connect()
     build_panel(con, Path(a.parquet), Path(a.mentions), Path(a.post_features), pclass, feats, a.first, a.last,
-                sic_path=Path(a.sic))
+                sic_path=Path(a.sic), fund_path=Path(a.fundamentals))
     build_outcomes(con, feats)
+    if a.round3:
+        r3 = round3(con, a.boot)
+        out = Path(a.out).with_name(Path(a.out).stem + "_round3.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(r3, default=str, indent=1))
+        print("\n[discover] round 3 verdicts (beat / loss): " + ", ".join(
+            f"{k} {r3['verdicts']['beat'][k]}/{r3['verdicts']['loss'][k]}" for k in r3["classes"]), flush=True)
+        print(f"[discover] wrote {out}", flush=True)
+        return 0
     if a.robust:
         rob = robustness(con, a.boot)
         out = Path(a.out).with_name(Path(a.out).stem + "_robust.json")

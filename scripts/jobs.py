@@ -369,6 +369,18 @@ PRESETS: dict[str, list[list[str]]] = {
                    for v in ("identified", "blinded")],
                  [*_V2, *_py("darling_export.py", "--split", "full", "--grades-dir", "data/features/darlings_f",
                              *DARLING_GRADES, "--push")]],
+    # the SEC's bulk XBRL file -> a point-in-time monthly fundamentals table for every eligible
+    # company (user 2026-11-12: "yes to all"), then round 3 of the heuristic study (the health gate,
+    # market-cap matching), the crowd rule again (GLP now ambiguous, health from the bulk file for
+    # every darling) and the timeline export with the small-cap and fundamentals-talk markers
+    "fundamentals-all": [_py("fundamentals.py", "bulk-pull"),
+                         _py("fundamentals.py", "panel"),
+                         _py("discover.py", "--round3"),
+                         *[[*_V2, *_py("darlings.py", "run", "--rule", "crowd", "--split", "full", "--grades-dir",
+                                       "data/features/darlings_f", *DARLING_GRADES, "--variant", v)]
+                           for v in ("identified", "blinded")],
+                         [*_V2, *_py("darling_export.py", "--split", "full", "--grades-dir", "data/features/darlings_f",
+                                     *DARLING_GRADES, "--push")]],
     # the darling timeline for thread-ui (user request 2026-10-29): the crowd rule's events with
     # their posts, outcomes and price histories, pushed to the bucket; thread-ui reads it for /
     "darling-export": [[*_V2, *_py("darling_export.py", "--push")]],

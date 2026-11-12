@@ -67,6 +67,31 @@ def codes_and_names(universe: Path, symbols: Path, pairs: set) -> tuple[dict, di
     return code, names
 
 
+def event_state(universe: Path, fundamentals: Path, pairs: set) -> dict[tuple[str, str], dict]:
+    """(month, cik) -> liquidity quintile and market cap at the darling month (for the small-cap flag)."""
+    if not universe.exists() or not pairs or "size_q" not in pq.read_schema(universe).names:
+        return {}
+    import duckdb
+    import pyarrow as pa
+    con = duckdb.connect()
+    con.register("want", pa.Table.from_pylist([{"month": m, "cik": c} for m, c in pairs]))
+    fjoin = (f"left join read_parquet('{fundamentals}') f on f.month = w.month and f.cik = w.cik"
+             if fundamentals.exists() else "")
+    mcap = "f.mcap" if fundamentals.exists() else "null"
+    return {(m, c): {"size_q": q, "mcap": mc} for m, c, q, mc in con.execute(
+        f"select w.month, w.cik, u.size_q, {mcap} from want w join read_parquet('{universe}') u "
+        f"on u.month = w.month and u.cik = w.cik {fjoin}").fetchall()}
+
+
+def fund_talk(post_class: Path, post_ids: set) -> set:
+    """Posts whose own text is fundamentals talk (discover.py's rule: fundamental vocabulary >= 5
+    and at least twice the speculation vocabulary)."""
+    if not post_class.exists() or not post_ids:
+        return set()
+    t = pq.read_table(post_class, columns=["post_id", "fund_n", "spec_n"]).to_pylist()
+    return {r["post_id"] for r in t if r["post_id"] in post_ids and r["fund_n"] >= 5 and r["fund_n"] >= 2 * r["spec_n"]}
+
+
 def weekly(s: px.Series, start_day: int) -> list[list]:
     """[[YYYY-MM-DD, adjusted close]] every WEEK days from ``start_day`` to the last bar, the
     last bar on or before each step (the last bar always included)."""
@@ -86,8 +111,12 @@ def _iso(day) -> str:
     return str((px.DAY0 + np.timedelta64(int(day), "D")).astype("datetime64[D]"))
 
 
+SMALL_Q = 2   # liquidity quintiles 1-2: discover.py's robust avoid rule (more permanent losses than peers)
+
+
 def build(events: list[dict], grades: list[dict], llm_dir: Path, variant: str, labels: Path, universe: Path,
-          symbols: Path, eodhd: Path, log=print) -> dict:
+          symbols: Path, eodhd: Path, log=print, fundamentals: Path = Path("/nonexistent"),
+          post_class: Path = Path("/nonexistent")) -> dict:
     by_key = {(g["post_id"], g["cik"]): g for g in grades}
     want = [by_key[(pid, e["cik"])] for e in events for pid in e["threads"] if (pid, e["cik"]) in by_key]
     seen, uniq = set(), []
@@ -99,6 +128,8 @@ def build(events: list[dict], grades: list[dict], llm_dir: Path, variant: str, l
     pairs = {(e["month"], e["cik"]) for e in events}
     outs = outcomes(labels, pairs)
     code, names = codes_and_names(universe, symbols, pairs)
+    state = event_state(universe, fundamentals, pairs)
+    talk = fund_talk(post_class, {g["post_id"] for g in uniq})
     store = px.PriceStore(eodhd)
     first_post: dict[str, int] = {}
     for g in uniq:
@@ -115,6 +146,9 @@ def build(events: list[dict], grades: list[dict], llm_dir: Path, variant: str, l
                     "comments": e.get("comments"), "credibility": e.get("credibility"),
                     "watch": bool(e.get("watch")), "blue_chip": bool(e.get("blue_chip")), "health": e.get("health"),
                     "bull_weight": e.get("bull_weight"), "bear_weight": e.get("bear_weight"), "late": e.get("late"),
+                    "size_q": (state.get((e["month"], e["cik"])) or {}).get("size_q"),
+                    "mcap": (state.get((e["month"], e["cik"])) or {}).get("mcap"),
+                    "small": ((state.get((e["month"], e["cik"])) or {}).get("size_q") or 9) <= SMALL_Q,
                     "keys": [f"{pid}_{e['cik']}" for pid in e["threads"] if (pid, e["cik"]) in by_key],
                     "outcome": {str(y): outs.get((e["month"], e["cik"], y)) for y in HORIZONS}})
         if ticker in stocks or not k:
@@ -130,6 +164,7 @@ def build(events: list[dict], grades: list[dict], llm_dir: Path, variant: str, l
         ev = next((x for x in evs if r["key"] in x["keys"]), None)
         st = stocks.get(ev["ticker"]) if ev else None
         r["darling_ticker"] = ev["ticker"] if ev else r.get("ticker")
+        r["fund_talk"] = r["key"].rsplit("_", 1)[0] in talk
         r["close_at_post"] = None
         if st and r.get("created_utc"):
             s = store.get(st["code"])
@@ -152,6 +187,8 @@ def main(argv=None) -> int:
     p.add_argument("--symbols", default="data/market/eodhd/symbols.parquet")
     p.add_argument("--eodhd", default="data/market/eodhd")
     p.add_argument("--llm-dir", default="data/llm")
+    p.add_argument("--fundamentals", default="data/features/fundamentals.parquet")
+    p.add_argument("--post-class", default="data/features/post_class.parquet")
     p.add_argument("--out", default=KEY)
     p.add_argument("--push", action="store_true", help="copy the file to the bucket under the same key")
     a = p.parse_args(argv)
@@ -161,7 +198,8 @@ def main(argv=None) -> int:
     grades = dl.merge_grades([Path(d) for d in a.grades_dir], a.variant, a.prompt)
     feats = Path(a.features)
     data = build(res["events"] + res.get("watch_events", []), grades, Path(a.llm_dir), a.variant, feats / "labels.parquet",
-                 feats / "universe.parquet", Path(a.symbols), Path(a.eodhd))
+                 feats / "universe.parquet", Path(a.symbols), Path(a.eodhd),
+                 fundamentals=Path(a.fundamentals), post_class=Path(a.post_class))
     data.update({"rule": res.get("level"), "runup": res.get("runup"), "blue_chip_top": res.get("blue_chip_top"),
                  "counts": res.get("counts"), "summary": res.get("outcomes"), "by_health": res.get("by_health"),
                  "watch": sorted({e["ticker"] for e in res.get("watch_events", []) if e.get("ticker")}),

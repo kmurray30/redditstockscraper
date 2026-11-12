@@ -141,3 +141,29 @@ def test_robustness_round_runs_and_drops_the_top_contributors(tmp_path):
                     "--sic", str(tmp_path / "missing.parquet"), "--out", str(out), "--robust"]) == 0
     rob = json.loads((tmp_path / "res_robust.json").read_text())
     assert set(rob) == {n for n, _ in dv.ROBUST} and rob["broad"]["verdict"] == "FRAGILE"
+
+
+def test_round3_joins_health_and_market_cap(tmp_path):
+    write(tmp_path, [{"id": "a", "t": CUT - 10 * DAY}])
+    f = tmp_path / "features"
+    pq.write_table(pa.Table.from_pylist([
+        {"month": "2015-03-01", "cik": c, "years": y, "status": "complete", "ret": 0.1, "cagr": 0.1,
+         "excess": e, "max_mult": 1.5, "min_mult": 0.9, "max_dd": 0.1, "d2": None, "d5": None, "d10": None,
+         "perm_loss": False, "entry_day": 0, "end_day": 1}
+        for c, e in (("1", 0.3), ("2", -0.1), ("3", 0.05)) for y in (1, 3, 5)]), f / "labels.parquet")
+    pq.write_table(pa.Table.from_pylist([{"month": "2015-03-01", "cik": "1", "health": "pass", "mcap": 5e8},
+                                         {"month": "2015-03-01", "cik": "2", "health": "fail", "mcap": 1e8}]),
+                   f / "fund.parquet")
+    con = duckdb.connect()
+    dv.build_panel(con, tmp_path / "corpus", f / "mentions.parquet", f / "pf.parquet", f / "pc.parquet", f,
+                   "2015-03-01", "2015-03-01", log=lambda *_: None, fund_path=f / "fund.parquet")
+    rows = dict(con.execute("select cik, health || ':' || mcap_q from panel").fetchall())
+    assert rows == {"1": "pass:2", "2": "fail:1", "3": "unknown:0"}
+    out = tmp_path / "res.json"
+    assert dv.main(["--parquet", str(tmp_path / "corpus"), "--mentions", str(f / "mentions.parquet"),
+                    "--post-features", str(f / "pf.parquet"), "--post-class", str(f / "pc.parquet"),
+                    "--features", str(f), "--first", "2015-03-01", "--last", "2015-03-01", "--boot", "20",
+                    "--fundamentals", str(f / "fund.parquet"), "--out", str(out), "--round3"]) == 0
+    r3 = json.loads((tmp_path / "res_round3.json").read_text())
+    assert set(r3["classes"]) == {n for n, *_ in dv.ROUND3}
+    assert r3["classes"]["subst_pass"]["D"]["3"]["beat"]["n"] == 1

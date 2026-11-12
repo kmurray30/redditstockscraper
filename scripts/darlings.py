@@ -565,7 +565,7 @@ def name_words(names, common: frozenset) -> tuple[set, set]:
 # tickers that are also something else in investing talk, found in the darling lists (2026-10-27):
 # THC (cannabis, not Tenet Healthcare), BYD (the carmaker, not Boyd Gaming), DTC
 # (direct-to-consumer, not Solo Brands), SP (S&P, not SP Plus), AE, EVO; extend as the user finds more
-AMBIGUOUS = frozenset({"THC", "BYD", "DTC", "SP", "AE", "EVO"})
+AMBIGUOUS = frozenset({"THC", "BYD", "DTC", "SP", "AE", "EVO", "GLP"})   # GLP: GLP-1 drug posts, not Global Partners
 
 
 def ambiguous(ticker: str | None, common: frozenset, word_like: frozenset = frozenset()) -> bool:
@@ -652,8 +652,12 @@ def attach_health(evs: list[dict], universe: Path, eodhd: Path, facts_dir: Path)
         code = {(m, c): k for m, c, k in con.execute(
             f"select w.month, w.cik, u.code from want w join read_parquet('{universe}') u "
             "on u.month = w.month and u.cik = w.cik").fetchall()}
+    from datetime import date, timedelta
     for e in evs:
-        m = fd.metrics(facts.get(e["cik"]), e["month"][:10], splits_for(eodhd, code.get((e["month"], e["cik"]))))
+        f = facts.get(e["cik"])
+        prof, cur = fd.profile_for(f)
+        asof = (date.fromisoformat(e["month"][:10]) - timedelta(days=1)).isoformat()   # filed before the cutoff
+        m = fd.metrics(f, asof, splits_for(eodhd, code.get((e["month"], e["cik"]))), prof, cur)
         status, why = fd.gate(m)
         e["health"] = {"status": status, "why": why, "summary": fd.describe(m),
                        **{k: m.get(k) for k in ("cash", "debt", "ocf_ttm", "revenue_ttm", "revenue_growth",

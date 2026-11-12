@@ -291,3 +291,18 @@ def test_timeline_and_stock_chart_pages(tmp_path):
         assert code == 200 and "direction &rarr;" in home and "Reddit darlings" not in home
     finally:
         plain.shutdown()
+
+
+def test_small_cap_and_fundamentals_markers(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import darling_export as dx
+    ts = tsv
+    assert "small cap" in ts.small_pill({"small": True}) and ts.small_pill({"small": False}) == ""
+    assert ts.mcap_note({"mcap": 4.2e8}) == "; market cap then $420M" and ts.mcap_note({}) == ""
+    assert ts.mcap_note({"mcap": 3.1e9}) == "; market cap then $3.1B"
+    pc = tmp_path / "pc.parquet"
+    pq.write_table(pa.Table.from_pylist([{"post_id": "a", "fund_n": 6, "spec_n": 1, "is_question": False},
+                                         {"post_id": "b", "fund_n": 6, "spec_n": 4, "is_question": False},
+                                         {"post_id": "c", "fund_n": 9, "spec_n": 0, "is_question": False}]), pc)
+    assert dx.fund_talk(pc, {"a", "b"}) == {"a"}

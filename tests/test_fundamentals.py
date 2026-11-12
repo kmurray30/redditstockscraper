@@ -125,3 +125,38 @@ def test_bulk_pull_resumes_and_facts_read_from_the_zip(tmp_path):
     assert out.read_bytes() == blob and not part.exists()
     f = fd.Facts(tmp_path / "none", bulk=out)
     assert f.get("42") == {"cik": 42, "facts": {}} and f.get("43") is None
+
+
+def test_profile_picks_basis_and_currency_from_the_filings():
+    asml = {"facts": {"us-gaap": {"Revenues": {"units": {"EUR": [f("2023-01-01", "2023-12-31", 1, "2024-02-01")] * 3}}}}}
+    sap = {"facts": {"ifrs-full": {"Revenue": {"units": {"EUR": [f("2023-01-01", "2023-12-31", 1, "2024-02-01")] * 3,
+                                                           "USD": [f("2017-01-01", "2017-12-31", 1, "2018-02-01")]}}}}}
+    assert fd.profile_for(FACTS) == (fd.GAAP, "USD")
+    assert fd.profile_for(asml) == (fd.GAAP, "EUR")
+    assert fd.profile_for(sap) == (fd.IFRS, "EUR")
+    assert fd.profile_for(None) == (fd.GAAP, "USD")
+
+
+def test_panel_rows_are_point_in_time_with_market_cap(tmp_path):
+    import io
+    import zipfile as _zip
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    bulk = tmp_path / "companyfacts.zip"
+    with _zip.ZipFile(bulk, "w") as z:
+        z.writestr("CIK0000000001.json", json.dumps(FACTS))
+    uni = tmp_path / "universe.parquet"
+    pq.write_table(pa.Table.from_pylist([
+        {"month": m, "cik": "1", "ticker": "A", "code": "A", "price": 10.0, "eligible": True}
+        for m in ("2024-03-01", "2024-05-10", "2024-06-01")]), uni)
+    out = tmp_path / "fundamentals.parquet"
+    n = fd.build_panel(uni, out, bulk, tmp_path / "none", tmp_path / "eodhd", workers=1, log=lambda *_: None)
+    rows = {r["month"]: r for r in pq.read_table(out).to_pylist()}
+    assert n == 3
+    # 2024-03-01: the 2023 annual report only; shares 100M on 2023-04-30 -> $1B at $10
+    assert rows["2024-03-01"]["revenue_ttm"] == 240e6 and rows["2024-03-01"]["mcap"] == 1e9
+    assert rows["2024-03-01"]["last_filed"] is None   # these facts carry no form
+    # the Q1 report was filed on 2024-05-10: a cutoff that day must not see it, the next month does
+    assert rows["2024-05-10"]["revenue_ttm"] == 240e6
+    assert rows["2024-06-01"]["revenue_ttm"] == 260e6 and rows["2024-06-01"]["mcap"] == 4.8e9
+    assert {r["health"] for r in rows.values()} <= {"pass", "fail", "unknown"}

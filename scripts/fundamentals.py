@@ -44,6 +44,9 @@ import zipfile
 from datetime import date, timedelta
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
@@ -95,14 +98,14 @@ def instant(facts: dict, concepts, asof: str, ns: str = "us-gaap", unit: str = "
                 continue
             groups.setdefault((r["end"], r.get("filed", ""), r.get("accn", "")), []).append(float(r["val"]))
         for (end, filed, _), vals in groups.items():
-            val = sum(vals) if sum_classes else vals[-1]
+            val = sum(vals) if sum_classes else max(vals) if unit == "shares" else vals[-1]
             key = (end, -rank, filed)
             if best is None or key > best[0]:
                 best = (key, val)
     return (best[1], best[0][0]) if best else None
 
 
-def ttm(facts: dict, concepts, asof: str) -> tuple[float, str] | None:
+def ttm(facts: dict, concepts, asof: str, ns: str = "us-gaap", unit: str = "USD") -> tuple[float, str] | None:
     """Trailing twelve months of a flow (cash flow, revenue) as known on ``asof``: the last
     annual figure plus this year's year-to-date minus last year's same period, else the last
     annual figure. The concepts are pooled first (an earlier concept wins an identical span):
@@ -111,7 +114,7 @@ def ttm(facts: dict, concepts, asof: str) -> tuple[float, str] | None:
     year or no quarter (its 2020 revenue read -7% when it was +28%, found 2026-10-30)."""
     spans: dict[tuple[str, str], tuple[int, str, float]] = {}
     for rank, c in enumerate(concepts):
-        for r in _facts(facts, c, asof=asof):
+        for r in _facts(facts, c, ns, unit, asof):
             if not r.get("start"):
                 continue
             k = (r["start"], r["end"])
@@ -148,22 +151,70 @@ def split_ratio(splits: list[tuple[str, float]], after: str, upto: str) -> float
     return r
 
 
-def metrics(facts: dict | None, asof: str, splits: list[tuple[str, float]] | None = None) -> dict:
-    """Point-in-time health as known on ``asof`` (YYYY-MM-DD)."""
+# IFRS concept names for foreign filers (20-F / 40-F), from what the bulk file holds for SAP, TSM and
+# NVO (inspected 2026-11-12): total `Borrowings` where filed, else its parts. ASML files US GAAP in
+# euros, so the basis and the currency are picked from the filings, never assumed.
+IFRS_SHORT_TERM = ("CurrentFinancialAssetsAtAmortisedCost", "CurrentFinancialAssetsAtFairValueThroughProfitOrLoss",
+                   "CurrentFinancialAssetsAtFairValueThroughOtherComprehensiveIncome", "ShorttermInvestments")
+IFRS_DEBT_PARTS = ("NoncurrentPortionOfNoncurrentBorrowings", "LongtermBorrowings",
+                   "CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings", "CurrentPortionOfLongtermBorrowings",
+                   "ShorttermBorrowings")
+
+GAAP = {"ns": "us-gaap", "cash": CASH, "short_term": SHORT_TERM, "debt_total": DEBT_TOTAL,
+        "debt_parts": DEBT_PARTS, "ocf": OCF, "revenue": REVENUE,
+        "net_income": ("NetIncomeLoss", "ProfitLoss"), "op_income": ("OperatingIncomeLoss",),
+        "gross_profit": ("GrossProfit",), "capex": ("PaymentsToAcquirePropertyPlantAndEquipment",),
+        "assets": ("Assets",), "liabilities": ("Liabilities",),
+        "equity": ("StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")}
+IFRS = {"ns": "ifrs-full", "cash": ("CashAndCashEquivalents",), "short_term": IFRS_SHORT_TERM,
+        "debt_total": ("Borrowings",), "debt_parts": IFRS_DEBT_PARTS, "ocf": ("CashFlowsFromUsedInOperatingActivities",),
+        "revenue": ("Revenue", "RevenueFromContractsWithCustomers"),
+        "net_income": ("ProfitLoss", "ProfitLossAttributableToOwnersOfParent"),
+        "op_income": ("ProfitLossFromOperatingActivities",), "gross_profit": ("GrossProfit",),
+        "capex": ("PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",),
+        "assets": ("Assets",), "liabilities": ("Liabilities",),
+        "equity": ("Equity", "EquityAttributableToOwnersOfParent")}
+EXTRA_FLOWS = ("net_income", "op_income", "gross_profit", "capex")
+EXTRA_STOCKS = ("assets", "liabilities", "equity")
+
+
+def profile_for(facts: dict | None) -> tuple[dict, str]:
+    """The basis (US GAAP or IFRS) and currency the company reports its core figures in: the pair
+    with the most revenue, cash and operating-cash-flow facts. ASML files US GAAP in euros, SAP
+    IFRS in euros, TSM IFRS in Taiwan dollars (plus a few convenience-translation dollar facts)."""
+    f = (facts or {}).get("facts") or {}
+    counts: dict[tuple[int, str], int] = {}
+    for i, pr in enumerate((GAAP, IFRS)):
+        block = f.get(pr["ns"]) or {}
+        for c in (*pr["revenue"], *pr["cash"], *pr["ocf"]):
+            for u, rows in ((block.get(c) or {}).get("units") or {}).items():
+                if "/" not in u and u not in ("shares", "pure"):
+                    counts[(i, u)] = counts.get((i, u), 0) + len(rows)
+    if not counts:
+        return GAAP, "USD"
+    i, u = max(counts, key=counts.get)
+    return (GAAP, IFRS)[i], u
+
+
+def metrics(facts: dict | None, asof: str, splits: list[tuple[str, float]] | None = None,
+            profile: dict | None = None, unit: str = "USD") -> dict:
+    """Point-in-time health as known on ``asof`` (YYYY-MM-DD), in ``unit`` (the filer's currency)."""
     if not facts:
         return {"known": False, "why": "no SEC company facts"}
-    cash = instant(facts, CASH, asof)
-    sti = instant(facts, SHORT_TERM, asof)
-    total = instant(facts, DEBT_TOTAL, asof)
+    pr = profile or GAAP
+    ns = pr["ns"]
+    cash = instant(facts, pr["cash"], asof, ns, unit)
+    sti = instant(facts, pr["short_term"], asof, ns, unit)
+    total = instant(facts, pr["debt_total"], asof, ns, unit) if pr["debt_total"] else None
     if total is not None:
         debt = total[0]
     else:
-        parts = [instant(facts, (c,), asof) for c in DEBT_PARTS]
+        parts = [instant(facts, (c,), asof, ns, unit) for c in pr["debt_parts"]]
         debt = sum(p[0] for p in parts if p is not None)
-    ocf = ttm(facts, OCF, asof)
-    rev = ttm(facts, REVENUE, asof)
+    ocf = ttm(facts, pr["ocf"], asof, ns, unit)
+    rev = ttm(facts, pr["revenue"], asof, ns, unit)
     a = _d(asof)
-    rev_prev = ttm(facts, REVENUE, (a - timedelta(days=365)).isoformat())
+    rev_prev = ttm(facts, pr["revenue"], (a - timedelta(days=365)).isoformat(), ns, unit)
     sh = None
     for ns, c in SHARES:
         sh = instant(facts, (c,), asof, ns=ns, unit="shares", sum_classes=ns == "dei")
@@ -182,7 +233,14 @@ def metrics(facts: dict | None, asof: str, splits: list[tuple[str, float]] | Non
          "ocf_ttm": ocf[0] if ocf else None, "revenue_ttm": rev[0] if rev else None,
          "revenue_ttm_prev": rev_prev[0] if rev_prev else None,
          "revenue_end": rev[1] if rev else None, "revenue_prev_end": rev_prev[1] if rev_prev else None,
-         "shares": sh[0] if sh else None, "shares_prev": sh_prev[0] if sh_prev else None}
+         "shares": sh[0] if sh else None, "shares_prev": sh_prev[0] if sh_prev else None,
+         "shares_date": sh[1] if sh else None, "currency": unit, "basis": ns}
+    for k in EXTRA_FLOWS:
+        v = ttm(facts, pr[k], asof, ns, unit)
+        m[f"{k}_ttm"] = v[0] if v and (a - _d(v[1])).days <= STALE_DAYS else None
+    for k in EXTRA_STOCKS:
+        v = instant(facts, pr[k], asof, ns, unit)
+        m[k] = v[0] if v else None
     if not m["known"]:
         m["why"] = "no cash or operating cash flow filed by then"
         return m
@@ -190,10 +248,12 @@ def metrics(facts: dict | None, asof: str, splits: list[tuple[str, float]] | Non
     fresh = rev is not None and rev_prev is not None and (a - _d(rev[1])).days <= STALE_DAYS and rev[1] != rev_prev[1]
     m["revenue_growth"] = (m["revenue_ttm"] / m["revenue_ttm_prev"] - 1
                            if fresh and m["revenue_ttm_prev"] else None)
+    m["dilution"] = None
     if sh and sh_prev and sh_prev[0] > 0:
-        m["dilution"] = sh[0] / (sh_prev[0] * split_ratio(splits, sh_prev[1], sh[1])) - 1
-    else:
-        m["dilution"] = None
+        d = sh[0] / (sh_prev[0] * split_ratio(splits, sh_prev[1], sh[1])) - 1
+        # a share count that fell 80%+ in a year is a missing share class or an unadjusted split,
+        # not a buyback (LYFT and PINS read -100% on 2026-10-30)
+        m["dilution"] = d if d > -0.8 else None
     return m
 
 
@@ -389,6 +449,167 @@ def pull(ciks: list[str], root: Path, ua: str, *, fetcher=fetch, sleep=time.slee
     return stats
 
 
+# ------------------------------------------------------------------ the monthly panel
+
+PANEL = Path("data/features/fundamentals.parquet")
+PANEL_SCHEMA = pa.schema([
+    ("month", pa.string()), ("cik", pa.string()), ("basis", pa.string()), ("currency", pa.string()),
+    ("health", pa.string()), ("health_why", pa.string()), ("known", pa.bool_()),
+    ("cash", pa.float64()), ("debt", pa.float64()), ("ocf_ttm", pa.float64()), ("revenue_ttm", pa.float64()),
+    ("revenue_growth", pa.float64()), ("gross_profit_ttm", pa.float64()), ("op_income_ttm", pa.float64()),
+    ("net_income_ttm", pa.float64()), ("capex_ttm", pa.float64()), ("assets", pa.float64()),
+    ("liabilities", pa.float64()), ("equity", pa.float64()), ("shares", pa.float64()),
+    ("shares_date", pa.string()), ("dilution", pa.float64()), ("runway_years", pa.float64()),
+    ("last_filed", pa.string()), ("mcap", pa.float64())])
+FILING_FORMS = ("10-K", "10-Q", "20-F", "40-F", "10-K/A", "10-Q/A", "20-F/A", "40-F/A", "6-K")
+
+
+def filed_dates(facts: dict | None) -> list[str]:
+    """Every date the company filed a financial report, sorted (for staleness)."""
+    out = set()
+    for ns in ((facts or {}).get("facts") or {}).values():
+        for c in ns.values():
+            for rows in (c.get("units") or {}).values():
+                out.update(r["filed"] for r in rows if r.get("filed") and r.get("form") in FILING_FORMS)
+    return sorted(out)
+
+
+def company_rows(cik: str, rows: list[dict], facts: dict | None, splits_of) -> list[dict]:
+    """The panel rows of one company: ``rows`` are its eligible universe months (month, code, price).
+    A cohort month's cutoff is 00:00 UTC on its first day, so only facts filed the day before or
+    earlier are used."""
+    import bisect
+    prof, cur = profile_for(facts)
+    filed = filed_dates(facts)
+    out = []
+    for u in rows:
+        asof = (_d(u["month"]) - timedelta(days=1)).isoformat()
+        splits = splits_of(u.get("code"))
+        m = metrics(facts, asof, splits, prof, cur)
+        st, why = gate(m)
+        i = bisect.bisect_right(filed, asof)
+        mcap = None
+        if cur == "USD" and m.get("shares") and u.get("price"):
+            mcap = m["shares"] * split_ratio(splits, m["shares_date"], asof) * u["price"]
+        rw = m.get("runway_years")
+        out.append({"month": u["month"], "cik": cik, "basis": m.get("basis"), "currency": m.get("currency"),
+                    "health": st, "health_why": "; ".join(why), "known": bool(m.get("known")),
+                    **{k: m.get(k) for k in ("cash", "debt", "ocf_ttm", "revenue_ttm", "revenue_growth",
+                                             "gross_profit_ttm", "op_income_ttm", "net_income_ttm", "capex_ttm",
+                                             "assets", "liabilities", "equity", "shares", "shares_date", "dilution")},
+                    "runway_years": None if rw is None else (1e9 if math.isinf(rw) else rw),
+                    "last_filed": filed[i - 1] if i else None, "mcap": mcap})
+    return out
+
+
+_W: dict = {}
+
+
+def _init_worker(bulk: str, root: str, eodhd: str) -> None:
+    _W["facts"] = Facts(Path(root), Path(bulk), cache=False)
+    _W["eodhd"] = Path(eodhd)
+    _W["splits"] = {}
+
+
+def _splits(code):
+    if code not in _W["splits"]:
+        from darlings import splits_for
+        _W["splits"][code] = splits_for(_W["eodhd"], code)
+    return _W["splits"][code]
+
+
+def _work(item):
+    cik, rows = item
+    try:
+        return company_rows(cik, rows, _W["facts"].get(cik), _splits), None
+    except Exception as e:   # one malformed company must not stop 12,000
+        return [], f"{cik}: {e!r}"
+
+
+def build_panel(universe: Path, out: Path, bulk: Path, root: Path, eodhd: Path, workers: int, log=print) -> int:
+    import duckdb
+    import multiprocessing as mp
+    con = duckdb.connect()
+    by: dict[str, list[dict]] = {}
+    for month, cik, code, price in con.execute(f"""select month, cik, code, price from read_parquet('{universe}')
+                                                  where eligible order by cik, month""").fetchall():
+        by.setdefault(cik, []).append({"month": month, "code": code, "price": price})
+    con.close()   # duckdb runs threads; the pool spawns fresh processes rather than forking them
+    log(f"[fundamentals] panel for {len(by):,} companies, {sum(map(len, by.values())):,} eligible company-months, "
+        f"{workers} workers")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    n, errors, t0 = 0, [], time.time()
+    with pq.ParquetWriter(tmp, PANEL_SCHEMA, compression="zstd") as w, \
+            mp.get_context("spawn").Pool(workers, initializer=_init_worker,
+                                         initargs=(str(bulk), str(root), str(eodhd))) as pool:
+        for k, (rows, err) in enumerate(pool.imap_unordered(_work, sorted(by.items()), chunksize=8), 1):
+            if err:
+                errors.append(err)
+            if rows:
+                w.write_table(pa.Table.from_pylist(rows, schema=PANEL_SCHEMA))
+                n += len(rows)
+            if k % 1000 == 0:
+                log(f"  {k:,}/{len(by):,} companies, {n:,} rows, {time.time() - t0:,.0f}s")
+    tmp.replace(out)
+    log(f"[fundamentals] wrote {n:,} rows to {out}; {len(errors)} companies failed" +
+        (": " + "; ".join(errors[:5]) if errors else ""))
+    return n
+
+
+def panel_summary(path: Path, log=print) -> None:
+    """Coverage and sanity of the panel, by year."""
+    import duckdb
+    con = duckdb.connect()
+    log("year  rows  health pass/fail/unknown  basis ifrs  revenue known  mcap known  median mcap $M")
+    for r in con.execute(f"""select substr(month, 1, 4) y, count(*),
+                                    avg((health = 'pass')::int), avg((health = 'fail')::int), avg((health = 'unknown')::int),
+                                    avg((basis = 'ifrs-full')::int), avg((revenue_ttm is not null)::int),
+                                    avg((mcap is not null)::int), median(mcap) / 1e6
+                             from read_parquet('{path}') group by 1 order by 1""").fetchall():
+        log(f"{r[0]}  {r[1]:6,d}  {r[2]:.0%} / {r[3]:.0%} / {r[4]:.0%}  {r[5]:.1%}  {r[6]:.0%}  {r[7]:.0%}  {r[8] or 0:,.0f}")
+    log("fail reasons (share of failing rows): " + ", ".join(
+        f"{k} {v:.0%}" for k, v in con.execute(f"""
+            with f as (select unnest(string_split(health_why, '; ')) w from read_parquet('{path}') where health = 'fail')
+            select split_part(w, ' ', 1) k, count(*) / (select count(*) from read_parquet('{path}') where health = 'fail')
+            from f group by 1 order by 2 desc limit 6""").fetchall()))
+
+
+SPOT = [("LYFT", "2025-03-01"), ("PINS", "2026-03-01"), ("ASML", "2026-01-01"), ("NVDA", "2024-12-01"),
+        ("AAPL", "2020-10-01"), ("SAP", "2026-02-01"), ("TSM", "2025-01-01"), ("JPM", "2025-01-01"),
+        ("RKLB", "2024-04-01"), ("GME", "2021-01-01")]
+
+
+def spot_check(panel: Path, universe: Path, log=print) -> None:
+    """A few known companies, to read the numbers against what is public."""
+    import duckdb
+    con = duckdb.connect()
+    for t, m in SPOT:
+        r = con.execute(f"""select u.ticker, f.* exclude (month, cik) from read_parquet('{universe}') u
+                            join read_parquet('{panel}') f using (month, cik)
+                            where u.month = ? and u.ticker = ?""", [m, t]).fetchone()
+        if not r:
+            log(f"  {t} {m}: not in the panel")
+            continue
+        cols = [d[0] for d in con.description]
+        d = dict(zip(cols, r))
+        log(f"  {t} {m}: {d['basis']} {d['currency']} {d['health']} ({d['health_why'] or 'ok'}); "
+            f"mcap {_mm(d, 'mcap')}, revenue ttm {_mm(d, 'revenue_ttm')} ({_pc(d, 'revenue_growth')}), "
+            f"net income {_mm(d, 'net_income_ttm')}, ocf {_mm(d, 'ocf_ttm')}, cash {_mm(d, 'cash')}, "
+            f"debt {_mm(d, 'debt')}, shares {_mm(d, 'shares')} on {d['shares_date']}, "
+            f"dilution {_pc(d, 'dilution')}, last filed {d['last_filed']}")
+
+
+def _mm(d: dict, k: str) -> str:
+    v = d.get(k)
+    return "n/a" if v is None else f"{v / 1e6:,.0f}M"
+
+
+def _pc(d: dict, k: str) -> str:
+    v = d.get(k)
+    return "n/a" if v is None else f"{v:+.1%}"
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -400,6 +621,13 @@ def main(argv=None) -> int:
     b1.add_argument("--inspect", nargs="*", default=None, metavar="TICKER",
                     help="then print what the zip holds for the universe and these tickers")
     b1.add_argument("--universe", default="data/features/universe.parquet")
+    b2 = sp.add_parser("panel", help="the monthly point-in-time table for every eligible company")
+    b2.add_argument("--universe", default="data/features/universe.parquet")
+    b2.add_argument("--out", default=str(PANEL))
+    b2.add_argument("--bulk", default=str(BULK))
+    b2.add_argument("--dir", default=str(DIR))
+    b2.add_argument("--eodhd", default="data/market/eodhd")
+    b2.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 2))
     a2 = sp.add_parser("show")
     a2.add_argument("--cik", required=True)
     a2.add_argument("--asof", required=True, help="one date or several, comma-separated")
@@ -414,6 +642,11 @@ def main(argv=None) -> int:
             print(f"[fundamentals] {out} already here ({out.stat().st_size / 1e6:,.0f} MB)", flush=True)
         if a.inspect is not None:
             inspect_bulk(Facts(bulk=out, cache=False), Path(a.universe), a.inspect)
+        return 0
+    if a.cmd == "panel":
+        build_panel(Path(a.universe), Path(a.out), Path(a.bulk), Path(a.dir), Path(a.eodhd), a.workers)
+        panel_summary(Path(a.out))
+        spot_check(Path(a.out), Path(a.universe))
         return 0
     if a.cmd == "pull":
         import pyarrow.parquet as pq
