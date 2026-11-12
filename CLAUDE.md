@@ -770,6 +770,44 @@ ASTS from a Planet Labs thread, IREN from a Nebius thread); the health line show
 to the gate but wrong); SATS 2026-05 shows the same -18% at 1, 3 and 5 years (its series ends
 early). thread-ui restarted on the new export (228 events, 173 stocks, 768 posts).
 
+**Open search for durable heuristics (2026-11-12, user: "think of some ways to classify the data
+set and then see if you can find your own heuristics that work, and are likely to extrapolate";
+`scripts/discover.py`, preset `discover`, read only, no spend; results in
+`data/experiments/discover_v1.json` and `discover_v1_robust.json`).** Pre-registered in the commit
+before any number existed (registration `d783983f057b`): 28 classes of eligible company-months
+(attention, content, company state, five combinations) on the strict 24h view (no votes, no late
+comments, no model; substantive = the baseline's rule without the deleted-author rule), each
+compared with peers in the same month x liquidity quintile x momentum quintile; discovery
+2012-2018 at 3y, confirmation 2019-2022 at 3y and 2023-01..2025-09 at 1y; survive = discovery CI
+excludes 0, both confirmations share the sign, BH q 0.10 across the 28. Round 2 (fixed after round
+1, before computing it) re-tested the survivors matched within SIC division, without the 100 most
+liquid names, without tech, matched on price bucket, with equal company weight, without the five
+biggest contributors, and by half-period; ROBUST = same sign in every cell and >= 5 of 6 halves.
+Results:
+- **Robust (an avoid rule): substantive posts about small companies** (two least liquid
+  quintiles) carry more permanent loss than comparable companies in every period, variant and half:
+  3y loss 15.0% vs 9.2% (2012-2018), 23.1% vs 18.9% (2019-2022), 1y 8.5% vs 6.0% (2023-2025);
+  beat rate 28% vs 32% in 2012-2018, level later. Same for small names discussed for the first time
+  in a year (`novel_small`). Penny-stock ruin is real but disappears against other penny stocks,
+  so it is about price level, not Reddit.
+- **Breadth survived round 1 and failed round 2.** Top-decile substantive count, >= 3 authors,
+  top 1% by posts, >= 2 subreddits, >= 20 first-day comments: e.g. top decile 3y beat 57.7% vs
+  37.2% in 2012-2018, 1y 48.3% vs 38.3% in 2023-2025, but with each company counted once the gap
+  is +3 / -3 / +3 points, and without the 100 most liquid names it is not significant. It is a
+  few mega-caps counted every month while they kept winning; outside mega-caps the most crowded
+  names did badly in 2019-2022 (-16 points: the meme stocks). Best of the family:
+  `broad_not_run_up` (>= 3 authors, not top momentum), positive in all periods with equal company
+  weight (+9.0 / +0.5 / +3.8) but fragile.
+- **Consistent, not significant: fundamentals talk** (fundamental vocabulary >= 5 and >= 2x the
+  speculation vocabulary in the company's substantive posts): beat +3.6 / +2.3 / +3.5 points, best
+  multiple hit 11.8% vs 5.9% (3x in 3y, 2012-2018), and **no extra permanent loss** in any period
+  (4.1% vs 4.4%, 11.4% vs 10.2%, 1.3% vs 1.4%), the only class with that asymmetric profile.
+  Deep DD (>= 3,000 chars) is similar on beat but adds ruin in 2019-2022 (16.6% vs 11.8%).
+- **Failed:** novelty alone, primary-source links, question posts, bull or bear lexicon, ignored
+  posts, contrarian value (beaten down + fundamentals; positive 2012-2022, negative 2023-2025),
+  speculation talk. Being discussed at all raises both tails (more 3x, more ruin), so `big` survives
+  for almost every class and means little alone. Nothing beats peers significantly in 2019-2022.
+
 **Two data-layer bugs found 2026-10-27, FIXED the same day (see "After the data fix" below; every result above this point carries them):**
 1. **Split look-ahead in `adv60`** (`prices.trailing_dollar_volume` = raw close x EODHD volume,
    and the volume is split-adjusted to the download date). Measured by `scripts/volume_check.py`
