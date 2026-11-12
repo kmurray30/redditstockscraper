@@ -241,6 +241,7 @@ PRESETS: dict[str, list[list[str]]] = {
     "darlings": [[*_V2, *_py("darlings.py", "run")]],
     # where the darlings are: counts per year across 2012-2024, no model, no returns (free)
     "darling-census": [_py("darling_census.py")],
+    "discover": [_py("discover.py")],
     # the darling study on 2019-2024 (user decisions 2026-10-27: TypeSafe topped up; the sealed
     # 2021-2022 holdout is given up for it): the candidates (several authors, heavy discussion,
     # eligible stocks only), their top threads at each candidate cutoff, graded with thesis_v2
@@ -390,7 +391,7 @@ PRESETS["rerun-then-backfill"] = PRESETS["darlings-rerun"] + PRESETS["backfill"]
 # Presets that accept JOB_ARGS (appended to their single command).
 TAKES_ARGS = {"run", "ladder-dev", "ladder-validate", "pull-data", "census", "llm-run", "llm-collect",
               "gold-build", "gold-eval", "thesis-timeline", "calibrate", "thesis-run", "export-threads",
-              "darlings", "darling-census"}
+              "darlings", "darling-census", "discover"}
 
 
 class JobError(ValueError):
