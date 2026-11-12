@@ -808,6 +808,65 @@ Results:
   speculation talk. Being discussed at all raises both tails (more 3x, more ruin), so `big` survives
   for almost every class and means little alone. Nothing beats peers significantly in 2019-2022.
 
+**Point-in-time fundamentals for every company (2026-11-12, user: "yes to all"; preset
+`fundamentals-all`).** `fundamentals.py bulk-pull` downloads the SEC's nightly
+`companyfacts.zip` (1.4 GB, 20,571 companies, 20 s on the worker; `sec_bulk.py check` reads its
+size first) to `data/ref/companyfacts.zip`; `Facts` reads a company from the per-company files
+first, then the zip. 9,000 of the 9,316 companies ever eligible are in it (92% of the 2011
+cohort, 95-100% after). `fundamentals.py panel` (8 spawned workers, about 2 min) writes
+`data/features/fundamentals.parquet`: one row per eligible company-month (722,649) on facts filed
+the day before the cutoff or earlier: basis and currency (picked from the filings: ASML files US
+GAAP in euros, SAP IFRS in euros, TSM IFRS in Taiwan dollars, JD US GAAP in yuan; IFRS 7-10% of
+rows), cash, debt, trailing revenue and growth, gross / operating / net income, operating cash
+flow, capex, assets, liabilities, equity, shares, dilution, runway, the health gate and its
+reasons, the last filing date, and a **true market cap** (shares x quoted price, adjusted for later
+splits; US-dollar filers only, 81-89% of rows). Health share by year: pass 26-40%, fail 37-61%,
+unknown 31% in 2012 falling to 4-5% from 2023. Spot checks against public figures (printed by the
+job): NVDA $3.39T on 2024-12, AAPL $1.98T on 2020-10, JPM $675B, LYFT $5.5B, PINS $11.6B, RKLB
+$2.0B on 2024-04, GME $1.3B on 2021-01, NBIS $33.5B on 2026-05. **Bugs found by those spot checks
+and fixed before any result was read:** the share-count loop overwrote the namespace variable
+(net income and the other extra measures came back empty); the bulk file omits facts reported
+per share class (Lyft's cover-page count starts late 2025, Pinterest has none), so shares fall
+back to the weighted average of basic shares and nothing older than 400 days is used; Nebius's
+health came from Yandex-era rouble filings, so a balance sheet or cash flow older than 460 days is
+`unknown` and the currency is that of the latest filing year; summaries name the currency. Banks
+pass or fail on meaningless cash-flow terms: read their health with care.
+
+**Round 3 of the heuristic search (2026-11-12, `discover.py --round3`, fixed in code before the
+table existed; `data/experiments/discover_v1_round3.json`).** Same periods, matching and rule as
+round 1, BH across 9 classes. Gaps vs month x liquidity x momentum peers, D 2012-18 at 3y / C1
+2019-22 at 3y / C2 2023-25 at 1y, percentage points:
+- **The health gate alone is the most durable heuristic found** (H1): passing companies beat the
+  S&P +6.0 / +1.8 / +2.5 more often and end in permanent loss -2.1 / -3.3 / -1.2 less often, all
+  significant in every period (the first result significant in 2019-2022), and unchanged when
+  matched on true market cap (+4.0 / +2.0 / +2.4; -1.8 / -2.6 / -1.0). It is a quality factor
+  (profitable or funded, growing, not diluting, not over-indebted), which is why it is likely to
+  extrapolate. Failing: loss +1.2 / +2.1 / +0.7.
+- **Reddit x health:** substantive posts on a passing company beat +9.0 / +1.8 / +5.3, loss
+  -1.5 / -1.0 / -0.6 (SURVIVES both); on a failing one beat -2.2 / -1.6 / -0.6, loss +4.1 / +7.6 /
+  +1.6. Fundamentals talk on a passing company beat +13.0 / +3.3 / +6.7, loss -1.2 / -1.9 / -0.7
+  (SURVIVES both; H4 holds, though most of it is the gate: substantive + pass is +9.0 / +1.8 /
+  +5.3).
+- **The small-cap avoid rule is a failing-balance-sheet rule** (H2): Reddit-discussed small caps
+  that pass have *less* permanent loss than peers (-3.1 / -6.6 / -3.1, D interval touches 0), those
+  that fail carry all of it (+9.8 / +7.1 / +4.8, SURVIVES) and beat less (-6.7 / -0.1 / -3.4).
+  H3 does not hold: matched within health status the extra loss of `subst_small` barely moves
+  (+5.3 / +4.0 / +2.6), so Reddit attention to a small failing company is a warning beyond the
+  gate's own. With true market-cap matching the avoid rule weakens but keeps its sign (+4.2 /
+  +2.3 / +2.2).
+- Practical rule: **gate first** (the health check), then use Reddit discussion as a tilt; treat
+  Reddit attention to a small company that fails the gate as a red flag.
+- Darlings with the corrected health (identified, 214, `darlings_crowd_full_identified.json`):
+  pass (91) 3y beat 26% vs 33% matched, loss 15% vs 9%; fail (101) loss 20% vs 10%. The darlings
+  still show no edge with or without the gate (n 46 at 3y for pass).
+
+**Timeline markers (same preset):** a red "small cap: higher ruin risk" pill on a darling that
+was in the two least-liquid quintiles at its month, a green "fundamentals talk" pill on a post
+whose own text passes discover.py's fundamentals rule, the market cap at the darling month, and
+health in the filer's currency. GLP is now ambiguous (51 GLP-1 threads dropped). Remaining noise
+in the list: QQQM (an ETF) still passes as Invesco; HBM, HIMS and SM rest on threads about other
+companies or on an ambiguous token.
+
 **Two data-layer bugs found 2026-10-27, FIXED the same day (see "After the data fix" below; every result above this point carries them):**
 1. **Split look-ahead in `adv60`** (`prices.trailing_dollar_volume` = raw close x EODHD volume,
    and the volume is split-adjusted to the download date). Measured by `scripts/volume_check.py`
