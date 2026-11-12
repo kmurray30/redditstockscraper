@@ -474,6 +474,18 @@ def examples(con, name: str, pred: str, log=print, k: int = 12) -> None:
                                   for m, t, s, a, p, sq, mq, ex, *_ in rows))
 
 
+def show(res: dict, names: list[str], log=print) -> None:
+    """Class rate and implied peer rate (class rate minus gap) per period, horizon and metric."""
+    for name in names or list(res["classes"]):
+        r = res["classes"][name]
+        log(f"{name}: {r['meaning']}")
+        for per, by_h in ((k, r[k]) for k in PERIODS):
+            for h, ms in by_h.items():
+                log(f"  {per} {h}y  " + "  ".join(
+                    f"{m} {g['rate'] * 100:4.1f}% vs peers {(g['rate'] - g['gap']) * 100:4.1f}% (n {g['n']})"
+                    for m, g in ms.items() if g.get("n")))
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--parquet", default="data/corpus/parquet")
@@ -487,7 +499,12 @@ def main(argv=None) -> int:
     p.add_argument("--boot", type=int, default=N_BOOT)
     p.add_argument("--sic", default="data/ref/sic.parquet")
     p.add_argument("--robust", action="store_true", help="round 2: the robustness checks of round 1's survivors")
+    p.add_argument("--show", nargs="*", metavar="CLASS",
+                   help="print the class and implied peer rates from a finished round-1 result (--out), then stop")
     a = p.parse_args(argv)
+    if a.show is not None:
+        show(json.loads(Path(a.out).read_text()), a.show)
+        return 0
     import duckdb
     feats = Path(a.features)
     pclass = Path(a.post_class)
