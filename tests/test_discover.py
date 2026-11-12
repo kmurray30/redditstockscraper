@@ -118,3 +118,26 @@ def test_main_runs_end_to_end_on_a_tiny_corpus(tmp_path, capsys):
     assert res["classes"]["substantive"]["D"]["3"]["beat"]["n"] == 1
     assert set(res["verdicts"]["beat"].values()) == {"NO DATA"}
     assert len(res["classes"]) == len(dv.CLASSES)
+
+
+def test_robustness_round_runs_and_drops_the_top_contributors(tmp_path):
+    cik = np.array(["a"] * 3 + ["b"] * 3 + ["c"])
+    d = np.array([1.0, 1, 1, .1, .1, .1, -.5])
+    c2, d2 = dv.drop_top(cik, d, 1, k=1)
+    assert set(c2) == {"b", "c"} and len(d2) == 4
+    w = dv.company_weighted(cik, d, 50)
+    assert abs(w["gap"] - (1 + .1 - .5) / 3) < 1e-9
+    write(tmp_path, [{"id": "a", "t": CUT - 10 * DAY}])
+    f = tmp_path / "features"
+    pq.write_table(pa.Table.from_pylist([
+        {"month": "2015-03-01", "cik": c, "years": y, "status": "complete", "ret": 0.1, "cagr": 0.1,
+         "excess": e, "max_mult": 1.5, "min_mult": 0.9, "max_dd": 0.1, "d2": None, "d5": None, "d10": None,
+         "perm_loss": False, "entry_day": 0, "end_day": 1}
+        for c, e in (("1", 0.3), ("2", -0.1), ("3", 0.05)) for y in (1, 3, 5)]), f / "labels.parquet")
+    out = tmp_path / "res.json"
+    assert dv.main(["--parquet", str(tmp_path / "corpus"), "--mentions", str(f / "mentions.parquet"),
+                    "--post-features", str(f / "pf.parquet"), "--post-class", str(f / "pc.parquet"),
+                    "--features", str(f), "--first", "2015-03-01", "--last", "2015-03-01", "--boot", "20",
+                    "--sic", str(tmp_path / "missing.parquet"), "--out", str(out), "--robust"]) == 0
+    rob = json.loads((tmp_path / "res_robust.json").read_text())
+    assert set(rob) == {n for n, _ in dv.ROBUST} and rob["broad"]["verdict"] == "FRAGILE"

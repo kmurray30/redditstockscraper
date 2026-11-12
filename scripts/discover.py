@@ -152,13 +152,16 @@ def registration_hash() -> str:
 # ------------------------------------------------------------------ the panel
 
 def build_panel(con, parquet: Path, mentions: Path, pfeat: Path, pclass: Path, features: Path,
-                first: str, last: str, log=print) -> int:
+                first: str, last: str, log=print, sic_path: Path | None = None) -> int:
     """One row per eligible company-month in [first, last] with the point-in-time features."""
     bad = ", ".join(f"'{a}'" for a in BAD_AUTHORS)
     rel = ", ".join(f"'{m}'" for m in RELIABLE)
     con.execute(f"create or replace view posts as select * from read_parquet('{parquet}/posts/*.parquet', union_by_name=true)")
     con.execute(f"create or replace view comments as select * from read_parquet('{parquet}/comments/*.parquet', union_by_name=true)")
     con.execute(f"create or replace view universe as select * from read_parquet('{features / 'universe.parquet'}')")
+    sic = Path(sic_path) if sic_path else None
+    con.execute(f"create or replace view sic as select * from read_parquet('{sic}')" if sic and sic.exists() else
+                "create or replace view sic as select null::varchar cik, null::varchar sic, null::varchar division where false")
     con.execute(f"""create or replace temp table months as
         select distinct month, epoch(cast(month as date))::bigint as cutoff from universe
         where eligible and month between '{first}' and '{last}'""")
@@ -213,7 +216,9 @@ def build_panel(con, parquet: Path, mentions: Path, pfeat: Path, pclass: Path, f
         group by mo.month, x.cik""")
     con.execute(f"""create or replace table panel as
         with u as (
-          select month, cik, ticker, size_q, price,
+          select month, cik, ticker, size_q, price, adv60,
+                 rank() over (partition by month order by adv60 desc nulls last) adv_rank,
+                 case when price < 5 then 'p<5' when price < 20 then 'p5-20' else 'p20+' end pbin,
                  case when mom is null or isnan(mom) then 0
                       else ntile(5) over (partition by month, (mom is null or isnan(mom)) order by mom) end mom_q
           from universe where eligible and month between '{first}' and '{last}'),
@@ -225,10 +230,13 @@ def build_panel(con, parquet: Path, mentions: Path, pfeat: Path, pclass: Path, f
                  coalesce(a.bull, 0) bull, coalesce(a.bear, 0) bear, coalesce(a.c24, 0) c24,
                  coalesce(p.prior_subst, 0) prior_subst
           from u left join agg a using (month, cik) left join prior p using (month, cik))
+        , k as (select j.*, coalesce(sic.division, 'none') division,
+                       coalesce(regexp_matches(sic.sic, '^(357|36|48|737)'), false) tech
+                from j left join sic using (cik))
         select j.*,
                n_subst >= 1 and percent_rank() over (partition by month, n_subst >= 1 order by n_subst) >= 0.9 subst_top,
                n_posts >= 1 and percent_rank() over (partition by month, n_posts >= 1 order by n_posts) >= 0.99 crowded
-        from j""")
+        from k j""")
     n, = con.execute("select count(*) from panel").fetchone()
     log(f"[discover] panel: {n:,} eligible company-months {first} .. {last}")
     return n
@@ -331,6 +339,95 @@ def evaluate(con, n_boot: int = N_BOOT, log=print) -> dict:
     return res
 
 
+# ------------------------------------------------------------------ round 2: robustness
+
+# Fixed 2026-11-12 after round 1 and before computing any of it: the classes that survived round
+# 1 (beat for the breadth family, loss for the small / penny family), each re-tested six ways and
+# by half-period. A finding is ROBUST only if it keeps its round-1 sign in every variant x period
+# cell and in at least 5 of the 6 half-periods; it is FRAGILE otherwise. Round 1's verdict stands
+# either way; this says whether to believe it will carry forward.
+ROBUST = [("subst_top_decile", "beat"), ("broad", "beat"), ("crowded", "beat"), ("multi_sub", "beat"),
+          ("discussed_24h", "beat"), ("broad_not_run_up", "beat"),
+          ("subst_small", "loss"), ("novel_small", "loss"), ("subst_penny", "loss")]
+MEGACAP_RANK = 100
+CELL = ("month", "size_q", "mom_q")
+VARIANTS = {  # name -> (extra cell keys, rows excluded from both sides)
+    "as round 1": ((), "false"),
+    "sector-matched": (("division",), "false"),
+    "no top-100 liquidity": ((), f"adv_rank <= {MEGACAP_RANK}"),
+    "no tech": ((), "tech"),
+    "price-matched": (("pbin",), "false"),
+}
+HALVES = {"D": [("2012-01-01", "2015-12-01"), ("2016-01-01", "2018-12-01")],
+          "C1": [("2019-01-01", "2020-12-01"), ("2021-01-01", "2022-12-01")],
+          "C2": [("2023-01-01", "2024-12-01"), ("2025-01-01", "2025-09-01")]}
+
+
+def diffs(con, pred: str, metric: str, h: int, first: str, last: str, keys=CELL, exclude: str = "false"):
+    """(cik, member minus own-cell rate) for the class members of one period and horizon."""
+    k = ", ".join(keys)
+    rows = con.execute(f"""
+        with base as (select * from ev where years = {h} and month between '{first}' and '{last}'
+                      and not ({exclude})),
+             cell as (select {k}, avg({metric}) c from base group by {k})
+        select cik, {metric} - c from base join cell using ({k}) where ({pred})""").fetchall()
+    return np.array([r[0] for r in rows]), np.array([r[1] for r in rows], float)
+
+
+def company_weighted(cik, d, n_boot):
+    if not len(d):
+        return {"n": 0}
+    u, inv = np.unique(cik, return_inverse=True)
+    means = np.bincount(inv, weights=d) / np.bincount(inv)
+    return {**cluster_gap(means, np.arange(len(u)), n_boot), "n": int(len(d))}
+
+
+def drop_top(cik, d, sign, k=5):
+    if not len(d):
+        return cik, d
+    u, inv = np.unique(cik, return_inverse=True)
+    contrib = np.bincount(inv, weights=d) * (sign or 1)
+    top = set(u[np.argsort(-contrib)[:k]])
+    keep = np.array([c not in top for c in cik])
+    return cik[keep], d[keep]
+
+
+def robustness(con, n_boot: int = N_BOOT, log=print) -> dict:
+    preds = {name: pred for name, _, pred, _ in CLASSES}
+    out = {}
+    for name, metric in ROBUST:
+        pred, r = preds[name], {}
+        for per, (first, last, h, _) in PERIODS.items():
+            for var, (extra, excl) in VARIANTS.items():
+                cik, d = diffs(con, pred, metric, h, first, last, CELL + extra, excl)
+                r.setdefault(var, {})[per] = cluster_gap(d, cik, n_boot)
+            cik, d = diffs(con, pred, metric, h, first, last)
+            r.setdefault("equal company weight", {})[per] = company_weighted(cik, d, n_boot)
+            c2, dd = drop_top(cik, d, np.sign(r["as round 1"]["D"].get("gap", 0)))
+            r.setdefault("top-5 companies left out", {})[per] = cluster_gap(dd, c2, n_boot)
+            r["companies"] = {**r.get("companies", {}), per: int(len(set(cik)))}
+            for i, (f, l) in enumerate(HALVES[per]):
+                cik, d = diffs(con, pred, metric, h, f, l)
+                r.setdefault("halves", {})[f"{per}{'ab'[i]}"] = cluster_gap(d, cik, n_boot)
+        sign = np.sign(r["as round 1"]["D"].get("gap", 0))
+        cells = [g for var, v in r.items() if var not in ("halves", "companies") for g in v.values()]
+        ok_cells = all(g.get("n") and np.sign(g["gap"]) == sign for g in cells)
+        ok_halves = sum(1 for g in r["halves"].values() if g.get("n") and np.sign(g["gap"]) == sign)
+        r["verdict"] = "ROBUST" if ok_cells and ok_halves >= 5 else "FRAGILE"
+        r["metric"], r["halves_same_sign"] = metric, ok_halves
+        out[name] = r
+        log(f"\n== {name} ({metric} gap vs matched peers, points; companies D/C1/C2 "
+            f"{r['companies']['D']}/{r['companies']['C1']}/{r['companies']['C2']})")
+        for var, v in r.items():
+            if var in ("halves", "companies", "verdict", "metric", "halves_same_sign"):
+                continue
+            log(f"  {var:26s} " + "  ".join(f"{per} {fmt(v[per])}" for per in PERIODS))
+        log("  halves                     " + "  ".join(f"{k} {g['gap'] * 100:+5.1f}" if g.get("n") else f"{k}  n/a"
+                                                    for k, g in r["halves"].items()))
+        log(f"  -> {r['verdict']} ({ok_halves}/6 halves with the sign)")
+    return out
+
+
 # ------------------------------------------------------------------ report
 
 def fmt(g: dict, scale=100) -> str:
@@ -388,6 +485,8 @@ def main(argv=None) -> int:
     p.add_argument("--last", default="2025-09-01")
     p.add_argument("--out", default="data/experiments/discover_v1.json")
     p.add_argument("--boot", type=int, default=N_BOOT)
+    p.add_argument("--sic", default="data/ref/sic.parquet")
+    p.add_argument("--robust", action="store_true", help="round 2: the robustness checks of round 1's survivors")
     a = p.parse_args(argv)
     import duckdb
     feats = Path(a.features)
@@ -397,8 +496,17 @@ def main(argv=None) -> int:
     print(f"[discover] registration {registration_hash()}: {len(CLASSES)} classes, periods "
           + ", ".join(f"{k} {v[0][:7]}..{v[1][:7]} at {v[2]}y" for k, v in PERIODS.items()), flush=True)
     con = duckdb.connect()
-    build_panel(con, Path(a.parquet), Path(a.mentions), Path(a.post_features), pclass, feats, a.first, a.last)
+    build_panel(con, Path(a.parquet), Path(a.mentions), Path(a.post_features), pclass, feats, a.first, a.last,
+                sic_path=Path(a.sic))
     build_outcomes(con, feats)
+    if a.robust:
+        rob = robustness(con, a.boot)
+        out = Path(a.out).with_name(Path(a.out).stem + "_robust.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(rob, default=str, indent=1))
+        print("\n[discover] robustness: " + ", ".join(f"{k} {v['verdict']}" for k, v in rob.items()), flush=True)
+        print(f"[discover] wrote {out}", flush=True)
+        return 0
     for per, (first, last, h, _) in PERIODS.items():
         n, base = con.execute(f"select count(*), avg(beat) from evc where years = {h} and month between "
                               f"'{first}' and '{last}'").fetchone()
