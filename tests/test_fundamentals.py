@@ -160,3 +160,29 @@ def test_panel_rows_are_point_in_time_with_market_cap(tmp_path):
     assert rows["2024-05-10"]["revenue_ttm"] == 240e6
     assert rows["2024-06-01"]["revenue_ttm"] == 260e6 and rows["2024-06-01"]["mcap"] == 4.8e9
     assert {r["health"] for r in rows.values()} <= {"pass", "fail", "unknown"}
+
+
+def test_fixes_found_by_the_spot_checks():
+    import copy
+    # net income and other extra measures read from the company's own namespace, not "dei"
+    g = copy.deepcopy(FACTS)
+    g["facts"]["us-gaap"]["NetIncomeLoss"] = {"units": {"USD": [f("2023-01-01", "2023-12-31", 30e6, "2024-02-28")]}}
+    m = fd.metrics(g, "2024-03-01")
+    assert m["net_income_ttm"] == 30e6 and m["basis"] == "us-gaap"
+    # no cover-page shares (dimensional only in the bulk file): the weighted average stands in
+    del g["facts"]["dei"]
+    g["facts"]["us-gaap"]["WeightedAverageNumberOfSharesOutstandingBasic"] = {"units": {"shares": [
+        f("2023-10-01", "2023-12-31", 390e6, "2024-02-28"), f("2022-10-01", "2022-12-31", 380e6, "2023-02-28")]}}
+    m = fd.metrics(g, "2024-03-01")
+    assert m["shares"] == 390e6 and abs(m["dilution"] - (390 / 380 - 1)) < 1e-9
+    # a share count older than SHARES_MAX_AGE is not used
+    assert fd.shares_at(g, "2025-06-01") is None
+    # a balance sheet from years ago is unknown, not health
+    m = fd.metrics(FACTS, "2026-06-01")
+    assert not m["known"] and "balance sheet" in m["why"] and fd.gate(m)[0] == "unknown"
+    # currency by the latest filing year first: Nebius moved from roubles to dollars
+    nbis = {"facts": {"us-gaap": {"Revenues": {"units": {
+        "RUB": [f("2019-01-01", "2019-12-31", 1, "2020-03-01")] * 9,
+        "USD": [f("2024-01-01", "2024-12-31", 1, "2025-03-01")] * 2}}}}}
+    assert fd.profile_for(nbis) == (fd.GAAP, "USD")
+    assert fd.describe(dict(m, known=True, runway_years=math.inf, cash=1e9, debt=0, currency="EUR")).startswith("cash EUR")

@@ -143,6 +143,30 @@ def ttm(facts: dict, concepts, asof: str, ns: str = "us-gaap", unit: str = "USD"
 STALE_DAYS = 460   # a trailing figure whose period ended this long before the date is too old to use
 
 
+SHARES_MAX_AGE = 400   # days: an older share count is not "shares outstanding now"
+
+
+def shares_at(facts: dict, asof: str, before: str | None = None) -> tuple[float, str] | None:
+    """Shares outstanding as known on ``asof`` (dated on or before ``before`` when given): the
+    cover-page count (classes summed), else the income statement's weighted average of basic
+    shares, else the balance-sheet count. The bulk file leaves out facts reported by share
+    class, so for Lyft and Pinterest the cover page is missing or partial for years; the weighted
+    average is reported for all classes together (found 2026-11-12)."""
+    ref = _d(before or asof)
+    cands = [instant(facts, ("EntityCommonStockSharesOutstanding",), asof, "dei", "shares", before=before,
+                     sum_classes=True)]
+    rows = [r for r in _facts(facts, "WeightedAverageNumberOfSharesOutstandingBasic", "us-gaap", "shares", asof)
+            if r.get("start") and (before is None or r["end"] <= before) and r["val"] > 0]
+    if rows:
+        best = max(rows, key=lambda r: (r["end"], r["start"], r.get("filed", "")))
+        cands.append((float(best["val"]), best["end"]))
+    cands.append(instant(facts, ("CommonStockSharesOutstanding",), asof, "us-gaap", "shares", before=before))
+    for c in cands:
+        if c and c[0] > 0 and (ref - _d(c[1])).days <= SHARES_MAX_AGE:
+            return c
+    return None
+
+
 def split_ratio(splits: list[tuple[str, float]], after: str, upto: str) -> float:
     r = 1.0
     for d, ratio in splits or []:
@@ -183,16 +207,20 @@ def profile_for(facts: dict | None) -> tuple[dict, str]:
     with the most revenue, cash and operating-cash-flow facts. ASML files US GAAP in euros, SAP
     IFRS in euros, TSM IFRS in Taiwan dollars (plus a few convenience-translation dollar facts)."""
     f = (facts or {}).get("facts") or {}
-    counts: dict[tuple[int, str], int] = {}
+    score: dict[tuple[int, str], list] = {}
     for i, pr in enumerate((GAAP, IFRS)):
         block = f.get(pr["ns"]) or {}
         for c in (*pr["revenue"], *pr["cash"], *pr["ocf"]):
             for u, rows in ((block.get(c) or {}).get("units") or {}).items():
-                if "/" not in u and u not in ("shares", "pure"):
-                    counts[(i, u)] = counts.get((i, u), 0) + len(rows)
-    if not counts:
+                if "/" not in u and u not in ("shares", "pure") and rows:
+                    sc = score.setdefault((i, u), ["", 0])
+                    sc[0] = max(sc[0], max(r.get("filed", "") for r in rows))[:4]   # the latest year it filed in
+                    sc[1] += len(rows)
+    if not score:
         return GAAP, "USD"
-    i, u = max(counts, key=counts.get)
+    # the most recent filing year first (Nebius moved from roubles to dollars), then the most facts
+    # (TSM files a few convenience dollar figures next to its Taiwan-dollar statements)
+    i, u = max(score, key=lambda k: tuple(score[k]))
     return (GAAP, IFRS)[i], u
 
 
@@ -215,19 +243,11 @@ def metrics(facts: dict | None, asof: str, splits: list[tuple[str, float]] | Non
     rev = ttm(facts, pr["revenue"], asof, ns, unit)
     a = _d(asof)
     rev_prev = ttm(facts, pr["revenue"], (a - timedelta(days=365)).isoformat(), ns, unit)
-    sh = None
-    for ns, c in SHARES:
-        sh = instant(facts, (c,), asof, ns=ns, unit="shares", sum_classes=ns == "dei")
-        if sh is not None:
-            break
-    sh_prev = None
-    if sh is not None:
-        cut = (_d(sh[1]) - timedelta(days=330)).isoformat()
-        for ns, c in SHARES:
-            sh_prev = instant(facts, (c,), asof, ns=ns, unit="shares", before=cut, sum_classes=ns == "dei")
-            if sh_prev is not None:
-                break
-    m = {"known": cash is not None and ocf is not None, "asof": asof,
+    sh = shares_at(facts, asof)
+    sh_prev = shares_at(facts, asof, before=(_d(sh[1]) - timedelta(days=330)).isoformat()) if sh else None
+    stale = [k for k, v in (("balance sheet", cash), ("cash flow", ocf))
+             if v is not None and (a - _d(v[1])).days > STALE_DAYS]
+    m = {"known": cash is not None and ocf is not None and not stale, "asof": asof,
          "cash": (cash[0] if cash else 0.0) + (sti[0] if sti else 0.0) if cash else None,
          "cash_date": cash[1] if cash else None, "debt": debt,
          "ocf_ttm": ocf[0] if ocf else None, "revenue_ttm": rev[0] if rev else None,
@@ -242,7 +262,8 @@ def metrics(facts: dict | None, asof: str, splits: list[tuple[str, float]] | Non
         v = instant(facts, pr[k], asof, ns, unit)
         m[k] = v[0] if v else None
     if not m["known"]:
-        m["why"] = "no cash or operating cash flow filed by then"
+        m["why"] = (f"no {' or '.join(stale)} filed in the {STALE_DAYS} days before" if stale
+                    else "no cash or operating cash flow filed by then")
         return m
     m["runway_years"] = math.inf if m["ocf_ttm"] >= 0 else m["cash"] / -m["ocf_ttm"]
     fresh = rev is not None and rev_prev is not None and (a - _d(rev[1])).days <= STALE_DAYS and rev[1] != rev_prev[1]
@@ -281,7 +302,8 @@ def describe(m: dict) -> str:
     if not m.get("known"):
         return m.get("why") or "unknown"
     rw = "cash-flow positive" if math.isinf(m["runway_years"]) else f"runway {m['runway_years']:.1f}y"
-    parts = [f"cash ${m['cash'] / 1e6:,.0f}M", f"debt ${m['debt'] / 1e6:,.0f}M", rw]
+    cur = "$" if m.get("currency", "USD") == "USD" else f"{m['currency']} "
+    parts = [f"cash {cur}{m['cash'] / 1e6:,.0f}M", f"debt {cur}{m['debt'] / 1e6:,.0f}M", rw]
     if m.get("revenue_growth") is not None:
         parts.append(f"revenue {m['revenue_growth']:+.0%}")
     if m.get("dilution") is not None:
@@ -577,7 +599,7 @@ def panel_summary(path: Path, log=print) -> None:
 
 SPOT = [("LYFT", "2025-03-01"), ("PINS", "2026-03-01"), ("ASML", "2026-01-01"), ("NVDA", "2024-12-01"),
         ("AAPL", "2020-10-01"), ("SAP", "2026-02-01"), ("TSM", "2025-01-01"), ("JPM", "2025-01-01"),
-        ("RKLB", "2024-04-01"), ("GME", "2021-01-01")]
+        ("RKLB", "2024-04-01"), ("GME", "2021-01-01"), ("NBIS", "2026-05-01"), ("JD", "2025-10-01")]
 
 
 def spot_check(panel: Path, universe: Path, log=print) -> None:
